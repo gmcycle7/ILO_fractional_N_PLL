@@ -1,0 +1,239 @@
+// =============================================================================
+// dtc_nonideal_model.va
+// -----------------------------------------------------------------------------
+// BEHAVIORAL MODEL — non-ideal digital-to-time converter (DTC) with optional
+// per-tap skew, for the ILO fractional-N PLL reverse-edge-injection study.
+//
+//   * Math contract : MODEL_SPEC.md (repo root) — sections 10 (items 1-7,10),
+//     11; ASSUMPTIONS.md B1, B2, C1, C2, C6. Any numerical deviation from
+//     MODEL_SPEC.md is a bug in THIS file.
+//   * Status        : NOT validated in Spectre (or any other simulator).
+//     No Verilog-A simulator was available in the development environment.
+//
+// FUNCTION:
+//   Each rising edge on trig_in is reproduced on trig_out after
+//
+//     t_d(c, j) = offset_s                                   (sec.10 item 5)
+//               + gain * c * lsb_s                           (sec.10 item 3/4)
+//               + inl_sin_amp_s * sin(2*pi*c/64)             (sec.10 item 6)
+//               + p2_s * (c/63)^2 + p3_s * (c/63)^3          (sec.10 item 7)
+//               + tap_j                (per-tap static skew,  sec.10 item 1;
+//                                       only when use_tap = 1)
+//
+//   with c = DTC code (0..63) sampled from code_in at the trigger edge and
+//   j = tap select (0..7) sampled from tap_sel_in.
+//
+//   UNIT CONVENTION: MODEL_SPEC.md sec.10 states the non-idealities in
+//   CYCLES; a physical delay line works in SECONDS. This model is
+//   seconds-domain: cycles = seconds / T_vco. E.g. the canonical checks
+//   (spec sec.10, Tests 6-7, T_vco = 80 ps):
+//     1 deg tap mismatch  = 80 ps/360 = 222.22 fs  -> tap_j = 222.22e-15
+//     1 % gain error over the 20 ps range -> gain = 1.01, max error 200 fs
+//
+//   NORMALIZED vs FIXED-TIME LSB (spec sec.11 / ASSUMPTIONS.md B2):
+//     fixed-time  : lsb_s = 312.5e-15 (default; the 12.5 GHz value)
+//     normalized  : set lsb_s = T_vco/256 for the simulated f_vco
+//                   (83.333 ps -> 325.521 fs; 76.923 ps -> 300.481 fs)
+//
+//   NOT modeled here (Python golden model only): user LUT INL (sec.10 item 8;
+//   needs a 64-entry array parameter — see portability note below), frozen
+//   random DNL (item 9; needs the spec sec.12 mulberry32 PRNG, which cannot
+//   be reproduced bit-exactly in Verilog-A), and all random noise items.
+//
+// WHY tap0..tap7 ARE EIGHT SCALAR PARAMETERS (flattened "array"):
+//   Verilog-AMS 2.x allows array-valued parameters, but tool support is
+//   uneven: older Spectre versions reject them in Verilog-A (analog-only)
+//   modules, AMS Designer and Questa-ADMS differ on override syntax from
+//   netlists (Spectre netlist array literals vs. SPICE decks), and array
+//   PORTS are even less portable. Eight scalars are ugly but netlist-safe
+//   everywhere. Same reason all ports here are scalar electrical.
+//
+// CODE INPUT AS VOLTAGE (and the integer-bus alternative):
+//   code_in / tap_sel_in carry the code as v = code * v_per_code (1 V/LSB
+//   default), matching the scheduler outputs. A 6-bit digital bus would be
+//   the natural RTL hookup, but digital ports require a Verilog-AMS (mixed)
+//   module and an AMS-capable license/flow; a pure Verilog-A module with
+//   scalar electrical ports loads in any analog-only Spectre run. To drive
+//   from real RTL, convert the bus with an electrical DAC bridge or a
+//   `wreal`-to-electrical adapter (both flows sketched in VERILOGA_USAGE.md).
+// -----------------------------------------------------------------------------
+`include "disciplines.vams"
+`include "constants.vams"
+
+module dtc_nonideal_model(trig_in, code_in, tap_sel_in, trig_out);
+
+  // ---------------------------------------------------------------------------
+  // Ports (scalar electrical only — see header)
+  // ---------------------------------------------------------------------------
+  input  trig_in;     // input edge; BOTH edges are propagated so the output
+                      // pulse width follows the input (delayed by t_d captured
+                      // at the RISING edge — see notes in the fall event)
+  input  code_in;     // DTC code c in {0..63} as voltage (code * v_per_code),
+                      // sampled at the rising trig_in edge
+  input  tap_sel_in;  // tap select j in {0..7} as voltage; only used when
+                      // use_tap = 1 (tie to ground otherwise)
+  output trig_out;    // delayed edge/pulse, vlo/vhi levels
+
+  electrical trig_in, code_in, tap_sel_in, trig_out;
+
+  // ---------------------------------------------------------------------------
+  // Parameters — units/defaults per MODEL_SPEC.md sec.10-11 / ASSUMPTIONS.md
+  // ---------------------------------------------------------------------------
+  parameter real    lsb_s         = 312.5e-15 from (0:inf);
+                    // [s] DTC LSB. Default 312.5 fs = fixed-time default
+                    // (ASSUMPTIONS.md B2; = T_vco/256 at 12.5 GHz). For
+                    // normalized mode set to T_vco/256 of the actual f_vco
+                    // (spec sec.11 table).
+  parameter real    gain          = 1.0       from (0:inf);
+                    // [-] DTC gain factor g (spec sec.10 items 3/4): the
+                    // code-proportional delay is gain*c*lsb_s. 1.01 models
+                    // the canonical +1 % gain error (Test 7: max 200 fs
+                    // error over the 20 ps full range at 80 ps T_vco).
+  parameter real    offset_s      = 0.0;
+                    // [s] static delay offset (spec sec.10 item 5). Also use
+                    // this for route skew route_FB/route_INJ (item 10) when
+                    // one DTC instance terminates a routed branch (C6).
+  parameter real    inl_sin_amp_s = 0.0;
+                    // [s] sinusoidal INL amplitude: adds
+                    // inl_sin_amp_s*sin(2*pi*c/64) (spec sec.10 item 6,
+                    // stated there in cycles; here seconds = cycles*T_vco)
+  parameter real    p2_s          = 0.0;
+                    // [s] quadratic INL coefficient: p2_s*(c/63)^2
+                    // (spec sec.10 item 7, seconds-domain)
+  parameter real    p3_s          = 0.0;
+                    // [s] cubic INL coefficient: p3_s*(c/63)^3
+                    // (spec sec.10 item 7, seconds-domain)
+  parameter integer use_tap       = 0         from [0:1];
+                    // 1 = add per-tap skew tap_j selected by tap_sel_in
+                    // (spec sec.10 item 1, ASSUMPTIONS.md C1); 0 = ignore
+                    // tap_sel_in entirely [default]
+  parameter real    tap0 = 0.0;  // [s] static skew of tap 0 (nominal 0 deg)
+  parameter real    tap1 = 0.0;  // [s] static skew of tap 1 (nominal 45 deg)
+  parameter real    tap2 = 0.0;  // [s] static skew of tap 2 (nominal 90 deg)
+  parameter real    tap3 = 0.0;  // [s] static skew of tap 3 (nominal 135 deg)
+  parameter real    tap4 = 0.0;  // [s] static skew of tap 4 (nominal 180 deg)
+  parameter real    tap5 = 0.0;  // [s] static skew of tap 5 (nominal 225 deg)
+  parameter real    tap6 = 0.0;  // [s] static skew of tap 6 (nominal 270 deg)
+  parameter real    tap7 = 0.0;  // [s] static skew of tap 7 (nominal 315 deg)
+                    // Canonical value (Test 6): "1 deg all taps" at
+                    // T_vco = 80 ps -> 222.22e-15 on every tapN.
+  parameter integer n_codes       = 64        from [2:4096];
+                    // [-] number of DTC codes (= 2^b_dtc; default 64,
+                    // ASSUMPTIONS.md B1: range covers T_vco/4 = 64 LSB)
+  parameter real    vth           = 0.5;
+                    // [V] trig_in edge threshold
+  parameter real    v_per_code    = 1.0       from (0:inf);
+                    // [V/LSB] voltage per code unit on code_in / tap_sel_in
+  parameter real    vhi           = 1.0;
+                    // [V] output high level
+  parameter real    vlo           = 0.0;
+                    // [V] output low level
+  parameter real    t_rise        = 1.0e-12   from (0:inf);
+                    // [s] output rise/fall time (transition())
+  parameter real    t_d_min       = 1.0e-15   from (0:inf);
+                    // [s] floor applied to the total delay: transition()
+                    // cannot schedule into the past, so the model clamps
+                    // t_d to at least t_d_min (a negative offset_s larger
+                    // than the code delay is unphysical for a delay line)
+
+  // ---------------------------------------------------------------------------
+  // Internal state
+  // ---------------------------------------------------------------------------
+  real c_smp;      // sampled+rounded DTC code (0..n_codes-1)
+  real j_smp;      // sampled+rounded tap select (0..7)
+  real tap_d;      // selected tap skew [s]
+  real t_d;        // total delay captured at the rising edge [s]
+  real out_state;  // 0/1 pulse state driven through transition()
+
+  analog begin
+
+    // -------------------------------------------------------------------------
+    // --- SIMULATOR-DEPENDENT ---  (initial_step)
+    // -------------------------------------------------------------------------
+    @(initial_step) begin
+      out_state = 0.0;
+      t_d       = offset_s < t_d_min ? t_d_min : offset_s; // sane pre-edge value
+    end
+
+    // -------------------------------------------------------------------------
+    // --- SIMULATOR-DEPENDENT ---  (rising edge: sample code, compute delay)
+    // cross() interpolates the edge time within solver tolerance. The code
+    // voltage is sampled AT the trigger edge; upstream transition() ramps
+    // mean the code must have settled before the edge arrives — allow at
+    // least the scheduler's t_tran of setup time in the testbench (see
+    // VERILOGA_USAGE.md, "event scheduling" caveat).
+    // -------------------------------------------------------------------------
+    @(cross(V(trig_in) - vth, +1)) begin
+      // round-to-nearest recovers the integer code from the analog level
+      c_smp = floor(V(code_in) / v_per_code + 0.5);
+      if (c_smp < 0.0)           c_smp = 0.0;            // clamp: guard only,
+      if (c_smp > n_codes - 1.0) c_smp = n_codes - 1.0;  // codes are 0..63
+
+      tap_d = 0.0;
+      if (use_tap == 1) begin
+        j_smp = floor(V(tap_sel_in) / v_per_code + 0.5);
+        if (j_smp < 0.0) j_smp = 0.0;
+        if (j_smp > 7.0) j_smp = 7.0;
+        // flattened tap "array" lookup (see header for why not a real array)
+        if      (j_smp < 0.5) tap_d = tap0;
+        else if (j_smp < 1.5) tap_d = tap1;
+        else if (j_smp < 2.5) tap_d = tap2;
+        else if (j_smp < 3.5) tap_d = tap3;
+        else if (j_smp < 4.5) tap_d = tap4;
+        else if (j_smp < 5.5) tap_d = tap5;
+        else if (j_smp < 6.5) tap_d = tap6;
+        else                  tap_d = tap7;
+      end
+
+      // ---- total delay (header equation; spec sec.10 items 1,3-7,10) -------
+      t_d = offset_s
+          + gain * c_smp * lsb_s
+          + inl_sin_amp_s * sin(`M_TWO_PI * c_smp / n_codes)
+          + p2_s * pow(c_smp / (n_codes - 1.0), 2.0)
+          + p3_s * pow(c_smp / (n_codes - 1.0), 3.0)
+          + tap_d;
+      if (t_d < t_d_min) t_d = t_d_min;   // causality clamp (see t_d_min)
+
+      out_state = 1.0;                    // schedule delayed rising edge
+    end
+
+    // -------------------------------------------------------------------------
+    // --- SIMULATOR-DEPENDENT ---  (falling edge: propagate with SAME delay)
+    // The fall uses the t_d captured at the preceding rise, so the output
+    // pulse width equals the input pulse width. CAVEAT: if the code changes
+    // between rise and fall (it should not — codes update once per reference
+    // cycle, pulses are much shorter), the pending fall would use the OLD
+    // delay; and if a new rise occurs within t_d of the previous fall, the
+    // transition() filter collapses the overlapping schedule in a
+    // simulator-dependent way (the LRM lets tools drop pending transitions).
+    // Keep pulses shorter than T_ref - max(t_d): one pulse per reference
+    // cycle (ASSUMPTIONS.md A4) satisfies this comfortably.
+    // -------------------------------------------------------------------------
+    @(cross(V(trig_in) - vth, -1)) begin
+      out_state = 0.0;
+    end
+
+    // -------------------------------------------------------------------------
+    // --- SIMULATOR-DEPENDENT ---  (transition() with a VARIABLE delay)
+    // The delay argument t_d changes between events. The LRM allows this
+    // (the delay is evaluated when the input expression changes), but two
+    // portability traps exist:
+    //   1. Some tools latch the delay only at the moment the input toggles —
+    //      exactly how this model uses it — while others re-evaluate on any
+    //      argument change; keeping t_d piecewise constant (updated only
+    //      inside the same events that toggle out_state) makes both
+    //      interpretations agree.
+    //   2. If a NEW toggle is scheduled with a SHORTER delay than a pending
+    //      one, the pending transition may be preempted (tool-specific).
+    //      With one pulse per reference cycle and t_d <= ~25 ps << T_ref =
+    //      250 ps this cannot happen in normal operation.
+    // absdelay() ALTERNATIVE: absdelay(V(trig_in), td) is the cleaner
+    // linear-delay primitive but requires a CONSTANT delay — it cannot model
+    // a code-dependent DTC, which is the entire point of this block. It is
+    // therefore not used.
+    // -------------------------------------------------------------------------
+    V(trig_out) <+ transition((out_state > 0.5) ? vhi : vlo,
+                              t_d, t_rise, t_rise);
+  end
+
+endmodule

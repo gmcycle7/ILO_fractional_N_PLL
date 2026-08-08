@@ -1,0 +1,277 @@
+// =============================================================================
+// reverse_injection_scheduler.va
+// -----------------------------------------------------------------------------
+// BEHAVIORAL MODEL — reverse (injection-path) phase scheduler for the
+// ILO fractional-N PLL reverse-edge-injection study.
+//
+//   * Math contract : MODEL_SPEC.md (repo root) — sections 5, 6, 7, 8, 13.
+//     Any numerical deviation from MODEL_SPEC.md is a bug in THIS file.
+//   * Status        : NOT validated in Spectre (or any other simulator).
+//     No Verilog-A simulator was available in the development environment;
+//     the code targets Verilog-AMS 2.4 but has never been elaborated.
+//   * Golden model  : model/python (executable reference).
+//
+// FUNCTION:
+//   On every rising reference edge k the module produces the injection tap
+//   select j_INJ[k] in {0..7} and injection DTC code c_INJ[k] in {0..63}.
+//   Two source modes (parameter shared_mode, spec sec.7):
+//
+//   shared_mode = 1  (Mode D, DEFAULT / recommended, "quantize once +
+//                     modular reverse"):
+//        R_FB is taken from the input port r_fb_in (drive it from
+//        fractional_phase_scheduler's r_fb_out), then
+//            R_INJ[k] = (r_zero - R_FB[k]) mod 256          [EXACT, sec.7]
+//        Identity: (R_FB + R_INJ) mod 256 = r_zero, so the digital pair
+//        error is exactly 0 for every k and every quantizer mode.
+//
+//   shared_mode = 0  (Mode A, independent ideal-target re-quantization):
+//        The module recomputes the ideal trajectory itself:
+//            x_nominal[k] = wrap01(s0 + k*N)                       (sec.3)
+//            u_INJ_ideal[k] = wrap01(z0 - x_nominal[k])            (sec.5.2)
+//            R_INJ[k] = Q_INJ(G * u_INJ_ideal[k]) mod 256          (sec.7)
+//        with its OWN quantizer instance (independent ef1 error state).
+//        Cycle-by-cycle pair error is then generally nonzero (spec Test 13).
+//
+//   TAP/DTC DECODE (parameter map_mode, spec sec.8):
+//        0 = naive floor  : j = floor(R_INJ/32), c = R_INJ mod 32
+//                           (uses only the lower half of the DTC range)
+//        1 = nearest phase: argmin over j in {0..7}, c in {0..63} of
+//                           |wrapCycles(u_target - (j/8 + c/256))|,
+//                           tie-break: smaller c first, then smaller j.
+//        (The "calibrated joint optimization" mapping of sec.8 needs the
+//        measured analog DTC/tap curves and lives in the Python model only.)
+//
+//   LATENCY (parameter lat_cycles, spec sec.13):
+//        The computed R_INJ stream is pushed through a small shift register
+//        of reals; the value applied at edge k was computed at edge
+//        k - lat_cycles. With look_ahead = 1 (independent mode only) the
+//        command computed at edge k uses the state of index k + lat_cycles,
+//        so after the pipeline delay it is CORRECT when applied
+//        ("look-ahead", spec sec.13). look_ahead = 0 reproduces the
+//        canonical latency BUG (alpha=0.13, L=1 -> 46.8 deg error, Test 5).
+//        In shared mode look-ahead must happen in the FEEDBACK scheduler
+//        (it owns the state); this module then only models the transport
+//        delay — see VERILOGA_USAGE.md.
+//
+// PORT ENCODING: all ports scalar electrical, v = code * v_per_code
+//   (1 V per LSB by default). Array/bus ports deliberately avoided —
+//   portability, see VERILOGA_USAGE.md.
+// -----------------------------------------------------------------------------
+`include "disciplines.vams"
+`include "constants.vams"
+
+module reverse_injection_scheduler(ref_clk, r_fb_in,
+                                   j_inj_out, c_inj_out,
+                                   r_inj_out, u_inj_out);
+
+  // ---------------------------------------------------------------------------
+  // Ports
+  // ---------------------------------------------------------------------------
+  input  ref_clk;    // reference clock, rising edge = compute/apply event
+  input  r_fb_in;    // R_FB[k] as voltage (code * v_per_code), only read when
+                     // shared_mode = 1. Tie to ground when shared_mode = 0.
+  output j_inj_out;  // injection tap select j_INJ[k] in {0..7}
+  output c_inj_out;  // injection DTC code  c_INJ[k] in {0..63}
+  output r_inj_out;  // DEBUG: applied R_INJ[k] in {0..255}
+  output u_inj_out;  // DEBUG: u_INJ_digital[k] = (32*j + c)/256 mod 1 [cycles]
+
+  electrical ref_clk, r_fb_in, j_inj_out, c_inj_out, r_inj_out, u_inj_out;
+
+  // ---------------------------------------------------------------------------
+  // Parameters — units/defaults per MODEL_SPEC.md sec.1 / ASSUMPTIONS.md
+  // ---------------------------------------------------------------------------
+  parameter integer r_zero      = 0       from [0:255];
+                    // [LSB] digital zero-offset code R_zero of the modular
+                    // reverse, default 0 (spec sec.1, ASSUMPTIONS.md A6)
+  parameter integer shared_mode = 1       from [0:1];
+                    // 1 = Mode D shared-code (input r_fb_in)  [default]
+                    // 0 = Mode A independent re-quantization
+  parameter integer map_mode    = 0       from [0:1];
+                    // tap/DTC mapping (spec sec.8): 0 = naive floor,
+                    // 1 = nearest-phase (ideal params, tie-break small c
+                    // then small j). Default 0 = naive.
+  parameter integer lat_cycles  = 0       from [0:8];
+                    // [ref cycles] integer pipeline latency L
+                    // (ASSUMPTIONS.md B3: L in {0..8})
+  parameter integer look_ahead  = 1       from [0:1];
+                    // 1 = command computed from state k+L (correct, sec.13)
+                    // 0 = computed from state k (BUG mode, Test 5: 46.8 deg
+                    //     at alpha=0.13, L=1). Only meaningful when
+                    //     shared_mode = 0 (this block owns the state then).
+  // ---- independent-mode (shared_mode = 0) trajectory parameters -------------
+  parameter integer n_int_base  = 3       from [1:15];
+                    // [-] integer part of N (spec sec.1)
+  parameter real    alpha       = 0.13    from [0.0:1.0);
+                    // [cycles/ref-edge] fractional part of N (spec sec.1)
+  parameter real    s0          = 0.0;
+                    // [cycles] initial absolute phase coordinate (spec sec.1)
+  parameter real    z0          = 0.0;
+                    // [cycles] desired injection zero-crossing phase z0
+                    // (spec sec.1 / sec.5, ASSUMPTIONS.md A5)
+  parameter integer b_dtc       = 6       from [1:12];
+                    // [bits] DTC bits, default 6 -> G = 4*2^6 = 256
+  parameter integer q_mode      = 1       from [0:2];
+                    // independent-mode quantizer Q_INJ (spec sec.6):
+                    // 0 = floor, 1 = nearest (half-up), 2 = ef1.
+                    // Independent INSTANCE: its ef1 state e_q is private to
+                    // this module (spec sec.7, Mode A/B distinction).
+  // ---- electrical encoding ---------------------------------------------------
+  parameter real    vth         = 0.5;
+                    // [V] ref_clk rising-edge threshold
+  parameter real    v_per_code  = 1.0     from (0:inf);
+                    // [V/LSB] voltage per code unit on r_fb_in and outputs
+  parameter real    t_tran      = 1.0e-12 from (0:inf);
+                    // [s] transition() rise/fall time on outputs
+
+  // ---------------------------------------------------------------------------
+  // Internal state (persists across events — "analog memory", see notes)
+  // ---------------------------------------------------------------------------
+  real    g_units;         // G = 4*2^b_dtc
+  real    n_frac;          // N = n_int_base + alpha
+  real    k_real;          // edge counter as real (no 32-bit overflow)
+  real    e_q;             // independent-mode ef1 error state (private)
+  real    u_q, v_q, y_q;   // quantizer scratch
+  real    r_now;           // R_INJ computed THIS edge (before latency)
+  real    r_apply;         // R_INJ applied THIS edge (after latency)
+  real    r_fb_smp;        // sampled/rounded R_FB code from r_fb_in
+  real    s_nom, x_nom, u_ideal, k_eff;
+  real    pipe[0:8];       // latency shift register of reals (max L = 8)
+  integer i;               // loop index
+  integer jj, cc;          // decode loop indices
+  integer j_best, c_best;  // nearest-phase argmin result
+  real    err, best_err, u_target, u_cand, d_wrap;
+  real    j_val, c_val, u_dig;
+
+  analog begin
+
+    // -------------------------------------------------------------------------
+    // --- SIMULATOR-DEPENDENT ---  (initial_step: state + pipe initialization)
+    // Array variables in the analog block keep state between events (standard
+    // Verilog-A), but their INITIAL value before initial_step and their
+    // behavior across save/restore or multi-analysis runs differ between
+    // tools. Everything is therefore explicitly initialized here. The first
+    // lat_cycles outputs after t=0 are start-up values: the pipe is pre-
+    // filled with (r_zero - 0) mod 256, i.e. the command for R_FB = 0.
+    // -------------------------------------------------------------------------
+    @(initial_step) begin
+      g_units = 4.0 * pow(2.0, b_dtc);
+      n_frac  = n_int_base + alpha;
+      k_real  = 0.0;
+      e_q     = 0.0;                       // ef1 state init (spec sec.6)
+      for (i = 0; i <= 8; i = i + 1) begin
+        pipe[i] = r_zero - g_units * floor(r_zero / g_units); // startup fill
+      end
+      r_apply = pipe[0];
+      j_val   = 0.0;
+      c_val   = 0.0;
+      u_dig   = 0.0;
+    end
+
+    // -------------------------------------------------------------------------
+    // --- SIMULATOR-DEPENDENT ---  (edge event: sample input, clock the pipe)
+    // Same caveats as in fractional_phase_scheduler.va:
+    //  * cross() locates the edge by interpolation within solver tolerance;
+    //  * same-timestep event ordering ACROSS modules is not LRM-guaranteed.
+    //    This module samples r_fb_in on the SAME reference edge on which the
+    //    feedback scheduler updates it. Because both modules' outputs pass
+    //    through transition() (finite ramp), the value seen here is the
+    //    PREVIOUS settled value if this module's cross fires first — i.e. a
+    //    potential one-edge skew, exactly the classic clock-domain race of
+    //    RTL. Robust hookup: delay ref_clk to THIS block by a fraction of
+    //    T_ref (e.g. T_ref/4) in the testbench so r_fb_in has settled.
+    //    Documented in VERILOGA_USAGE.md ("event scheduling" caveat).
+    // -------------------------------------------------------------------------
+    @(cross(V(ref_clk) - vth, +1)) begin
+
+      // ---- 1) produce R_INJ for this edge's computation slot ---------------
+      if (shared_mode == 1) begin
+        // Mode D: shared code, modular reverse (spec sec.7)  [EXACT]
+        // round-to-nearest recovers the integer code from the analog voltage
+        // (transition() ramps + solver noise make it not exactly integer).
+        r_fb_smp = floor(V(r_fb_in) / v_per_code + 0.5);
+        // clamp to legal range {0..G-1} — a diagnostic guard, not spec math
+        if (r_fb_smp < 0.0)           r_fb_smp = 0.0;
+        if (r_fb_smp > g_units - 1.0) r_fb_smp = g_units - 1.0;
+        // R_INJ = (r_zero - R_FB) mod G ; real-arithmetic mod (a-b*floor(a/b))
+        r_now = (r_zero - r_fb_smp)
+                - g_units * floor((r_zero - r_fb_smp) / g_units);
+      end
+      else begin
+        // Mode A: independent re-quantization of the ideal reverse target.
+        // look_ahead selects state index k (bug) vs k+L (correct), sec.13.
+        if (look_ahead == 1) k_eff = k_real + lat_cycles;
+        else                 k_eff = k_real;
+        s_nom   = s0 + k_eff * n_frac;             // multiplicative form, sec.3
+        x_nom   = s_nom - floor(s_nom);            // wrap01
+        u_ideal = (z0 - x_nom) - floor(z0 - x_nom);// wrap01(z0 - x_nominal)
+        u_q     = g_units * u_ideal;               // ideal fine target [LSB]
+        if      (q_mode == 0) y_q = floor(u_q);        // floor
+        else if (q_mode == 1) y_q = floor(u_q + 0.5);  // nearest half-up
+        else begin                                     // ef1, private state
+          v_q = u_q + e_q;
+          y_q = floor(v_q);
+          e_q = v_q - y_q;
+        end
+        r_now = y_q - g_units * floor(y_q / g_units);  // mod G (sec.7 Mode A)
+      end
+
+      // ---- 2) latency shift register (spec sec.13) --------------------------
+      // pipe[0] = newest (computed this edge); pipe[d] = computed d edges ago.
+      // Plain for-loop shift; 9 entries max, negligible cost at f_ref rate.
+      for (i = 8; i >= 1; i = i - 1) pipe[i] = pipe[i-1];
+      pipe[0] = r_now;
+      r_apply = pipe[lat_cycles];                 // command APPLIED this edge
+
+      // ---- 3) tap + DTC decode of the applied code (spec sec.8) -------------
+      if (map_mode == 0) begin
+        // naive floor: j = floor(R_INJ/32), c = R_INJ mod 32
+        j_val = floor(r_apply / (g_units / 8.0));
+        c_val = r_apply - (g_units / 8.0) * floor(r_apply / (g_units / 8.0));
+      end
+      else begin
+        // nearest phase over the redundant (j,c) grid, ideal parameters:
+        //   argmin |wrapCycles(u_target - (j/8 + c/256))|
+        // Iteration order (c outer ascending, j inner ascending) plus a
+        // STRICT '<' comparison implements the spec tie-break exactly:
+        // the smallest c wins ties, then the smallest j.
+        u_target = r_apply / g_units;
+        best_err = 2.0;                            // > any wrapped |error|
+        j_best   = 0;
+        c_best   = 0;
+        for (cc = 0; cc <= 63; cc = cc + 1) begin
+          for (jj = 0; jj <= 7; jj = jj + 1) begin
+            u_cand = jj / 8.0 + cc / g_units;
+            // wrapCycles(x): y = x - floor(x); if (y > 0.5) y -= 1  (sec.2)
+            d_wrap = (u_target - u_cand) - floor(u_target - u_cand);
+            if (d_wrap > 0.5) d_wrap = d_wrap - 1.0;
+            err = abs(d_wrap);
+            if (err < best_err) begin
+              best_err = err;
+              j_best   = jj;
+              c_best   = cc;
+            end
+          end
+        end
+        j_val = j_best;
+        c_val = c_best;
+      end
+
+      // u_INJ_digital = (32*j + c)/256 mod 1  (spec sec.8)
+      u_dig = ((g_units / 8.0) * j_val + c_val) / g_units;
+      u_dig = u_dig - floor(u_dig);
+
+      k_real = k_real + 1.0;
+    end
+
+    // -------------------------------------------------------------------------
+    // --- SIMULATOR-DEPENDENT ---  (transition() on event-updated variables)
+    // Arguments are piecewise constant (updated only in events) as the LRM
+    // requires. See fractional_phase_scheduler.va for the t_tran discussion.
+    // -------------------------------------------------------------------------
+    V(j_inj_out) <+ transition(j_val   * v_per_code, 0.0, t_tran, t_tran);
+    V(c_inj_out) <+ transition(c_val   * v_per_code, 0.0, t_tran, t_tran);
+    V(r_inj_out) <+ transition(r_apply * v_per_code, 0.0, t_tran, t_tran);
+    V(u_inj_out) <+ transition(u_dig,                0.0, t_tran, t_tran);
+  end
+
+endmodule

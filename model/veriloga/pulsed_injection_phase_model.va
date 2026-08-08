@@ -1,0 +1,252 @@
+// =============================================================================
+// pulsed_injection_phase_model.va
+// -----------------------------------------------------------------------------
+// BEHAVIORAL MODEL — pulsed-injection-locked oscillator (ILO) phase model for
+// the ILO fractional-N PLL reverse-edge-injection study.
+//
+//   * Math contract : MODEL_SPEC.md (repo root) — sections 14, 15;
+//     ASSUMPTIONS.md D1-D5. Any numerical deviation is a bug in THIS file.
+//   * Status        : NOT validated in Spectre (or any other simulator).
+//     No Verilog-A simulator was available in the development environment.
+//   * HONESTY (spec sec.20 / ASSUMPTIONS.md D1-D3): the per-pulse phase map
+//     Delta_theta = -K_inj*sin(e_inj) is an APPROXIMATION. It is NOT a
+//     transistor-level shorting-switch model; K_inj is a lumped strength
+//     parameter, not extracted from any circuit. pulse_width is carried as a
+//     parameter for documentation/scaling but the pulse is applied as an
+//     instantaneous phase step (ASSUMPTIONS.md D1: discrete per-cycle map).
+//
+// FUNCTION:
+//   Free-running VCO phase accumulates at (f0 + delta_f); on every rising
+//   edge of the injection trigger input the model computes the zero-crossing
+//   alignment error of the VCO at that instant,
+//
+//       e_inj = wrapRadians( 2*pi * (phi_vco_cycles - z0) )
+//
+//   and applies one of the spec sec.14 injection responses:
+//
+//       inj_map = 0 : linearized    Delta_theta = -K_inj * e_inj    [APPROX]
+//       inj_map = 1 : sinusoidal    Delta_theta = -K_inj * sin(e_inj) [APPROX]
+//       inj_map = 2 : ideal reset   theta_plus = theta_minus - e_inj
+//                                   (Delta_theta = -e_inj)       [ASSUMPTION]
+//
+//   Because the trigger edge physically arrives via the injection scheduler +
+//   DTC chain, its TIMING already contains the deterministic scheduling error
+//   epsilon_hw of spec sec.14 — sampling the actual VCO phase at the trigger
+//   instant is the continuous-time equivalent of
+//   e_inj[k] = wrapRadians(theta_minus[k] + epsilon_hw[k]).
+//   The free-running detuning term 2*pi*Delta_f*T_ref of the discrete map
+//   emerges automatically from integrating (f0 + delta_f) between pulses.
+//
+//   Lock behavior expected from the map (spec sec.14, [APPROX]):
+//       K_inj*sin(theta_ss) = 2*pi*Delta_f*T_ref
+//       lock iff |2*pi*Delta_f*T_ref| <= K_inj ; stable root has cos>0.
+//
+//   NOISE: the mulberry32 PRNG streams of spec sec.12 CANNOT be reproduced
+//   bit-exactly in Verilog-A with reasonable effort (no uint32 ops in the
+//   analog context and no guarantee on evaluation counts). This model is
+//   therefore fully DETERMINISTIC; inject VCO/reference noise externally
+//   (e.g. modulate the trigger timing, or add a noise voltage integrated
+//   into delta_f) or use the Python golden model for noise studies. The
+//   $rdist_normal() system function could add noise here but its call count
+//   per timestep is simulator-dependent — deliberately NOT used.
+//
+// PORT ENCODING: scalar electrical ports only (portability — see
+//   VERILOGA_USAGE.md). Debug phases: 1 V per rad.
+// -----------------------------------------------------------------------------
+`include "disciplines.vams"
+`include "constants.vams"
+
+module pulsed_injection_phase_model(inj_in, vco_out,
+                                    e_inj_dbg, dtheta_dbg, theta_dbg);
+
+  // ---------------------------------------------------------------------------
+  // Ports
+  // ---------------------------------------------------------------------------
+  input  inj_in;      // injection trigger pulse (from DTC chain); RISING edge
+                      // through vth_trig applies the phase kick. One pulse per
+                      // reference cycle in normal use (ASSUMPTIONS.md A4).
+  output vco_out;     // VCO output: sinusoid (out_mode=0) or square (=1)
+  output e_inj_dbg;   // DEBUG: last sampled e_inj [rad] (1 V per rad)
+  output dtheta_dbg;  // DEBUG: last applied Delta_theta [rad] (1 V per rad)
+  output theta_dbg;   // DEBUG: accumulated kick phase offset [rad], wrapped to
+                      // (-pi, pi] (1 V per rad)
+
+  electrical inj_in, vco_out, e_inj_dbg, dtheta_dbg, theta_dbg;
+
+  // ---------------------------------------------------------------------------
+  // Parameters — units/defaults per MODEL_SPEC.md sec.1, 14 / ASSUMPTIONS.md
+  // ---------------------------------------------------------------------------
+  parameter real    f0          = 12.5e9  from (0:inf);
+                    // [Hz] nominal VCO frequency = N*f_ref. Default 12.5 GHz
+                    // (N=3.125 * 4 GHz, the canonical sec.9 operating point).
+  parameter real    delta_f     = 0.0;
+                    // [Hz] free-running detuning relative to N*f_ref
+                    // (spec sec.14 Delta_f; canonical dynamics vector uses
+                    // 1 MHz). Lock range check: |2*pi*delta_f/f_ref_eff*| vs
+                    // k_inj — see header.
+  parameter real    k_inj       = 0.3     from [0.0:1.0];
+                    // [rad/rad] lumped injection strength K_inj in [0,1]
+                    // (ASSUMPTIONS.md D3; default 0.3 = canonical
+                    // n3p130_dynamics_sin vector, spec sec.18)
+  parameter integer inj_map     = 1       from [0:2];
+                    // injection response (spec sec.14): 0 = linearized,
+                    // 1 = nonlinear sinusoidal [default], 2 = ideal reset.
+                    // (The PDR/PRC CSV LUT option of sec.14 is Python-only.)
+  parameter real    k_scale     = 1.0     from [0.0:inf);
+                    // [-] extra strength scaling: effective K = k_inj*k_scale.
+                    // Placeholder for pulse-strength studies (ASSUMPTIONS.md
+                    // D3: strength-vs-pulse relation is NOT extracted).
+  parameter real    pulse_width = 5.0e-12 from (0:inf);
+                    // [s] nominal injection pulse width. DOCUMENTATION ONLY:
+                    // the kick is instantaneous (discrete map, ASSUMPTIONS.md
+                    // D1); pulse_width does NOT enter the equations. Kept so
+                    // netlists carry the intended hardware value.
+  parameter real    z0          = 0.0;
+                    // [cycles] desired injection zero-crossing phase z0
+                    // (spec sec.1/5; ASSUMPTIONS.md A5). e_inj is measured
+                    // relative to this phase.
+  parameter real    theta0      = 0.0;
+                    // [rad] initial VCO phase offset (initial condition of
+                    // the residual phase state; 0 = start on the desired
+                    // zero crossing when z0 = 0)
+  parameter integer out_mode    = 0       from [0:1];
+                    // 0 = sinusoidal output v = v_amp*sin(phase) [default]
+                    // 1 = square output between vlo/vhi (cross+transition)
+  parameter real    v_amp       = 0.5     from (0:inf);
+                    // [V] sinusoid amplitude (out_mode = 0)
+  parameter real    vhi         = 1.0;
+                    // [V] square-wave high level (out_mode = 1)
+  parameter real    vlo         = 0.0;
+                    // [V] square-wave low level (out_mode = 1)
+  parameter real    vth_trig    = 0.5;
+                    // [V] trigger threshold on inj_in rising edge
+  parameter real    t_tran      = 1.0e-12 from (0:inf);
+                    // [s] transition time for square edges / debug outputs
+  parameter real    t_kick      = 1.0e-13 from (0:inf);
+                    // [s] smoothing ramp applied to the (discontinuous) kick
+                    // phase step — see SIMULATOR-DEPENDENT notes below.
+                    // Must be << 1/f0 so the "instantaneous" abstraction of
+                    // the discrete map is preserved.
+  parameter integer en_bound_step = 1     from [0:1];
+                    // 1 = call $bound_step to cap the timestep at a fraction
+                    // of the VCO period (waveform fidelity); 0 = off.
+
+  // ---------------------------------------------------------------------------
+  // Internal state
+  // ---------------------------------------------------------------------------
+  real phi_cyc;     // free-running phase from idtmod, [0,1) cycles
+  real theta_c;     // accumulated kick offset in CYCLES, wrapped (-0.5, 0.5]
+  real theta_sm;    // transition()-smoothed version of theta_c
+  real xs;          // sin(2*pi*(phi_cyc + theta_sm)) — VCO waveform kernel
+  real phi_tot, e_cyc, e_rad, dth_rad;  // per-kick scratch
+  real e_last, dth_last;                // debug holds
+  real sq;          // square-wave state (0/1)
+
+  analog begin
+
+    // -------------------------------------------------------------------------
+    // --- SIMULATOR-DEPENDENT ---  (initial_step)
+    // -------------------------------------------------------------------------
+    @(initial_step) begin
+      // theta0 [rad] -> cycles; wrapCycles to (-0.5, 0.5] (spec sec.2)
+      theta_c  = theta0 / `M_TWO_PI;
+      theta_c  = theta_c - floor(theta_c);
+      if (theta_c > 0.5) theta_c = theta_c - 1.0;
+      e_last   = 0.0;
+      dth_last = 0.0;
+      sq       = 0.0;
+    end
+
+    // -------------------------------------------------------------------------
+    // --- SIMULATOR-DEPENDENT ---  (idtmod phase accumulator)
+    // idtmod() integrates (f0 + delta_f) [Hz] into phase [cycles] and wraps
+    // it into [0,1), avoiding the precision loss of an unbounded idt()
+    // integral in long transients (phase would otherwise grow to ~1e9 cycles
+    // and float64 would lose sub-LSB resolution). idtmod's internal state is
+    // solver-owned: its wrap points introduce timestep events in some
+    // simulators, and its tolerance follows the analysis reltol. This is the
+    // standard Verilog-A VCO idiom, but it IS a simulator-dependent
+    // construct and has not been validated here.
+    //
+    // TIMER-BASED ALTERNATIVE (not used, sketched for portability): a
+    // self-scheduling `@(timer(t_next))` loop can generate output edges at
+    // analytically computed times t_next = t_now + T_vco*(1 - dphi), giving
+    // an event-driven oscillator with no continuous state. That variant is
+    // faster but models edges only (no waveform) and timer() re-arming
+    // inside its own event block is another simulator-dependent behavior.
+    // -------------------------------------------------------------------------
+    phi_cyc = idtmod(f0 + delta_f, 0.0, 1.0, 0.0);
+
+    // Smoothed kick offset: theta_c changes DISCONTINUOUSLY at trigger
+    // events; feeding it to sin() directly would present the solver with a
+    // step in an otherwise continuous branch. transition() turns the step
+    // into a t_kick-long ramp the solver can follow. t_kick << 1/f0 keeps
+    // the discrete-map abstraction intact.
+    theta_sm = transition(theta_c, 0.0, t_kick, t_kick);
+
+    // VCO waveform kernel (phase in cycles -> radians via 2*pi)
+    xs = sin(`M_TWO_PI * (phi_cyc + theta_sm));
+
+    // -------------------------------------------------------------------------
+    // --- SIMULATOR-DEPENDENT ---  (trigger cross event: the injection kick)
+    // cross() locates the trigger edge by interpolation (solver ttol). The
+    // kick uses the UNsmoothed theta_c (the true discrete state), matching
+    // the discrete map of spec sec.14. Analog-memory caveat: theta_c/e_last/
+    // dth_last persist between events; save/restart behavior of such state
+    // is tool-specific.
+    // -------------------------------------------------------------------------
+    @(cross(V(inj_in) - vth_trig, +1)) begin
+      // --- sample actual VCO phase at the pulse instant --------------------
+      phi_tot = phi_cyc + theta_c;                 // cycles (any real)
+      // e_cyc = wrapCycles(phi_tot - z0)  -> (-0.5, 0.5]   (spec sec.2)
+      e_cyc = (phi_tot - z0) - floor(phi_tot - z0);
+      if (e_cyc > 0.5) e_cyc = e_cyc - 1.0;
+      e_rad = `M_TWO_PI * e_cyc;                   // e_inj [rad], (-pi, pi]
+
+      // --- injection response (spec sec.14) --------------------------------
+      if      (inj_map == 0) dth_rad = -(k_inj * k_scale) * e_rad;      // lin
+      else if (inj_map == 1) dth_rad = -(k_inj * k_scale) * sin(e_rad); // sin
+      else                   dth_rad = -e_rad;               // ideal reset
+
+      // --- apply kick: theta_plus = wrapRadians(theta_minus + Delta) -------
+      theta_c = theta_c + dth_rad / `M_TWO_PI;
+      theta_c = theta_c - floor(theta_c);          // wrap01 ...
+      if (theta_c > 0.5) theta_c = theta_c - 1.0;  // ... then wrapCycles
+
+      e_last   = e_rad;                            // debug holds
+      dth_last = dth_rad;
+    end
+
+    // -------------------------------------------------------------------------
+    // --- SIMULATOR-DEPENDENT ---  (square-wave generation via cross events)
+    // Zero crossings of the waveform kernel toggle a state variable; the
+    // output edge is shaped by transition(). The cross() events also help
+    // the solver place timepoints on the VCO edges. Note these events fire
+    // even in out_mode = 0 (harmless, slight overhead).
+    // -------------------------------------------------------------------------
+    @(cross(xs, +1)) sq = 1.0;
+    @(cross(xs, -1)) sq = 0.0;
+
+    // -------------------------------------------------------------------------
+    // --- SIMULATOR-DEPENDENT ---  ($bound_step timestep ceiling)
+    // Caps the timestep at 1/20 of the VCO period so the sinusoid/crossings
+    // are resolved even when nothing else forces small steps. $bound_step
+    // support/semantics vary slightly between tools; disable via parameter
+    // if it causes trouble.
+    // -------------------------------------------------------------------------
+    if (en_bound_step == 1) $bound_step(0.05 / f0);
+
+    // ---- output contributions ----------------------------------------------
+    if (out_mode == 1)
+      V(vco_out) <+ transition((sq > 0.5) ? vhi : vlo, 0.0, t_tran, t_tran);
+    else
+      V(vco_out) <+ v_amp * xs;
+
+    // Debug: piecewise-constant holds of the last kick, smoothed for the
+    // solver. theta_dbg reports the wrapped kick offset in rad.
+    V(e_inj_dbg)  <+ transition(e_last,               0.0, t_tran, t_tran);
+    V(dtheta_dbg) <+ transition(dth_last,             0.0, t_tran, t_tran);
+    V(theta_dbg)  <+ transition(theta_c * `M_TWO_PI,  0.0, t_tran, t_tran);
+  end
+
+endmodule

@@ -1,0 +1,251 @@
+// =============================================================================
+// fractional_phase_scheduler.va
+// -----------------------------------------------------------------------------
+// BEHAVIORAL MODEL — feedback-path fractional phase scheduler for the
+// ILO fractional-N PLL reverse-edge-injection study.
+//
+//   * Math contract : MODEL_SPEC.md  (repo root) — sections 1-4, 6, 13.
+//     Any numerical deviation from MODEL_SPEC.md is a bug in THIS file.
+//   * Status        : NOT validated in Spectre (or any other simulator).
+//     No Verilog-A simulator was available in the development environment.
+//     The code follows the Verilog-AMS 2.4 LRM, but syntax and, above all,
+//     event-ordering semantics have NOT been checked against a real tool.
+//   * Companions    : model/python (golden model), web/ (TS model).
+//     The Python golden model is the executable reference; this file is a
+//     hand translation of the same equations.
+//
+// FUNCTION (per MODEL_SPEC.md sections 3, 4, 6):
+//   On every rising edge k = 0,1,2,... of the reference clock:
+//
+//     s_ideal[k] = s0 + k*N            N = n_int_base + alpha    [EXACT, sec.3]
+//     A_ideal[k] = G * s_ideal[k]      G = 4 * 2^b_dtc = 256     [EXACT, sec.4]
+//     A_FB[k]    = Q_FB(A_ideal[k])    quantizer per sec.6
+//     I_FB[k]    = floor(A_FB[k]/G)    integer cycle index
+//     R_FB[k]    = A_FB[k] mod G       fine code 0..255
+//     m_FB[k]    = floor(R_FB[k]/64)   PMUX code 0..3
+//     c_FB[k]    = R_FB[k] mod 64      DTC  code 0..63
+//     n_int[k]   = I_FB[k+1]-I_FB[k]   divider modulus command
+//
+//   n_int[k] needs A_FB[k+1]; the model therefore quantizes ONE index ahead
+//   and keeps A_FB[k] from the previous event (see "pipeline" note below).
+//   This is exactly the causal ordering a real modulus divider needs: the
+//   modulus for the interval [k, k+1) is issued at edge k.
+//
+// PHASE-STATE IMPLEMENTATION NOTE (accumulate vs multiply):
+//   MODEL_SPEC.md sec.3 requires s_ideal[k] = s0 + k*N computed by
+//   MULTIPLICATION, not by naive accumulation (s += N), so that float64
+//   results are bit-identical across Python/TS/Verilog-A. Naive accumulation
+//   drifts by ~k*ulp; the multiplicative form has a single rounding per k.
+//   If a future variant must accumulate (e.g. time-varying alpha), use
+//   compensated (Kahan) accumulation:
+//        y = N - comp; t = s + y; comp = (t - s) - y; s = t;
+//   which bounds the error to O(1) ulp independent of k. Here the plain
+//   multiplicative form of the spec is used.
+//
+// PORT ENCODING:
+//   All ports are SCALAR electrical (array/bus ports are avoided on purpose:
+//   support for array ports and for `wreal` buses differs between Spectre,
+//   AMS Designer and Questa-ADMS — see VERILOGA_USAGE.md, "portability").
+//   Integer codes are encoded as piecewise-constant voltages,
+//   v = code * v_per_code (default 1 V per LSB). Debug phases are encoded
+//   as v = value_in_cycles * 1 V.
+//
+// -----------------------------------------------------------------------------
+`include "disciplines.vams"
+`include "constants.vams"
+
+module fractional_phase_scheduler(ref_clk,
+                                  n_int_out, m_fb_out, c_fb_out,
+                                  s_ideal_out, x_frac_out, r_fb_out);
+
+  // ---------------------------------------------------------------------------
+  // Ports (all scalar electrical, see header for encoding)
+  // ---------------------------------------------------------------------------
+  input  ref_clk;      // reference clock; only RISING edges are used
+                       // (ASSUMPTIONS.md A1: ideal 4 GHz square, rising edge)
+  output n_int_out;    // divider modulus command n_int[k]; {3,4} for
+                       // floor/nearest, transients {2..5} allowed for ef1
+                       // (MODEL_SPEC.md sec.4)
+  output m_fb_out;     // PMUX code m_FB[k] in {0,1,2,3}   (v = code * v_per_code)
+  output c_fb_out;     // DTC  code c_FB[k] in {0..63}     (v = code * v_per_code)
+  output s_ideal_out;  // DEBUG: s_ideal[k] in cycles (1 V per cycle).
+                       // WARNING: grows without bound (~ k*N); keep the sim
+                       // short or ignore convergence warnings on this node.
+  output x_frac_out;   // DEBUG: x_ideal[k] = wrap01(s_ideal[k]), cycles, [0,1)
+  output r_fb_out;     // DEBUG: R_FB[k] in {0..255}       (v = code * v_per_code)
+
+  electrical ref_clk, n_int_out, m_fb_out, c_fb_out;
+  electrical s_ideal_out, x_frac_out, r_fb_out;
+
+  // ---------------------------------------------------------------------------
+  // Parameters — units and defaults per MODEL_SPEC.md sec.1 / ASSUMPTIONS.md
+  // ---------------------------------------------------------------------------
+  parameter real    f_ref      = 4.0e9   from (0:inf);
+                    // [Hz] reference frequency, default 4 GHz (spec sec.1).
+                    // INFORMATIONAL ONLY in this model: actual event timing
+                    // comes from the ref_clk waveform, not from f_ref.
+  parameter integer n_int_base = 3       from [1:15];
+                    // [-] integer part of N, default 3 (spec sec.1, N = 3+alpha)
+  parameter real    alpha      = 0.13    from [0.0:1.0);
+                    // [cycles/ref-edge] fractional part of N. Default 0.13
+                    // (canonical off-grid example, spec sec.3). Presets:
+                    // 0.000 / 0.125 / 0.130 / 0.1375 / 0.250 (spec sec.1).
+  parameter real    s0         = 0.0;
+                    // [cycles] initial absolute phase coordinate (spec sec.1)
+  parameter integer b_dtc      = 6       from [1:12];
+                    // [bits] feedback DTC bits, default 6 → G = 4*2^6 = 256
+                    // (spec sec.1). PMUX is fixed 4-phase (ASSUMPTIONS.md A3).
+  parameter integer q_mode     = 1       from [0:2];
+                    // [-] final phase quantizer (spec sec.6):
+                    //   0 = floor      y = floor(u)
+                    //   1 = nearest    y = floor(u + 0.5)  (half-up; spec
+                    //       FORBIDS language-native round() — banker's vs
+                    //       half-up mismatch — so floor(u+0.5) is coded out)
+                    //   2 = ef1        first-order error feedback DSM:
+                    //       v = u + e; y = floor(v); e = v - y
+                    // Default 1 = nearest (ASSUMPTIONS.md B5).
+                    // mash11 and dither are NOT implemented in Verilog-A
+                    // (kept in the Python/TS models only); documented in
+                    // VERILOGA_USAGE.md.
+  parameter real    vth        = 0.5;
+                    // [V] ref_clk rising-edge crossing threshold
+  parameter real    v_per_code = 1.0     from (0:inf);
+                    // [V/LSB] output voltage per integer code unit
+  parameter real    t_tran     = 1.0e-12 from (0:inf);
+                    // [s] transition() rise/fall time for the code outputs
+                    // (purely cosmetic; must be << T_ref = 1/f_ref)
+
+  // ---------------------------------------------------------------------------
+  // Internal state (module-scope so it persists between analog events).
+  // NOTE: persistence of variables assigned inside analog event blocks
+  // ("analog memory") is standard Verilog-A but is one of the constructs
+  // simulators treat subtly differently on save/restart — see the
+  // SIMULATOR-DEPENDENT section below.
+  // ---------------------------------------------------------------------------
+  real n_frac;      // N = n_int_base + alpha
+  real g_units;     // G = 4 * 2^b_dtc (fine units per VCO cycle), real-valued
+  real k_real;      // edge counter k as REAL, not integer: a 32-bit integer
+                    // overflows after 2^31 edges; float64 counts exactly to
+                    // 2^53. Incremented by 1.0 per rising edge.
+  real a_fb_curr;   // A_FB[k]   (integer-valued real; may exceed 2^31, so
+                    // it is kept in a real, never in an integer variable)
+  real a_fb_next;   // A_FB[k+1] (look-ahead value, quantized at edge k)
+  real e_q;         // ef1 quantizer error state e, init 0 (spec sec.6)
+  real u_q, v_q, y_q; // quantizer scratch
+  real s_now, s_next; // s_ideal[k], s_ideal[k+1]
+  real r_fb;        // R_FB[k]
+  real i_curr, i_next; // I_FB[k], I_FB[k+1]
+  real n_int_val, m_fb_val, c_fb_val, x_frac_val;
+
+  analog begin
+
+    // -------------------------------------------------------------------------
+    // --- SIMULATOR-DEPENDENT ---  (initial_step priming)
+    // @(initial_step) runs once at t=0 before the first ref edge. It primes
+    // the k=0 quantization so that the FIRST rising edge can already emit
+    // n_int[0] = I_FB[1]-I_FB[0]. Some simulators run initial_step once per
+    // analysis (dc + tran); the guard below is idempotent because everything
+    // is a pure function of k_real = 0 except the ef1 state, which the spec
+    // also initializes to 0 — re-running it is harmless as long as no ref
+    // edge occurred in between (true at t=0).
+    // -------------------------------------------------------------------------
+    @(initial_step) begin
+      n_frac  = n_int_base + alpha;
+      g_units = 4.0 * pow(2.0, b_dtc);       // G = 4*2^b_dtc = 256 default
+      k_real  = 0.0;
+      e_q     = 0.0;                          // ef1 state init (spec sec.6)
+
+      // --- quantize A_ideal[0] = G*(s0 + 0*N) : prime A_FB[0] --------------
+      u_q = g_units * (s0 + 0.0 * n_frac);
+      if      (q_mode == 0) y_q = floor(u_q);           // floor
+      else if (q_mode == 1) y_q = floor(u_q + 0.5);     // nearest, half-up
+      else begin                                        // ef1
+        v_q = u_q + e_q;
+        y_q = floor(v_q);
+        e_q = v_q - y_q;                                // e in [0,1)
+      end
+      a_fb_curr = y_q;
+
+      // Pre-load displayed values so DC point is sane (cycle k = 0 view,
+      // n_int not yet known -> hold n_int_base until first edge).
+      r_fb       = a_fb_curr - g_units * floor(a_fb_curr / g_units);
+      m_fb_val   = floor(r_fb / (g_units / 4.0));
+      c_fb_val   = r_fb - (g_units / 4.0) * floor(r_fb / (g_units / 4.0));
+      n_int_val  = n_int_base;
+      s_now      = s0;
+      x_frac_val = s_now - floor(s_now);
+    end
+
+    // -------------------------------------------------------------------------
+    // --- SIMULATOR-DEPENDENT ---  (edge-triggered digital behavior)
+    // @(cross(...)) is the standard Verilog-A event for edge detection, but:
+    //   * the time tolerance of cross() defaults to the simulator's ttol —
+    //     edges are located by interpolation, so event times carry solver
+    //     tolerance, not infinite precision;
+    //   * ALL state updates below happen inside this one event block, so
+    //     their relative order is well defined by the sequential code, but
+    //     the order of THIS block vs. cross events in OTHER modules at the
+    //     same time point is NOT guaranteed by the LRM. Downstream modules
+    //     must therefore never assume same-timestep ordering; the code
+    //     outputs go through transition() and are meant to be SAMPLED by the
+    //     NEXT consumer edge, exactly like registered digital outputs.
+    // -------------------------------------------------------------------------
+    @(cross(V(ref_clk) - vth, +1)) begin
+
+      // ---- cycle-k view -----------------------------------------------------
+      // s_ideal[k] by MULTIPLICATION (spec sec.3 implementation note; see
+      // header for the accumulate-with-compensation discussion).
+      s_now      = s0 + k_real * n_frac;
+      x_frac_val = s_now - floor(s_now);                 // wrap01, spec sec.2
+
+      // ---- look-ahead quantization of index k+1 ----------------------------
+      // Needed because n_int[k] = I_FB[k+1] - I_FB[k]  (spec sec.4).
+      // The single ef1 error state e_q is advanced exactly once per ref edge
+      // and therefore sees the index stream 0,1,2,... in order (the k=0 call
+      // was made in initial_step), matching the Python golden model.
+      s_next = s0 + (k_real + 1.0) * n_frac;
+      u_q    = g_units * s_next;                         // A_ideal[k+1]
+      if      (q_mode == 0) y_q = floor(u_q);            // floor
+      else if (q_mode == 1) y_q = floor(u_q + 0.5);      // nearest, half-up
+      else begin                                         // ef1 (spec sec.6)
+        v_q = u_q + e_q;
+        y_q = floor(v_q);
+        e_q = v_q - y_q;
+      end
+      a_fb_next = y_q;                                   // A_FB[k+1]
+
+      // ---- decode (spec sec.4, all real-arithmetic 'mod' spelled out) ------
+      // real mod:  a mod b  ==  a - b*floor(a/b)   (the Verilog '%' operator
+      // is integer-only and 32-bit, so it is deliberately NOT used).
+      i_curr    = floor(a_fb_curr / g_units);            // I_FB[k]
+      i_next    = floor(a_fb_next / g_units);            // I_FB[k+1]
+      n_int_val = i_next - i_curr;                       // divider modulus cmd
+
+      r_fb      = a_fb_curr - g_units * floor(a_fb_curr / g_units); // R_FB[k]
+      m_fb_val  = floor(r_fb / (g_units / 4.0));         // PMUX code 0..3
+      c_fb_val  = r_fb - (g_units / 4.0)
+                       * floor(r_fb / (g_units / 4.0));  // DTC code 0..63
+
+      // ---- advance pipeline -------------------------------------------------
+      a_fb_curr = a_fb_next;
+      k_real    = k_real + 1.0;
+    end
+
+    // -------------------------------------------------------------------------
+    // --- SIMULATOR-DEPENDENT ---  (transition() on event-updated variables)
+    // transition() converts the piecewise-constant variables into ramped
+    // waveforms. The LRM requires the argument to be piecewise constant —
+    // satisfied here (updated only inside events). Very small t_tran values
+    // force small timesteps around each edge; increase t_tran if the
+    // simulator struggles. absdelay() is NOT used here (no delay needed).
+    // -------------------------------------------------------------------------
+    V(n_int_out)   <+ transition(n_int_val * v_per_code, 0.0, t_tran, t_tran);
+    V(m_fb_out)    <+ transition(m_fb_val  * v_per_code, 0.0, t_tran, t_tran);
+    V(c_fb_out)    <+ transition(c_fb_val  * v_per_code, 0.0, t_tran, t_tran);
+    V(r_fb_out)    <+ transition(r_fb      * v_per_code, 0.0, t_tran, t_tran);
+    // Debug phases: 1 V per cycle. s_ideal grows unbounded (header warning).
+    V(s_ideal_out) <+ transition(s_now,      0.0, t_tran, t_tran);
+    V(x_frac_out)  <+ transition(x_frac_val, 0.0, t_tran, t_tran);
+  end
+
+endmodule
