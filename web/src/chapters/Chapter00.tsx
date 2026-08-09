@@ -96,7 +96,7 @@ const NAV_GROUPS: { label: string; ids: number[] }[] = [
   { label: '基礎與慣例', ids: [0, 1, 2] },
   { label: '理想軌跡與 feedback path', ids: [3, 4, 5] },
   { label: 'Reverse injection 核心', ids: [6, 7, 8] },
-  { label: '量化與 DSM', ids: [9, 10, 11] },
+  { label: '量化與 DSM', ids: [9, 10, 11, 21] },
   { label: '非理想性與動態', ids: [12, 13, 14, 15, 16] },
   { label: '綜合、模型與結論', ids: [17, 18, 19, 20] },
 ];
@@ -314,7 +314,7 @@ export default function Chapter00() {
       </SectionFigure>
 
       <SectionFigure
-        title="導覽地圖(21 章)"
+        title="導覽地圖(22 章)"
         caption="建議閱讀路徑:Ch0–2 先固定語言與慣例 → Ch3–5 feedback path → Ch6–8 injection 核心(全站最重要的推導在 Ch6)→ Ch9–11 量化與 DSM → Ch12–16 非理想性 → Ch17–20 綜合與結論。"
       >
         {NAV_GROUPS.map((g) => (

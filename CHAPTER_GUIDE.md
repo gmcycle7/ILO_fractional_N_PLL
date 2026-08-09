@@ -173,6 +173,52 @@ calibrated tap/DTC decode → fixed-latency look-ahead → nearest baseline →
 評估後才選 shared DSM),並引用 experiment 結果支持,不硬寫結論。
 最後放 honesty 清單(MODEL_SPEC §20)。
 
+**Ch21 PD 輸入端誤差逐級解析 PD-Input Phase Error Anatomy**
+主題:feedback chain「/3-/4 divider → 4-to-1 PMUX → 6-bit DTC」在不同 divide ratio
+下於 PD 輸入端產生的 phase error;全章 open-loop(scheduler error at PD input)。
+四層結構:
+(1) 基本數學:e_PD[k]=wrapCycles(s_FB_actual−s_ideal)(= §4 e_FB_abs,S=256 時與
+simulate() 逐位相等);stage grid Δ=1/G,G∈{1,4,256};α=p/q(最簡)→ 週期
+P=q/gcd(q,G)、peak=(⌊P/2⌋/P)·Δ ≤ Δ/2、spur 間距 f_ref/P [EXACT]。5 preset N × 3
+stage 的公式 vs 量測驗證表(即時計算 + python3 交叉驗證)。錨點:N=3.13@DTC →
+P=25、peak 0.48 LSB=149.8 fs、160 MHz;N=3.125@DTC exact;N=3.125@PMUX P=2 交錯;
+N=3.000 全級 0。
+(2) 逐級暫態:stage×quantizer 互動模擬(runStage helper:v=A_ideal·S/256,S/256 為
+2 的冪 → 跨語言逐位一致;quantizer fresh state per run)。圖:edge staircase(前 40
+拍)、e_PD 三級同軸疊圖(UnitSwitch)、code-level 暫態(n_int/m_FB/c_FB + DSM
+state)、stage×quantizer peak/rms/n_int 矩陣、cycle-by-cycle DebugTable + CSV。
+SectionExample = N=3.13 ef1@PMUX grid 的 25 拍 startup 全表(手算可驗,
+ErrorFeedbackFirstOrder 手動 step;ef1 以 e₀=0 起步即為週期穩態、mash 前 1–2 拍有
+差分 transient;float64 準週期 ~1e-9 漂移需容差比較)。
+(3) DSM 有效解析度:per-edge 誤差不變細、峰值反而變大(N=3.13@DTC:0.48→0.76→
+1.36→1.76 LSB);DSM 買的是 in-band(proxy band f<f_ref/64)平均解析度。誠實呈現:
+對 P=25 的 N=3.13,band 內本無量化功率(~1e-9 cyc,leakage 位階)→ 用診斷微擾
+N*=N±(2⁻¹³+2⁻²⁵)(長週期 rational)量測:DTC 級 in-band 抑制 ef1 +6.4 dB(+1.1
+bit)、mash11 +32.3 dB(+5.4 bits)、mash111 +51.8 dB(+8.6 bits);mash111@PMUX
+shaped 擺幅 ±0.92 cyc → wrap 摺疊 132 拍 → in-band 反劣化 22 dB(摺疊條件:shaped
+擺幅 × Δ ≥ 0.5 cycle 即毀)。dither 在 error-feedback 結構不被 shaping → 墊高
+in-band floor。
+(4) 每級頻譜 + sanity checklist(1024 cycles、Hann、sample rate=f_ref,y 軸 dB re
+cycle²/Hz,不標 dBc):5 項即時 pass/fail 檢查與容差:①spur 間距=f_ref/P:每根
+strong spur(nearest、30 dB 窗)落在 m·f_ref/P 格點 ±1 bin;P=2 走 Nyquist-bin
+特例;非短週期 rational 或 P>512 → N/A ②shaping
+斜率:誤差對其 n 重(去 mean)累加的 PSD 比值 =|2sin(πf/f_ref)|^{2n} [EXACT],
+[f_ref/64, f_ref/6.4] fit ≈ +20n dB/dec(python 實測 19.5–19.8/39.0–39.5/59.6–61.7,
+容差 ±4;恆用 N* 未 wrap 診斷序列)③Parseval:ΣS·df/mean(e²)∈[0.8,1.2](preset
+67 組實測 0.865–1.101;僅 P≤128 或有效 dither 時檢查,慢 tonal 可偏到 1.9 → N/A)
+④DC bin ↔ 時域 mean:μ=2√(S₀·f_ref·U/N),U=3/8(N=3.125@PMUX 的 1/16 cycle 精確
+回收;容差 max(2e-4, 10%, peak·P/N);dither 或 P>128 → N/A)⑤nearest comb(集中度
+≥0.9,preset 實測 0.987–1.000、slider P≤128 掃描 ≥0.94)↔ dither≥0.5 floor(≤0.5,
+實測 0.003–0.090;0<dither<0.5 轉換區 → N/A;divider 級 dither 經 wrap 不可見 → 仍
+comb)。dither toggle 展示 tone→floor。
+misconception:「DSM 提高 DTC 解析度所以每個 edge 更準」(錯:峰值變大);「grid
+越細 spur 越高頻」(錯:P 只依 gcd(q,G),N=3.13 PMUX/DTC 同為 160 MHz)。takeaway:
+grid 優先、DSM 其次(摺疊條件限階數)、dither 是頻譜工具的 trade-off 表。limitation:
+PD 線性度/loop dynamics 未建模、divider/PMUX 截斷級為思想實驗、單 realization
+seed 12345、N* 為人為構造。ParamPanel:stage/quantizer/N(useChapterNDiv)/dither/
+n_cycles≤512/log-x toggle。
+
+
 ## 3. 互動圖總表(30 圖 → 章)
 
 1→Ch1, 2→Ch3, 3→Ch7, 4→Ch2, 5→Ch3, 6→Ch3, 7→Ch4, 8→Ch4, 9→Ch5, 10→Ch7,

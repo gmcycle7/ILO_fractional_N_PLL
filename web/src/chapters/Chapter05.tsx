@@ -34,6 +34,7 @@ import { makeLineOption } from '../lib/chartOptions';
 import { useChartTheme } from '../lib/useChartTheme';
 import { phaseAxisLabel, makePhaseTickFormatter, trimNumber, formatPhase } from '../lib/format';
 import { useSimStatus } from '../SimStatusContext';
+import { chapterHref } from '../lib/router';
 import { chapterById } from './index';
 import {
   simulate,
@@ -622,6 +623,11 @@ export default function Chapter05() {
             GHz 附近。兩條 peak 曲線在恰好 12.00/13.00 GHz 同時歸零(α = 0 / 0.25 → on-grid 且
             c_FB ≡ 0)。下圖:兩種 mode 的 phase LSB 在 12.5 GHz 交叉——那正是 312.5 fs 這個數字
             的由來。
+          </li>
+          <li>
+            e_FB_abs 在「沒有 DTC(只有 divider / divider+PMUX)」時分別長什麼樣、以及
+            DSM 換取有效解析度的完整量化,見{' '}
+            <a href={chapterHref('pd-input-error-anatomy')}>Ch21 PD 輸入端誤差逐級解析</a>。
           </li>
         </ul>
       </SectionObserve>

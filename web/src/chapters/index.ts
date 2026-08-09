@@ -38,6 +38,7 @@ export const CHAPTERS: ChapterMeta[] = [
   { id: 18, slug: 'python-golden-model', titleZh: 'Python Golden Model', titleEn: 'Python Golden Model', load: () => import('./Chapter18') },
   { id: 19, slug: 'verilog-a-model', titleZh: 'Verilog-A Model', titleEn: 'Verilog-A Model', load: () => import('./Chapter19') },
   { id: 20, slug: 'design-rules-conclusions', titleZh: '設計準則與結論', titleEn: 'Design Rules and Conclusions', load: () => import('./Chapter20') },
+  { id: 21, slug: 'pd-input-error-anatomy', titleZh: 'PD 輸入端誤差逐級解析', titleEn: 'PD-Input Phase Error Anatomy', load: () => import('./Chapter21') },
 ];
 
 export function chapterBySlug(slug: string): ChapterMeta | undefined {
