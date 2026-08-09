@@ -42,6 +42,8 @@ import {
   detectSpurs,
   psdToDbcPerHz,
   toneAmpToDbc,
+  integratedPhase,
+  mean,
   rms,
   TWO_PI,
 } from '../model';
@@ -158,6 +160,14 @@ export function periodogramPsd(
 export function toneAmpToDbc(aRad: number): number {
   return 20.0 * Math.log10(aRad / 2.0);
 }`;
+
+/* ------------------------------------------ shaped-noise folding 比較設定 */
+
+/** 模擬長度;PSD 分析取後 1024 拍(2 的冪)避開 θ 收斂 transient。 */
+const FOLD_N = 1536;
+const FOLD_QS = ['nearest', 'ef1', 'mash11', 'mash111'] as const;
+type FoldQ = (typeof FOLD_QS)[number];
+type FoldSigmaStr = '0' | '0.002';
 
 /* ---------------------------------------------------------------- 章節主體 */
 
@@ -286,6 +296,104 @@ export default function Chapter16() {
     [spurs, preset, sim],
   );
 
+  /* ------------------------------ shaped-noise folding(圖 #17b)------- */
+
+  const [foldSigma, setFoldSigma] = useState<FoldSigmaStr>('0');
+  const [foldGate, setFoldGate] = useState(false);
+
+  const foldSims = useMemo(() => {
+    const sigma = Number(foldSigma);
+    const run = (q: FoldQ, gated: boolean) => {
+      const cfg = fromPartial({
+        n_div: 3.13,
+        arch_mode: 'D',
+        quantizer: q,
+        inj_model: 'sin',
+        k_inj: 0.3,
+        delta_f_hz: 1e6,
+        sigma_vco_w_rad: sigma,
+        n_cycles: FOLD_N,
+        ...(gated
+          ? { inj_gate_mode: 'threshold' as const, inj_gate_threshold_cycles: 0.002 }
+          : {}),
+      });
+      const res = simulate(cfg);
+      // steady state:後 1024 拍;移除 mean(靜態 offset 歸 DC,見 exp16)
+      const tail = res.data.e_ZC_total.subarray(FOLD_N - 1024);
+      const mu = mean(tail);
+      const phi = Float64Array.from(tail, (v) => TWO_PI * (v - mu)); // rad
+      const { freqsHz, psd } = periodogramPsd(phi, cfg.f_ref_hz);
+      const f = res.data.inj_fired.subarray(FOLD_N - 1024);
+      let fired = 0;
+      for (let i = 0; i < f.length; i++) fired += f[i];
+      return {
+        label: gated ? 'mash111 + gate th=0.002' : q,
+        freqsHz,
+        dbc: psdToDbcPerHz(psd),
+        inbandRad: integratedPhase(freqsHz, psd, 1.0, 200e6),
+        hibandRad: integratedPhase(freqsHz, psd, 1.5e9, 2.0e9),
+        rmsRad: rms(phi),
+        fired,
+      };
+    };
+    return { rows: FOLD_QS.map((q) => run(q, false)), gated: run('mash111', true) };
+  }, [foldSigma]);
+
+  useEffect(() => {
+    setStatus('done', `folding:5 configs × ${FOLD_N} cycles(σ_vco_w = ${foldSigma} rad)`);
+  }, [foldSims, foldSigma, setStatus]);
+
+  const foldOption = useMemo(() => {
+    const mkLine = (s: { freqsHz: Float64Array; dbc: Float64Array }) => {
+      const pts: [number, number][] = [];
+      for (let i = 1; i < s.freqsHz.length; i++) {
+        pts.push([s.freqsHz[i] / 1e6, Math.max(s.dbc[i], FLOOR_DB)]);
+      }
+      return pts;
+    };
+    const series = foldSims.rows.map((r, i) => ({
+      name: r.label,
+      data: mkLine(r),
+      color: ct.series[i],
+      width: 1.1,
+    }));
+    if (foldGate) {
+      series.push({
+        name: foldSims.gated.label,
+        data: mkLine(foldSims.gated),
+        color: ct.bad,
+        width: 1.6,
+      });
+    }
+    return makeLineOption({
+      xLabel: 'frequency(MHz;steady-state 後 1024 拍,mean 已移除)',
+      yLabel: 'S_phi / 2(dBc/Hz)',
+      yMin: FLOOR_DB,
+      series,
+    });
+  }, [foldSims, foldGate, ct]);
+
+  const foldRows = useMemo(() => {
+    const rows = foldSims.rows.map((r) => ({
+      config: r.label,
+      inband_urad: r.inbandRad * 1e6,
+      hiband_mrad: r.hibandRad * 1e3,
+      rms_mrad: r.rmsRad * 1e3,
+      fired: r.fired,
+    }));
+    if (foldGate) {
+      const g = foldSims.gated;
+      rows.push({
+        config: g.label,
+        inband_urad: g.inbandRad * 1e6,
+        hiband_mrad: g.hibandRad * 1e3,
+        rms_mrad: g.rmsRad * 1e3,
+        fired: g.fired,
+      });
+    }
+    return rows;
+  }, [foldSims, foldGate]);
+
   return (
     <ChapterShell chapter={meta.id} titleZh={meta.titleZh} titleEn={meta.titleEn}>
       <SectionQuestion>
@@ -373,6 +481,48 @@ export default function Chapter16() {
         <p>
           兩個 sideband 相對 carrier 各為 <M>{'a/2'}</M>,故 SSB spur ={' '}
           <M>{'20\\log_{10}(a/2)'}</M> dBc。<EpistemicTag kind="EXACT" />
+        </p>
+      </SectionMath>
+
+      <SectionMath>
+        <p>
+          <strong>Shaped noise 與 injection 非線性的 folding。</strong>phase DSM 的
+          quantization error 是 <strong>high-pass shaped</strong> 的:ef1 / mash11 / mash111
+          的遞迴(MODEL_SPEC §6)使誤差序列帶 noise transfer function{' '}
+          <M>{'(1-z^{-1})^m'}</M>,<M>{'m = 1, 2, 3'}</M>。<EpistemicTag kind="EXACT" />{' '}
+          in-band 振幅抑制因子:
+        </p>
+        <MathBlock>
+          {
+            '\\big|1 - e^{-j2\\pi f/f_{ref}}\\big|^{m} = \\Big(2\\sin\\frac{\\pi f}{f_{ref}}\\Big)^{m} \\;\\xrightarrow{f = 100\\,\\mathrm{MHz}}\\; -16.1 / -32.2 / -48.3\\ \\mathrm{dB}\\;(m=1/2/3)'
+          }
+        </MathBlock>
+        <p>
+          這個抑制只在<strong>線性</strong>系統中守得住。injection 每個 reference cycle 對
+          error <M>{'e'}</M> 取樣一次並套用 memoryless 的 map <M>{'g(e)'}</M>;任何非線性的{' '}
+          <M>{'g'}</M> 都會把 shaped noise 的高頻成分互調(intermodulation)後折回
+          in-band — 高頻 tone 的乘積落在差頻上,表現為 spur skirts 或 floor lift。
+          對 sin map 展開:<EpistemicTag kind="APPROX" />
+        </p>
+        <MathBlock>
+          {
+            'g(e) = -K_{inj}\\sin e = -K_{inj}\\Big(e - \\frac{e^{3}}{6} + \\cdots\\Big) \\quad\\text{(奇函數,無 } e^{2} \\text{ 項)}'
+          }
+        </MathBlock>
+        <p>
+          最低階折返項是 <M>{'e^{3}'}</M>,相對線性項的量級 <M>{'\\le e_{pk}^{2}/6'}</M>。full
+          actuator 下振幅很小:exp22 實測 mash111 的 peak |e_FB_abs| = 1.76 LSB →{' '}
+          <M>{'\\varepsilon_{pk} = 2\\pi\\cdot 1.76/256 = 0.0432'}</M> rad →{' '}
+          <M>{'\\varepsilon_{pk}^{2}/6 = 3.1\\times10^{-4}'}</M>(−70 dB)— 預期折返低於
+          deterministic tone floor,量測應看到 shaping 在 in-band 完整存活(圖 #17b 證實)。
+          <EpistemicTag kind="EXPERIMENT" />
+        </p>
+        <p>
+          <strong>Gating 是更兇的非線性。</strong>threshold gate(第 13 章)等效把 kick 乘上
+          indicator function <M>{'\\mathbb{1}\\big[|e_{ZC,hw}| \\le \\mathrm{th}\\big]'}</M> —
+          不連續、含所有階次,且 fired mask 本身就是 shaped noise 的函數;fire 稀疏時
+          detuning 在 fire 間隔累積,兩個機制一起把能量搬回 in-band。
+          <EpistemicTag kind="INFERENCE" />
         </p>
       </SectionMath>
 
@@ -481,6 +631,77 @@ export default function Chapter16() {
             PSD <strong>逐位一致</strong>(純數位路徑 tolerance 1e-12,含 noise
             路徑 1e-9,libm 差異)。<EpistemicTag kind="EXACT" /> 表格的 CSV export
             可直接 diff 對照。
+          </p>
+        </Callout>
+      </SectionFigure>
+
+      <SectionFigure
+        title="圖 #17b — Shaped-noise folding:e_ZC_total PSD(nearest / ef1 / mash11 / mash111)"
+        caption={
+          <span>
+            共同 config:N=3.13、mode D、full actuator、sin injection K_inj=0.3、Δf=1 MHz、
+            seed 12345;模擬 {FOLD_N} 拍,PSD 取 steady-state 後 1024 拍(mean 已移除)。
+            σ_vco_w=0(deterministic)時量測 <EpistemicTag kind="EXPERIMENT" />:in-band
+            integrated phase(1 Hz–200 MHz)= 617 / 340 / 99 / 33 µrad(nearest→mash111,
+            18.7× = 25.4 dB 改善)— DSM 階數越高 in-band 越乾淨,sin map 沒有抹掉 shaping;
+            近 Nyquist(1.5–2 GHz)= 3.68 / 9.16 / 18.3 / 32.5 mrad(+18.9 dB)— 代價全在
+            out-of-band。每一階的 in-band 輸出都約為輸入 e_ZC_hw 的 0.69–0.76 倍(縮放,
+            非折返):sin 折返項 −70 dB,低於 tone floor。σ_vco_w=0.002 rad 時四條曲線的
+            in-band 被 white noise floor 齊平(≈1.47–1.54 mrad),差異只剩近 Nyquist。
+            勾選 gated overlay:mash111 加 th=0.002 cycle 的 gate(fire 41/1024 = 4%)後,
+            in-band 從 33 µrad 回升到 8.82 mrad(×267 ≈ +48.5 dB)— 硬非線性 + 稀疏修正把
+            shaped noise 的好處收回。
+          </span>
+        }
+      >
+        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 8 }}>
+          <SelectControl<FoldSigmaStr>
+            label="σ_vco_w(rad)"
+            value={foldSigma}
+            options={[
+              { value: '0', label: '0(deterministic)' },
+              { value: '0.002', label: '0.002(small noise)' },
+            ]}
+            onChange={setFoldSigma}
+          />
+          <Toggle
+            label="overlay:mash111 + gate th=0.002"
+            checked={foldGate}
+            onChange={setFoldGate}
+          />
+        </div>
+        <EChart option={foldOption} height={340} />
+        <div style={{ marginTop: '0.75rem' }}>
+          <DebugTable
+            columns={[
+              { key: 'config', label: 'config' },
+              {
+                key: 'inband_urad',
+                label: 'in-band 1Hz–200MHz(µrad)',
+                fmt: (v) => trimNumber(Number(v), 5),
+              },
+              {
+                key: 'hiband_mrad',
+                label: '1.5–2GHz(mrad)',
+                fmt: (v) => trimNumber(Number(v), 5),
+              },
+              { key: 'rms_mrad', label: 'total rms(mrad)', fmt: (v) => trimNumber(Number(v), 5) },
+              { key: 'fired', label: 'fired /1024' },
+            ]}
+            rows={foldRows}
+            maxHeight={220}
+            exportName="ch16_folding.csv"
+          />
+        </div>
+        <Callout type="honesty" title="折返量是 sin map 的下界(APPROX)">
+          <p>
+            此處量到「幾乎無折返」依賴兩件事:sin 是<strong>奇函數</strong>(無 <M>{'e^2'}</M>{' '}
+            項),且 full-actuator 振幅小(|ε_hw| ≤ 0.043 rad,非線性偏差 ≤ 3.1×10⁻⁴)。
+            真實 VCO 的 PDR 通常<strong>非對稱</strong>(偶次項不為零)、斜率更陡、且隨
+            amplitude/注入點變化 — 偶次項會把 shaped noise 的平方(其頻譜為自相關摺積,
+            含強 DC/低頻成分)直接折回 in-band,效率遠高於 sin 的三次項。確切 folding
+            取決於真實 PDR 形狀,需 transistor-level 萃取(第 13 章 LUT 介面)。
+            <EpistemicTag kind="APPROX" />
           </p>
         </Callout>
       </SectionFigure>
@@ -632,6 +853,13 @@ export default function Chapter16() {
             固定 seed(12345)讓 spur 表可以進 regression:數字變了就是 model 變了,
             不是運氣變了。<EpistemicTag kind="EXACT" />
           </li>
+          <li>
+            高階 DSM 是「用 out-of-band 換 in-band」的交易:本 model 的 sin injection map
+            在 full-actuator 振幅下夠線性,shaping 存活(in-band 617→33 µrad,near-Nyquist
+            3.7→32.5 mrad,nearest→mash111,σ=0)。任何更硬的非線性 — gating、真實 PDR 的
+            偶次項 — 都可能把這筆帳收回(gated mash111:in-band ×267)。評估 DSM 階數時
+            必須連同 injection 非線性一起看,不能只看 NTF。<EpistemicTag kind="EXPERIMENT" />
+          </li>
         </ul>
       </SectionTakeaway>
 
@@ -651,6 +879,12 @@ export default function Chapter16() {
             <li>
               dBc 換算依 small-angle 近似<EpistemicTag kind="APPROX" />;
               φ 幅度接近 1 rad 時 Bessel 高階項不可忽略。
+            </li>
+            <li>
+              圖 #17b 的 folding 結論只對 sin map 成立,且是<strong>下界</strong>:真實 PDR
+              的非對稱性與 amplitude 相依性會折返更多 shaped noise;確切數字需 PDR
+              extraction 後以 LUT 重跑。單次 periodogram、單一 seed,in-band 積分值有
+              statistical scatter。<EpistemicTag kind="APPROX" />
             </li>
             <li>本專案未執行 Spectre;行為級頻譜 ≠ silicon 量測(MODEL_SPEC §20)。</li>
           </ul>

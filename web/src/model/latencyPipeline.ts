@@ -12,7 +12,8 @@
  *   L is fully compensated; only the un-anticipated random extra latency
  *   leaks).
  * - lookahead=false (bug mode): the command applied at cycle k was computed
- *   from state s_ideal[k - L - extra]; phase error = wrapCycles(L*alpha).
+ *   from state s_ideal[k - L - extra]; phase error = wrapCycles(-L*alpha)
+ *   (error = actual - ideal, spec section 2; magnitude |wrapCycles(L*alpha)|).
  *
  * Start-up: for k where the index would be negative it is clamped to 0
  * (pipeline pre-filled with the k=0 command).
@@ -30,6 +31,12 @@ export interface LatencyMetadata {
   k_intended: number;
   k_applied: number;
   seq_id: number;
+  /** A_ideal at the command's state index (filled by simulate(), spec §13). */
+  P_state?: number;
+  /** R_FB command word at the state index (filled by simulate(), spec §13). */
+  R_FB?: number;
+  /** R_INJ command word at the state index (filled by simulate(), spec §13). */
+  R_INJ?: number;
 }
 
 export interface LatencyResult {

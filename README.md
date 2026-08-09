@@ -55,7 +55,7 @@ npm install
 ## 執行 Python behavioral model
 
 ```bash
-# 列出所有 presets(20 個 experiments + 別名)
+# 列出所有 presets(22 個 experiments + 別名)
 python3 -m model.python.cli --list-presets
 
 # 跑推薦架構 preset(N=3.13, quantize-once + modular reverse, look-ahead)
@@ -97,14 +97,14 @@ npm run preview  # 預覽 production build
 網站 21 章(0–20):從 timing/sign convention、ideal fractional trajectory、
 feedback decode、reverse injection 幾何、tap/DTC redundancy、shared phase state、
 DSM state 議題、sub-LSB、latency look-ahead、injection dynamics、mismatch、
-spur/PN 分析,到 20 個一鍵 comparison experiments 與 design conclusions。
+spur/PN 分析,到 22 個一鍵 comparison experiments 與 design conclusions。
 所有模擬直接在 browser 端執行(TypeScript mirror model),不依賴任何 server。
 
 ## 輸出檔案
 
 | 位置 | 內容 |
 |---|---|
-| `test_vectors/*.json` | 12 組 deterministic vectors(Python 產生,TS 逐位比對)|
+| `test_vectors/*.json` | 14 組 deterministic vectors(Python 產生,TS 逐位比對)|
 | `test_vectors/csv/*.csv` | 每-cycle command vectors(k, n_int, m_FB, c_FB, j_INJ, c_INJ, …)|
 | `results/<preset>/` | summary.json / timeseries.csv / psd.csv |
 | `web/dist/` | 網站 production build |

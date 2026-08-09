@@ -22,7 +22,9 @@
 | B2 | fixed-time DTC 的 LSB 取 12.5 GHz 時的 312.5 fs | `dtc_lsb_fs=312.5` |
 | B3 | digital latency 為整數個 reference cycles | L∈{0..8} |
 | B4 | scheduler 運算本身無誤差(exact digital model) | — |
-| B5 | quantizer 預設 nearest(half-up),DSM 為選項 | `quantizer='nearest'` |
+| B5 | quantizer 預設 nearest(half-up),DSM(ef1/mash11/mash111)為選項 | `quantizer='nearest'` |
+| B6 | actuator 預設 full(fine 1/G quantization);`dsm_only` 為 classic divider-modulating DSM:quantizer 作用在整數 cycle,R_FB=R_INJ≡0,injection 對齊誤差掃 ±0.5 cycle(MODEL_SPEC §7.1)。mash11/mash111 在 N∈(3,3.25) 的 dsm_only 多數不合法(瞬時 divide ratio 觸 0,model 故意 raise) | `actuator_mode='full'` |
+| B7 | injection gating 為 deterministic digital gate:`threshold` mode 只在 \|e_ZC_hw\|≤threshold 時 fire;非 fire 拍無 phase kick、theta 照常累積;PRNG 消耗與 gating 無關(MODEL_SPEC §14) | `inj_gate_mode='off'`, `inj_gate_threshold_cycles=0.0625` |
 
 ## Analog nonideality 層(全部 behavioral)
 

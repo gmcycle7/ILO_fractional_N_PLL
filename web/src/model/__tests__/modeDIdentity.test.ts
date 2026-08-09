@@ -27,13 +27,20 @@ describe('mode D identity (Tests 2, 13)', () => {
     });
   }
 
-  it('mode B (independent DSMs) breaks the cycle-by-cycle reverse relation', () => {
+  it('mode B (independent DSMs, distinct dsm_inj state) breaks the reverse relation on a sustained fraction of cycles', () => {
     const res = simulate(fromPartial({ n_div: 3.13, quantizer: 'ef1', arch_mode: 'B' }));
     let maxAbs = 0;
+    let nonzero = 0;
     for (const v of res.data.e_pair_digital) {
       maxAbs = Math.max(maxAbs, Math.abs(v));
+      if (v !== 0.0) {
+        nonzero += 1;
+      }
     }
     expect(maxAbs).toBeGreaterThan(0.0);
+    // measured 326/512 ~ 64% (ef1, N=3.13, seed 12345); require >= 5%
+    const frac = nonzero / res.data.e_pair_digital.length;
+    expect(frac).toBeGreaterThanOrEqual(0.05);
   });
 });
 

@@ -7,6 +7,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useChapterAlpha } from '../lib/globalParams';
 import {
   ChapterShell,
   SectionQuestion,
@@ -80,7 +81,7 @@ const QUANTIZER_OPTIONS: { value: Quantizer; label: string }[] = [
 export default function Chapter08() {
   const [mode, setMode] = useState<ArchMode>('B');
   const [quantizer, setQuantizer] = useState<Quantizer>('ef1');
-  const [alpha, setAlpha] = useState(0.13);
+  const [alpha, setAlpha] = useChapterAlpha();
   const [tapMm, setTapMm] = useState(false);
   const { unit } = useUnit();
   const ct = useChartTheme();
@@ -247,14 +248,14 @@ export default function Chapter08() {
                 <td><M>{'R_{INJ} = Q_{INJ}(G\\, u_{INJ,ideal}) \\bmod G'}</M>,同型獨立 instance</td>
                 <td>共享(同一 <M>{'x_{ideal}'}</M>)</td>
                 <td>獨立</td>
-                <td>nearest 幾乎 0;floor 恆 −1 LSB</td>
+                <td>nearest 幾乎 0;floor 恆 −1 LSB(例外:{'{a}'} = 0 的格點拍為 0,α = 0.13 時每 25 拍一次)</td>
               </tr>
               <tr>
                 <td>B</td>
                 <td>同 A,但兩邊都是 DSM 型(ef1/mash11)、獨立 state</td>
                 <td>共享</td>
                 <td>獨立(各自演化)</td>
-                <td>非零、time-varying →「不建議」</td>
+                <td>非零、time-varying(ef1:{'{−1, 0, +1}'} LSB、約 64% 拍非零;mash11 至 ±3)→「不建議」</td>
               </tr>
               <tr>
                 <td>C</td>
@@ -317,11 +318,15 @@ export default function Chapter08() {
           </li>
           <li>
             floor(off-grid α):<M>{'\\varepsilon_{FB} + \\varepsilon_{INJ} = -\\{a\\} - (1 - \\{a\\}) = -1'}</M>{' '}
-            → pair 恆為 −1 LSB。<EpistemicTag kind="EXACT" />
+            → pair 為 −1 LSB,但僅限 <M>{'\\{a\\} \\neq 0'}</M> 的拍;<M>{'A_{ideal}'}</M>{' '}
+            恰落格點時兩邊皆 exact → pair = 0(α = 0.13 時每 25 拍一次)。
+            <EpistemicTag kind="EXACT" />
           </li>
           <li>
-            ef1 / mash11 獨立 state:<M>{'\\varepsilon'}</M> 各自演化,pair 在{' '}
-            <M>{'\\{-1, 0, +1\\}'}</M> LSB 間跳動(Mode B 的問題)。
+            ef1 / mash11 獨立 state(injection 側由 'dsm_inj' stream 種出不同初始值,兩份 state
+            真正各自演化):ef1 的 pair 在 <M>{'\\{-1, 0, +1\\}'}</M> LSB 間跳動,α = 0.13、256 拍
+            下約 64% 的拍非零(−1 / 0 / +1 約各佔三分之一);mash11 更寬,可達 ±3 LSB(多為
+            ±1,約 8% 的拍 |pair| ≥ 2)——Mode B 的問題。
             <EpistemicTag kind="EXPERIMENT" />
           </li>
         </ul>
@@ -416,6 +421,16 @@ if (cfg.arch_mode === 'D') {
 } else {
   // A, B, C: independent quantizer instance on G * u_INJ_ideal
   const q = makeQuantizer(cfg.quantizer);
+  // distinct deterministic DSM state per spec section 7 ('dsm_inj' stream)
+  if (dsmStream !== null) {
+    if (cfg.quantizer === 'ef1') {
+      (q as ErrorFeedbackFirstOrder).seedState(dsmStream.next());
+    } else if (cfg.quantizer === 'mash11') {
+      const acc1 = dsmStream.next();
+      const acc2 = dsmStream.next();
+      (q as Mash11).seedState(acc1, acc2);
+    }
+  }
   const useDither = cfg.dither_amp_lsb > 0.0 && ditherStream !== null;
   for (let k = 0; k < n; k++) {
     let u = g * uIdeal[k];
@@ -465,7 +480,8 @@ export function ePair(
               <span>
                 A/B/C 分支:替 injection <strong>另開一個</strong> quantizer instance。對 stateless 的
                 floor/nearest 這只是重複計算;對 ef1/mash11 這是<strong>第二份獨立演化的 error
-                state</strong> —— Mode B pair error 的根源。
+                state</strong>(以 'dsm_inj' PRNG stream 種出與 feedback 側不同的初始值,§7、§12)
+                —— Mode B pair error 的根源。
               </span>
             ),
           },
@@ -505,15 +521,19 @@ export function ePair(
         <ul>
           <li>
             <strong>預設(Mode B、ef1)</strong>:上圖 e_pair_digital 在 −1 / 0 / +1 LSB 之間
-            不規則跳動 —— 兩個獨立 DSM 的進位時刻互不相關。這就是「平均正確、cycle-by-cycle 錯誤」。
+            不規則跳動 —— 256 拍中約 64% 非零,−1 / 0 / +1 約各佔三分之一,兩個獨立 DSM 的
+            進位時刻互不相關。這就是「平均正確、cycle-by-cycle 錯誤」。切到 mash11 跳動範圍
+            擴到 ±3 LSB(多為 ±1)。
           </li>
           <li>
             <strong>切到 Mode D(任何 quantizer)</strong>:e_pair_digital 變成一條精確為 0 的直線
             <EpistemicTag kind="EXACT" /> —— 不是「很小」,是逐位為零(cycle 表 sum_mod_256 全 0)。
           </li>
           <li>
-            <strong>Mode A + floor</strong>:pair error 恆為 −1 LSB(§Math 的{' '}
-            <M>{'-\\{a\\}-(1-\\{a\\})=-1'}</M>);<strong>Mode A + nearest</strong>:幾乎恆 0
+            <strong>Mode A + floor</strong>:pair error 為 −1 LSB(§Math 的{' '}
+            <M>{'-\\{a\\}-(1-\\{a\\})=-1'}</M>),唯一例外是 <M>{'A_{ideal}'}</M> 恰落格點的拍
+            (α = 0.13 時每 25 拍一次,該拍 pair = 0,256 拍中 11 次);
+            <strong>Mode A + nearest</strong>:幾乎恆 0
             (對稱捨入)—— 獨立量化不見得炸,但取決於 quantizer 的對稱性,是脆弱的巧合而非保證。
           </li>
           <li>

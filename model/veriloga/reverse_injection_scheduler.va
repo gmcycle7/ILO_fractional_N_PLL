@@ -13,7 +13,8 @@
 //
 // FUNCTION:
 //   On every rising reference edge k the module produces the injection tap
-//   select j_INJ[k] in {0..7} and injection DTC code c_INJ[k] in {0..63}.
+//   select j_INJ[k] in {0..7} and injection DTC code c_INJ[k] in
+//   {0..2^b_dtc-1} (0..63 at the default b_dtc = 6).
 //   Two source modes (parameter shared_mode, spec sec.7):
 //
 //   shared_mode = 1  (Mode D, DEFAULT / recommended, "quantize once +
@@ -32,12 +33,15 @@
 //        with its OWN quantizer instance (independent ef1 error state).
 //        Cycle-by-cycle pair error is then generally nonzero (spec Test 13).
 //
-//   TAP/DTC DECODE (parameter map_mode, spec sec.8):
-//        0 = naive floor  : j = floor(R_INJ/32), c = R_INJ mod 32
+//   TAP/DTC DECODE (parameter map_mode, spec sec.8), G = 4*2^b_dtc:
+//        0 = naive floor  : j = floor(R_INJ/(G/8)), c = R_INJ mod (G/8)
 //                           (uses only the lower half of the DTC range)
-//        1 = nearest phase: argmin over j in {0..7}, c in {0..63} of
-//                           |wrapCycles(u_target - (j/8 + c/256))|,
+//        1 = nearest phase: argmin over j in {0..7}, c in {0..2^b_dtc-1} of
+//                           |wrapCycles(u_target - (j/8 + c/G))|,
 //                           tie-break: smaller c first, then smaller j.
+//                           The candidate grid follows b_dtc (c bound is
+//                           G/4 = 2^b_dtc, taps fixed at 8), matching the
+//                           Python golden model for any b_dtc in [1:12].
 //        (The "calibrated joint optimization" mapping of sec.8 needs the
 //        measured analog DTC/tap curves and lives in the Python model only.)
 //
@@ -52,6 +56,31 @@
 //        In shared mode look-ahead must happen in the FEEDBACK scheduler
 //        (it owns the state); this module then only models the transport
 //        delay — see VERILOGA_USAGE.md.
+//
+//   EF1 LOOK-AHEAD STATE PRIMING (shared_mode=0, q_mode=2, look_ahead=1,
+//   lat_cycles>=1):
+//        The Python golden model quantizes EVERY state index 0,1,2,... in
+//        order (injection_scheduler.py); apply_latency() only re-times WHEN
+//        each command is applied. With look_ahead=1 this module's first
+//        quantization (at edge 0) targets state index lat_cycles, so the
+//        private ef1 error state would never digest state indices
+//        0..lat_cycles-1. Because the ef1 state equals frac(cumulative sum
+//        of its inputs), skipping those inputs offsets the state
+//        PERMANENTLY — the R_INJ stream would diverge from the golden model
+//        forever, not just during start-up. @(initial_step) therefore
+//        pre-runs the quantizer over state indices 0..lat_cycles-1,
+//        discarding the outputs; the applied R_INJ stream then matches the
+//        Python vectors exactly for every edge k >= lat_cycles, PROVIDED
+//        e_q_init carries the golden model's seeded initial ef1 state (the
+//        Python model seeds the injection-side instance from the 'dsm_inj'
+//        mulberry32 stream, spec sec.7/sec.12 — see the e_q_init parameter
+//        below; with the default base seed 12345 the value is
+//        0.7047782763838768). The first
+//        lat_cycles APPLIED outputs remain start-up fill values (see the
+//        initial_step note below; Python instead applies command k already
+//        at edge k < L, as if look-ahead had been running before t=0).
+//        look_ahead = 0 (bug mode) needs NO priming: there edge k quantizes
+//        state index k, the same order as Python.
 //
 // PORT ENCODING: all ports scalar electrical, v = code * v_per_code
 //   (1 V per LSB by default). Array/bus ports deliberately avoided —
@@ -71,7 +100,7 @@ module reverse_injection_scheduler(ref_clk, r_fb_in,
   input  r_fb_in;    // R_FB[k] as voltage (code * v_per_code), only read when
                      // shared_mode = 1. Tie to ground when shared_mode = 0.
   output j_inj_out;  // injection tap select j_INJ[k] in {0..7}
-  output c_inj_out;  // injection DTC code  c_INJ[k] in {0..63}
+  output c_inj_out;  // injection DTC code  c_INJ[k] in {0..2^b_dtc-1}
   output r_inj_out;  // DEBUG: applied R_INJ[k] in {0..255}
   output u_inj_out;  // DEBUG: u_INJ_digital[k] = (32*j + c)/256 mod 1 [cycles]
 
@@ -115,6 +144,18 @@ module reverse_injection_scheduler(ref_clk, r_fb_in,
                     // 0 = floor, 1 = nearest (half-up), 2 = ef1.
                     // Independent INSTANCE: its ef1 state e_q is private to
                     // this module (spec sec.7, Mode A/B distinction).
+  parameter real    e_q_init    = 0.0     from [0.0:1.0);
+                    // [LSB fraction] initial value of the private ef1 error
+                    // state (q_mode=2, shared_mode=0 only). The Python
+                    // golden model seeds its injection-side ef1 instance
+                    // with the FIRST DRAW of the 'dsm_inj' mulberry32
+                    // stream (spec sec.7 / sec.12, offset 10), a PRNG this
+                    // module deliberately does not implement (see
+                    // VERILOGA_USAGE.md, "No PRNG parity"). For vector-
+                    // exact comparison against the Python vectors set this
+                    // to that draw — 0.7047782763838768 for the default
+                    // base seed 12345. Default 0.0 is the neutral sec.6
+                    // init (NOT vector-exact vs Python modes A/B/C + ef1).
   // ---- electrical encoding ---------------------------------------------------
   parameter real    vth         = 0.5;
                     // [V] ref_clk rising-edge threshold
@@ -157,7 +198,8 @@ module reverse_injection_scheduler(ref_clk, r_fb_in,
       g_units = 4.0 * pow(2.0, b_dtc);
       n_frac  = n_int_base + alpha;
       k_real  = 0.0;
-      e_q     = 0.0;                       // ef1 state init (spec sec.6)
+      e_q     = e_q_init;                  // ef1 state init (sec.6/sec.7 —
+                                           // seeded state, see parameter)
       for (i = 0; i <= 8; i = i + 1) begin
         pipe[i] = r_zero - g_units * floor(r_zero / g_units); // startup fill
       end
@@ -165,6 +207,20 @@ module reverse_injection_scheduler(ref_clk, r_fb_in,
       j_val   = 0.0;
       c_val   = 0.0;
       u_dig   = 0.0;
+      // ---- ef1 look-ahead state priming (Mode A only, see header) ---------
+      // Digest state indices 0..lat_cycles-1 so the private ef1 state
+      // matches the Python golden model when edge 0 quantizes state index
+      // lat_cycles (outputs discarded — state priming only).
+      if ((shared_mode == 0) && (look_ahead == 1) &&
+          (q_mode == 2) && (lat_cycles >= 1)) begin
+        for (i = 0; i <= lat_cycles - 1; i = i + 1) begin
+          s_nom   = s0 + i * n_frac;                   // state index i, sec.3
+          x_nom   = s_nom - floor(s_nom);              // wrap01
+          u_ideal = (z0 - x_nom) - floor(z0 - x_nom);  // wrap01(z0 - x_nom)
+          v_q     = g_units * u_ideal + e_q;           // ef1 update (sec.6)
+          e_q     = v_q - floor(v_q);                  // keep state, drop y
+        end
+      end
     end
 
     // -------------------------------------------------------------------------
@@ -230,15 +286,18 @@ module reverse_injection_scheduler(ref_clk, r_fb_in,
       end
       else begin
         // nearest phase over the redundant (j,c) grid, ideal parameters:
-        //   argmin |wrapCycles(u_target - (j/8 + c/256))|
+        //   argmin |wrapCycles(u_target - (j/8 + c/G))|
         // Iteration order (c outer ascending, j inner ascending) plus a
         // STRICT '<' comparison implements the spec tie-break exactly:
         // the smallest c wins ties, then the smallest j.
+        // Grid bounds follow b_dtc: c in {0..2^b_dtc-1} (= g_units/4 codes,
+        // the int-vs-real '<' comparison promotes cc to real), taps fixed
+        // at 8 — identical to the Python golden model for any b_dtc.
         u_target = r_apply / g_units;
         best_err = 2.0;                            // > any wrapped |error|
         j_best   = 0;
         c_best   = 0;
-        for (cc = 0; cc <= 63; cc = cc + 1) begin
+        for (cc = 0; cc < g_units / 4.0; cc = cc + 1) begin
           for (jj = 0; jj <= 7; jj = jj + 1) begin
             u_cand = jj / 8.0 + cc / g_units;
             // wrapCycles(x): y = x - floor(x); if (y > 0.5) y -= 1  (sec.2)

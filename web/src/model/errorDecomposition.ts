@@ -9,7 +9,10 @@
  *
  * Additivity is APPROXIMATE (linear regime only, spec [APPROX]) — the report
  * includes both the individual contributions and the joint total so the
- * difference is visible.
+ * difference is visible.  The additivity gap is computed PER-CYCLE per spec
+ * section 16: gap = rms((e_joint - e_base) - sum_terms(e_term - e_base));
+ * the RSS of the contributions is kept only as a separately-named
+ * uncorrelated-combination reference.
  */
 
 import type { SimConfig } from './config';
@@ -61,8 +64,10 @@ export interface Decomposition {
   signal: string;
   baseline_rms_cycles: number;
   contributions: Record<string, number>;
-  sum_of_contributions_rms: number;
+  /** RSS of contributions — uncorrelated-combination REFERENCE only. */
+  rss_reference_rms: number;
   joint_total_rms_cycles: number;
+  /** rms of (e_joint - e_base) - sum_terms(e_term - e_base), per-cycle. */
   additivity_gap_cycles: number;
 }
 
@@ -81,6 +86,7 @@ export function decompose(cfg: SimConfig, signal: ColumnName = 'e_ZC_total'): De
   const base = simulate(baseCfg).data[signal];
 
   const contributions: Record<string, number> = {};
+  const sumDeltas = new Float64Array(base.length);
   const fullDict = cfg as unknown as Record<string, unknown>;
   for (const [term, fields] of Object.entries(TERMS)) {
     const over: Record<string, unknown> = { ...ideal };
@@ -89,6 +95,9 @@ export function decompose(cfg: SimConfig, signal: ColumnName = 'e_ZC_total'): De
     }
     const termCfg = replaceConfig(cfg, over as Partial<SimConfig>);
     const x = simulate(termCfg).data[signal];
+    for (let i = 0; i < base.length; i++) {
+      sumDeltas[i] += x[i] - base[i];
+    }
     contributions[term] = rmsDelta(x, base);
   }
 
@@ -100,12 +109,19 @@ export function decompose(cfg: SimConfig, signal: ColumnName = 'e_ZC_total'): De
   }
   const rss = Math.sqrt(ss);
 
+  // per-cycle linear-sum additivity residual (spec section 16)
+  const residual = new Float64Array(base.length);
+  for (let i = 0; i < base.length; i++) {
+    residual[i] = joint[i] - base[i] - sumDeltas[i];
+  }
+  const gap = meas.rms(residual);
+
   return {
     signal,
     baseline_rms_cycles: meas.rms(base),
     contributions,
-    sum_of_contributions_rms: rss,
+    rss_reference_rms: rss,
     joint_total_rms_cycles: jointRms,
-    additivity_gap_cycles: jointRms - rss,
+    additivity_gap_cycles: gap,
   };
 }

@@ -23,6 +23,7 @@ import {
   SectionLimitation,
 } from '../components/ChapterShell';
 import EChart from '../components/EChart';
+import SimVeil from '../components/SimVeil';
 import EpistemicTag from '../components/EpistemicTag';
 import Callout from '../components/Callout';
 import { M, MathBlock } from '../components/Math';
@@ -105,14 +106,20 @@ const EXP_META: Record<string, ExpMeta> = {
     plot: 'e_pair_digital',
     metric: 'e_pair_digital',
     chapters: [8],
-    observe: '雖然兩路共用 master accumulator,e_pair_digital 仍在部分 cycle 非零(獨立 rounding)。',
-    conclusion: '共享 state 但獨立量化(mode C)不保證逐拍 reverse;要 exact 必須共用 final code。',
+    observe:
+      '共享 master accumulator + 獨立 nearest 量化:e_pair_digital 全部 512 拍精確為 0' +
+      '(N=3.13 無 half-LSB tie;nearest 對互補 target 的捨入恰好互消)。',
+    conclusion:
+      'mode C 只是「條件性 exact」:nearest 無 tie 時剛好逐拍互消,但 tie 或獨立 state 的 DSM' +
+      '(exp05)就會破 —— 要無條件 exact 必須共用 final code(mode D)。',
   },
   exp05: {
     plot: 'e_pair_digital',
     metric: 'e_pair_digital',
     chapters: [8, 9],
-    observe: 'e_pair_digital 頻繁跳動(±1 LSB 級),即使長期平均正確。',
+    observe:
+      'e_pair_digital 在 {−1, 0, +1} LSB 之間持續跳動,約 64% 的 cycle 非零' +
+      '(量測 326/512),即使長期平均正確。',
     conclusion: '獨立 DSM(mode B)平均對、逐拍錯,破壞 reverse pairing —— 不建議。',
   },
   exp06: {
@@ -126,28 +133,34 @@ const EXP_META: Record<string, ExpMeta> = {
     plot: 'e_FB_abs',
     metric: 'e_FB_abs',
     chapters: [11],
-    observe: '誤差為固定 −0.3 LSB 的週期 pattern(週期 10 拍)→ 頻譜上是離散 spur。',
-    conclusion: '固定捨入的誤差是 deterministic spur,平均不為 0;適合當 DSM 比較的對照組。',
+    observe:
+      '誤差為週期 10 的十階鋸齒(0.1-LSB 階梯掃過 ±0.5 LSB,平均約 +0.05 LSB)' +
+      '→ 頻譜上是離散 spur。',
+    conclusion: '固定捨入的誤差是 deterministic spur(平均 +0.05 LSB ≠ 0);適合當 DSM 比較的對照組。',
   },
   exp08: {
     plot: 'e_FB_abs',
     metric: 'e_FB_abs',
     chapters: [11],
-    observe: '誤差在 −0.3 與 +0.7 LSB 之間切換(pattern 0,0,0,1 循環),長期平均趨近 0。',
+    observe:
+      '誤差為 0.1-LSB 階梯的多階 shaped 序列,峰值 ±0.7 LSB,長期平均趨近 0' +
+      '(constant-offset 輸入時退化為 −0.3/+0.7 切換,carry pattern 0,0,0,1,0,0,1,0,0,1 以週期 10 循環)。',
     conclusion: 'ef1 DSM 用較大的瞬時 peak 換取零平均與 noise shaping —— 頻譜與時域要一起看。',
   },
   exp09: {
     plot: 'e_pair_digital',
     metric: 'e_pair_digital',
     chapters: [8, 9],
-    observe: '兩條線對照:mode D 恆為 0,mode B 頻繁非零 —— 同為 ef1、只差共享與否。',
+    observe:
+      '兩條線對照:mode D 恆為 0,mode B 約 64% cycle 非零(量測 326/512)' +
+      '—— 同為 ef1、只差共享與否。',
     conclusion: 'shared final code 是逐拍 exact reverse 的唯一保證,與 quantizer 種類無關。',
   },
   exp10: {
     plot: 'e_FB_abs',
     metric: 'e_FB_abs',
     chapters: [12],
-    observe: 'e_FB_abs 恆為 +0.13 cycle = 46.8°,是 half-LSB(0.703°)的 66.6 倍。',
+    observe: 'e_FB_abs 恆為 −0.13 cycle(|e| = 46.8°),是 half-LSB(0.703°)的 66.6 倍。',
     conclusion: 'latency bug 的誤差比量化誤差大近兩個數量級:pipeline 對齊是第一優先。',
   },
   exp11: {
@@ -168,7 +181,9 @@ const EXP_META: Record<string, ExpMeta> = {
     plot: 'e_ZC_hw',
     metric: 'e_ZC_hw',
     chapters: [15],
-    observe: '誤差隨 c_INJ code 變動(code-dependent),full range 處最大約 200 fs。',
+    observe:
+      '誤差隨 c_INJ code 變動(code-dependent):gain 項在 naive-mapping 最大 code c_INJ=31 處' +
+      '達 96.7 fs,疊加量化後量測 max|e_ZC_hw| = 205.9 fs;滿 range 上界約 200 fs。',
     conclusion: '1% DTC gain mismatch 是 code-dependent、可校正項;比較 naive/calibrated 見 exp19。',
   },
   exp14: {
@@ -200,10 +215,13 @@ const EXP_META: Record<string, ExpMeta> = {
     conclusion: 'injection 的價值在把 unbounded VCO noise 變成 bounded residual;sin map 是現實近似。',
   },
   exp18: {
-    plot: 'e_FB_abs',
-    metric: 'e_FB_abs',
+    plot: 'e_ZC_hw',
+    metric: 'e_ZC_hw',
     chapters: [5],
-    observe: 'normalized DTC 的 phase LSB 恆為 1.40625°;fixed-time DTC 的誤差幅度隨 f_vco 改變。',
+    observe:
+      '六個 off-grid N 兩兩對照:normalized 的 e_ZC_hw 只剩量化(≤ half-LSB,量測 144.7–155.7 fs);' +
+      'fixed_time 疊加 code-dependent scaling 誤差,離 12.5 GHz 越遠越大' +
+      '(N=3.01 量測 max|e_ZC_hw| 155.7 → 489.0 fs)。',
     conclusion: 'DTC 標定方式(normalized vs fixed-time)決定跨頻率行為,12–13 GHz 掃描一目了然。',
   },
   exp19: {
@@ -219,6 +237,36 @@ const EXP_META: Record<string, ExpMeta> = {
     chapters: [9],
     observe: 'mode D(accumulated shared state)恆 0;mode A(逐拍 bit-stream 獨立量化)非零。',
     conclusion: 'injection 要拉的是 accumulated phase state / final common code,不是瞬時 DSM bit。',
+  },
+  exp21: {
+    plot: 'theta_plus',
+    metric: 'e_ZC_total',
+    chapters: [9, 13],
+    observe:
+      '三條 theta_plus[k](rad,512 cycles、seed 12345):(a) full actuator 鎖定,' +
+      'residual rms(last 256)0.015 rad;(b) dsm_only 無 gating:kick 落點掃過 ±0.5 cycle' +
+      '(e_ZC_hw rms 0.289 cycle),loop 失鎖,rms 1.81 rad;(c) dsm_only + threshold gating' +
+      '(|e_ZC_hw| ≤ 0.0625 cycle):只 fire 67/512(13.1%),回到有界 0.102 rad。' +
+      '注意 e_ZC_hw 是 deterministic、與 gating 無關:(b)(c) 的 e_ZC_hw 逐拍相同,' +
+      '差別全在 inj_fired mask(debug table 可逐拍檢查:非 fire 拍 delta_theta = 0)。',
+    conclusion:
+      'dsm_only(classic divider-modulating DSM,無 PMUX/DTC/tap)與 reverse injection ' +
+      '不相容:無 gating 直接失鎖;gating 能止血(有界 lock)但修正率剩 13%,residual ' +
+      '仍比 full actuator 差約 7 倍(0.102 vs 0.015 rad)—— fractional actuator 是 baseline,不是選配。',
+  },
+  exp22: {
+    plot: 'e_FB_abs',
+    metric: 'e_FB_abs',
+    chapters: [9, 11],
+    observe:
+      'ef1 / mash11 / mash111 三條 e_FB_abs(mode D、full actuator,512 cycles):' +
+      'rms 0.47 / 0.69 / 1.19 LSB,峰值 0.76 / 1.36 / 1.76 LSB —— 階數越高瞬時誤差越大;' +
+      'e_ZC_total rms 同步為 0.00182 / 0.00268 / 0.00467 cycle。n_int 在 N=3.13 三者都只用 ' +
+      '{3, 4};e_pair_digital 三者全恆 0(mode D identity 與 quantizer 無關)。',
+    conclusion:
+      '高階 MASH 改的是頻譜形狀(higher-order noise shaping),不是誤差大小 —— peak 與 ' +
+      'placement 誤差反而變大,必須由 DTC(full actuator)吃掉。掃 N∈[3,3.25] 時 ' +
+      'mash11/mash111 的 n_int 可達 {2,3,4}(小 α 才出現 2),divider 整數餘裕要照最壞情況設計。',
   },
 };
 
@@ -262,6 +310,10 @@ function seriesLabel(cfg: SimConfig, i: number): string {
   if (cfg.n_div !== d.n_div) parts.push(`N=${cfg.n_div}`);
   if (cfg.arch_mode !== d.arch_mode) parts.push(`mode ${cfg.arch_mode}`);
   if (cfg.quantizer !== d.quantizer) parts.push(cfg.quantizer);
+  if (cfg.actuator_mode !== d.actuator_mode) parts.push(cfg.actuator_mode);
+  if (cfg.inj_gate_mode !== d.inj_gate_mode) {
+    parts.push(`gate≤${trimNumber(cfg.inj_gate_threshold_cycles, 4)}`);
+  }
   if (cfg.latency_cycles !== d.latency_cycles) parts.push(`L=${cfg.latency_cycles}`);
   if (cfg.lookahead !== d.lookahead) parts.push(cfg.lookahead ? 'LA' : 'no-LA');
   if (cfg.inj_mapping !== d.inj_mapping) parts.push(cfg.inj_mapping);
@@ -285,6 +337,8 @@ interface DashEntry {
   key: string;
   id: string;
   label: string;
+  /** index into presetConfigs(preset)(比較型 experiment 選特定 config;預設 0) */
+  cfgIndex?: number;
 }
 
 const DASH_ENTRIES: DashEntry[] = [
@@ -296,6 +350,9 @@ const DASH_ENTRIES: DashEntry[] = [
   { key: 'tap', id: 'exp12', label: '1° tap mismatch (exp12)' },
   { key: 'gain', id: 'exp13', label: '1% DTC gain (exp13)' },
   { key: 'inl', id: 'exp14', label: 'sin INL 0.5 LSB (exp14)' },
+  { key: 'dsmOnly', id: 'exp21', cfgIndex: 1, label: 'dsm_only 無 gating (exp21b)' },
+  { key: 'dsmGate', id: 'exp21', cfgIndex: 2, label: 'dsm_only + gating (exp21c)' },
+  { key: 'mash111', id: 'exp22', cfgIndex: 2, label: 'mash111 (exp22c)' },
 ];
 
 const DEFAULT_ACTIVE: Record<string, boolean> = Object.fromEntries(
@@ -392,6 +449,12 @@ interface RunInfo {
   diff: DiffEntry[];
 }
 
+interface DashRun {
+  entry: DashEntry;
+  res: SimResult;
+  sum: SimSummary;
+}
+
 const numFmt = (value: unknown): string =>
   typeof value === 'number' ? trimNumber(value, 4) : String(value ?? '');
 
@@ -444,28 +507,46 @@ export default function Chapter17() {
   }, [unit]) as (v: number, tVcoS: number) => number;
   const unitSuffix = unit === 'cycles' ? 'cycles' : unit === 'deg' ? 'deg' : 'fs';
 
-  /* ---------------- experiment browser(20 presets 一鍵切換) -------- */
+  /* ---------------- experiment browser(22 presets 一鍵切換) -------- */
 
   const preset: Experiment = useMemo(() => getPreset(presetId), [presetId]);
   const expMeta = EXP_META[preset.id];
 
-  const browserRuns: RunInfo[] = useMemo(
-    () =>
-      presetConfigs(preset).map((cfg, i) => {
-        const res = simulate(replaceConfig(cfg, { n_cycles: browserCycles }));
-        return { cfg, res, sum: summary(res), label: seriesLabel(cfg, i), diff: configDiff(cfg) };
-      }),
-    [preset, browserCycles],
-  );
+  /* 所有 dashboard 模擬都在 post-paint effect 中計算(setTimeout 0):
+     切 preset 時先立即 paint(spinner + veil 可見),再跑模擬。 */
+  const [browserRuns, setBrowserRuns] = useState<RunInfo[] | null>(null);
+  useEffect(() => {
+    setBrowserRuns(null);
+    const id = window.setTimeout(() => {
+      setBrowserRuns(
+        presetConfigs(preset).map((cfg, i) => {
+          const res = simulate(replaceConfig(cfg, { n_cycles: browserCycles }));
+          return { cfg, res, sum: summary(res), label: seriesLabel(cfg, i), diff: configDiff(cfg) };
+        }),
+      );
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [preset, browserCycles]);
 
-  const isPhasePlot = expMeta.plot !== 'j_INJ';
+  /** rad 欄位(§14 dynamics):照原值畫,不做 cycles→deg/fs 換算 */
+  const RAD_PLOT_COLS: ReadonlySet<ColumnName> = useMemo(
+    () => new Set<ColumnName>(['theta_minus', 'e_inj', 'delta_theta', 'theta_plus']),
+    [],
+  );
+  const isRadPlot = RAD_PLOT_COLS.has(expMeta.plot);
+  const isPhasePlot = expMeta.plot !== 'j_INJ' && !isRadPlot;
+  const plotAxisLabel = isPhasePlot
+    ? `${expMeta.plot} (${unitSuffix})`
+    : isRadPlot
+      ? `${expMeta.plot} (rad)`
+      : 'j_INJ (tap index)';
 
   const browserOption = useMemo(
     () =>
       makeLineOption({
         xLabel: 'k (reference cycle)',
-        yLabel: isPhasePlot ? `${expMeta.plot} (${unitSuffix})` : 'j_INJ (tap index)',
-        series: browserRuns.map((r) => {
+        yLabel: plotAxisLabel,
+        series: (browserRuns ?? []).map((r) => {
           const col = r.res.data[expMeta.plot];
           const pts: [number, number][] = [];
           for (let i = 0; i < col.length; i++) {
@@ -474,24 +555,29 @@ export default function Chapter17() {
           return { name: r.label, data: pts, step: 'middle' as const, showSymbol: false };
         }),
       }),
-    [browserRuns, expMeta.plot, isPhasePlot, conv, unitSuffix, ct],
+    [browserRuns, expMeta.plot, isPhasePlot, plotAxisLabel, conv, ct],
   );
 
   /* ---------------- 圖 #29 comparison dashboard --------------------- */
 
-  const dashRuns = useMemo(
-    () =>
-      DASH_ENTRIES.filter((e) => dashActive[e.key]).map((e) => {
-        const cfg = presetConfigs(getPreset(e.id))[0];
-        const res = simulate(replaceConfig(cfg, { n_cycles: 512 }));
-        return { entry: e, res, sum: summary(res) };
-      }),
-    [dashActive],
-  );
+  const [dashRuns, setDashRuns] = useState<DashRun[] | null>(null);
+  useEffect(() => {
+    setDashRuns(null);
+    const id = window.setTimeout(() => {
+      setDashRuns(
+        DASH_ENTRIES.filter((e) => dashActive[e.key]).map((e) => {
+          const cfg = presetConfigs(getPreset(e.id))[e.cfgIndex ?? 0];
+          const res = simulate(replaceConfig(cfg, { n_cycles: 512 }));
+          return { entry: e, res, sum: summary(res) };
+        }),
+      );
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [dashActive]);
 
   const metricRows = useMemo(
     () =>
-      dashRuns.map((r) => ({
+      (dashRuns ?? []).map((r) => ({
         config: r.entry.label,
         eFB_rms_fs: r.sum.e_FB_abs.rms_fs,
         eFB_p2p_fs: r.sum.e_FB_abs.p2p_fs,
@@ -515,7 +601,7 @@ export default function Chapter17() {
         title: `${dashSignal}[k](time domain)`,
         xLabel: 'k (reference cycle)',
         yLabel: `${dashSignal} (${unitSuffix})`,
-        series: dashRuns.map((r) => {
+        series: (dashRuns ?? []).map((r) => {
           const col = r.res.data[dashSignal];
           const pts: [number, number][] = [];
           for (let i = 0; i < col.length; i++) {
@@ -529,7 +615,7 @@ export default function Chapter17() {
 
   const psdData = useMemo(
     () =>
-      dashRuns.map((r) => ({
+      (dashRuns ?? []).map((r) => ({
         label: r.entry.label,
         a: periodogramPsd(r.res.data.e_FB_abs, r.res.config.f_ref_hz),
         b: periodogramPsd(r.res.data.e_ZC_hw, r.res.config.f_ref_hz),
@@ -572,12 +658,17 @@ export default function Chapter17() {
   const debugCfgs = useMemo(() => presetConfigs(preset), [preset]);
   const effDebugIdx = Math.min(debugCfgIdx, debugCfgs.length - 1);
 
-  const debugRun = useMemo(
-    () => simulate(replaceConfig(debugCfgs[effDebugIdx], { n_cycles: debugCycles })),
-    [debugCfgs, effDebugIdx, debugCycles],
-  );
+  const [debugRun, setDebugRun] = useState<SimResult | null>(null);
+  useEffect(() => {
+    setDebugRun(null);
+    const id = window.setTimeout(() => {
+      setDebugRun(simulate(replaceConfig(debugCfgs[effDebugIdx], { n_cycles: debugCycles })));
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [debugCfgs, effDebugIdx, debugCycles]);
 
   const debugRows = useMemo(() => {
+    if (debugRun === null) return [];
     const n = debugRun.data.k.length;
     const rows: Record<string, unknown>[] = [];
     for (let i = 0; i < n; i++) {
@@ -590,14 +681,19 @@ export default function Chapter17() {
 
   /* ---------------- simulation status(top bar) --------------------- */
 
+  const pending = browserRuns === null || dashRuns === null || debugRun === null;
   const totalCycles =
-    browserRuns.reduce((a, r) => a + r.res.data.k.length, 0) +
-    dashRuns.reduce((a, r) => a + r.res.data.k.length, 0) +
-    debugRun.data.k.length;
+    (browserRuns ?? []).reduce((a, r) => a + r.res.data.k.length, 0) +
+    (dashRuns ?? []).reduce((a, r) => a + r.res.data.k.length, 0) +
+    (debugRun === null ? 0 : debugRun.data.k.length);
 
   useEffect(() => {
-    setStatus('done', `${presetId}:共 ${totalCycles} cycles(seed 12345)`);
-  }, [setStatus, presetId, totalCycles]);
+    if (pending) {
+      setStatus('running', `${presetId}:模擬計算中…`);
+    } else {
+      setStatus('done', `${presetId}:共 ${totalCycles} cycles(seed 12345)`);
+    }
+  }, [setStatus, pending, presetId, totalCycles]);
 
   /* ------------------------------------------------------------------ */
 
@@ -606,7 +702,7 @@ export default function Chapter17() {
       <SectionQuestion>
         <ul>
           <li>
-            20 個 canonical experiments(exp01–exp20)各自隔離哪一個機制?一鍵 preset 的
+            22 個 canonical experiments(exp01–exp22)各自隔離哪一個機制?一鍵 preset 的
             setup(config diff)、expected、live result 如何逐字對照?
             <EpistemicTag kind="EXPERIMENT" />
           </li>
@@ -732,14 +828,19 @@ export default function Chapter17() {
         caption={
           <span>
             x 軸:reference cycle index k(sample rate = f_ref);y 軸:
-            {isPhasePlot ? `${expMeta.plot},單位隨切換(cycles / deg / fs,依各 config 自身 T_vco 換算)` : 'j_INJ(tap index 0–7,無單位)'}
-            。單位:<UnitSwitch />。切換 preset 用右側 ParamPanel 的 20 個一鍵按鈕。
+            {isPhasePlot
+              ? `${expMeta.plot},單位隨切換(cycles / deg / fs,依各 config 自身 T_vco 換算)`
+              : isRadPlot
+                ? `${expMeta.plot}(rad,§14 dynamics 欄位,不隨單位切換)`
+                : 'j_INJ(tap index 0–7,無單位)'}
+            。單位:<UnitSwitch />。切換 preset 用右側 ParamPanel 的 22 個一鍵按鈕。
           </span>
         }
       >
         <p style={{ marginTop: 0 }}>{preset.description}</p>
+        <SimVeil active={browserRuns === null}>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12 }}>
-          {browserRuns.map((r, i) => (
+          {(browserRuns ?? []).map((r, i) => (
             <div key={i} style={{ overflowX: 'auto' }}>
               <p style={{ margin: '4px 0', fontWeight: 600 }}>
                 setup {r.label}
@@ -791,7 +892,7 @@ export default function Chapter17() {
           <EpistemicTag kind="EXPERIMENT" />:
         </p>
         <ul style={{ marginTop: 0 }}>
-          {browserRuns.map((r, i) => {
+          {(browserRuns ?? []).map((r, i) => {
             const s = r.sum[expMeta.metric];
             return (
               <li key={i}>
@@ -808,6 +909,7 @@ export default function Chapter17() {
         <p>
           engineering conclusion:{expMeta.conclusion} <EpistemicTag kind="INFERENCE" />
         </p>
+        </SimVeil>
       </SectionFigure>
 
       <SectionFigure
@@ -821,6 +923,7 @@ export default function Chapter17() {
           </span>
         }
       >
+        <SimVeil active={dashRuns === null}>
         <EChart option={dashTimeOption} height={280} />
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 12 }}>
           <EChart option={psdAOption} height={280} group="ch17-psd" />
@@ -836,6 +939,7 @@ export default function Chapter17() {
           maxHeight={260}
           exportName="ch17_dashboard_metrics.csv"
         />
+        </SimVeil>
       </SectionFigure>
 
       <SectionFigure
@@ -844,18 +948,22 @@ export default function Chapter17() {
           <span>
             SimResult 全欄位:codes(A_FB、R_FB、m_FB、c_FB、R_INJ、j_INJ、c_INJ)為整數;
             u_*、e_*、s_*、x_* 為 cycles;theta_minus、e_inj、delta_theta、theta_plus 為
-            rad(§14);seq_id / k_computed / k_applied 為 latency pipeline metadata(§13)。
+            rad(§14);inj_fired 為 0/1 gate flag(§14:gate off 時恆 1、threshold 時
+            = (|e_ZC_hw| ≤ threshold)、inj_model none 時恆 0);seq_id / k_computed /
+            k_applied 為 latency pipeline metadata(§13)。
             「匯出 CSV」輸出<strong>全精度原始值</strong>(以欄位 key 為 header),可直接與
             Python golden model 的輸出逐位 diff。
           </span>
         }
       >
-        <DebugTable
-          columns={DEBUG_COLUMNS}
-          rows={debugRows}
-          maxHeight={380}
-          exportName={`ch17_debug_${preset.id}_cfg${effDebugIdx + 1}.csv`}
-        />
+        <SimVeil active={debugRun === null}>
+          <DebugTable
+            columns={DEBUG_COLUMNS}
+            rows={debugRows}
+            maxHeight={380}
+            exportName={`ch17_debug_${preset.id}_cfg${effDebugIdx + 1}.csv`}
+          />
+        </SimVeil>
       </SectionFigure>
 
       <SectionCode
@@ -864,7 +972,7 @@ export default function Chapter17() {
         code={CODE_EXPERIMENTS}
       >
         <p>
-          20 個 experiment 與 Python <code>model/python/experiments.py</code> 共用相同 id 與
+          22 個 experiment 與 Python <code>model/python/experiments.py</code> 共用相同 id 與
           config;別名 preset <code>n3p13_shared_reverse</code> 即 exp06 式推薦組態。
         </p>
       </SectionCode>
@@ -889,7 +997,7 @@ export default function Chapter17() {
           },
           {
             code: 'const p = PRESETS[presetId];',
-            explain: 'PRESETS 是由 20 個 EXPERIMENTS 加一個別名建成的 id → Experiment 查表。',
+            explain: 'PRESETS 是由 22 個 EXPERIMENTS 加一個別名建成的 id → Experiment 查表。',
           },
           {
             code: "if (p === undefined) { throw new Error(`unknown preset '${presetId}'`); }",
@@ -898,7 +1006,7 @@ export default function Chapter17() {
           {
             code: 'if (preset.configs !== undefined) { return [...preset.configs]; }',
             explain:
-              '比較型 experiment(exp09/15/16/17/18/19/20)帶 configs 陣列;presetConfigs() 把單一與多重統一為陣列,dashboard 迴圈直接可用。',
+              '比較型 experiment(exp09、exp15–exp22)帶 configs 陣列;presetConfigs() 把單一與多重統一為陣列,dashboard 迴圈直接可用。',
           },
           {
             code: 'return [preset.config as SimConfig];',
@@ -907,7 +1015,7 @@ export default function Chapter17() {
           {
             code: 'const fsPerCycle = res.t_vco_s / 1e-15;',
             explain:
-              'cycles → fs 的轉換係數 = T_vco / 1 fs。metrics 表的 fs 欄位由此而來;每個 config 用自己的 T_vco(exp18 的 12/12.5/13 GHz 各不相同)。',
+              'cycles → fs 的轉換係數 = T_vco / 1 fs。metrics 表的 fs 欄位由此而來;每個 config 用自己的 T_vco(exp18 的 12.04–12.96 GHz 各不相同)。',
           },
           {
             code: 'rms_deg: meas.rms(x) * 360.0,',
@@ -930,12 +1038,13 @@ export default function Chapter17() {
             cycle 非零 <EpistemicTag kind="EXPERIMENT" />。
           </li>
           <li>
-            exp10 → exp11:e_FB_abs 從恆定 0.13 cycle(46.8°)回到 ±half-LSB 內 —— 兩個 preset
+            exp10 → exp11:e_FB_abs 從恆定 −0.13 cycle(|e| = 46.8°)回到 ±half-LSB 內 —— 兩個 preset
             的 config diff 只差 <code>lookahead</code> 一個欄位。
           </li>
           <li>
-            dashboard PSD:N=3.13 時 α = 13/100,量化誤差 pattern 週期 P = 100 拍 → spur 間距
-            f_ref/100 = 40 MHz <EpistemicTag kind="EXACT" />;移動游標時兩張 PSD 的
+            dashboard PSD:N=3.13 時 fine-code 殘量每拍走 0.28 LSB = 7/25,量化誤差 pattern
+            週期 P = 25 拍 → spur 間距 f_ref/25 = 160 MHz <EpistemicTag kind="EXACT" />
+            (x_ideal 本身週期 100,但誤差序列的基本週期是 25);移動游標時兩張 PSD 的
             axisPointer 同步指到同一頻率。
           </li>
           <li>
@@ -950,14 +1059,25 @@ export default function Chapter17() {
             debug table:mode D 時逐拍檢查 (R_FB + R_INJ) mod 256 = 0;seq_id / k_computed /
             k_applied 三欄顯示 latency pipeline 的對齊(L=1 時 k_applied = k_computed + 1)。
           </li>
+          <li>
+            exp21(dsm_only):瀏覽器圖改畫 theta_plus(rad);把 debug table 切到 config #3、
+            n_cycles 拉到 512,inj_fired 欄逐拍顯示 gate 決策(量測 67/512 拍 fire,mask 恰為
+            |e_ZC_hw| ≤ 0.0625),且非 fire 拍 delta_theta = 0 —— dsm_only 下 R_FB、R_INJ、
+            j_INJ、c_INJ 四欄恆 0(§7.1)。<EpistemicTag kind="EXPERIMENT" />
+          </li>
+          <li>
+            exp22:dashboard 勾選 mash111(exp22c)後,PSD of e_FB_abs 的高頻上翹
+            (higher-order shaping)與時域 peak 變大(1.76 LSB vs ef1 的 0.76 LSB)同時可見。
+            <EpistemicTag kind="EXPERIMENT" />
+          </li>
         </ul>
       </SectionObserve>
 
       <SectionMisconception>
         <Callout type="warn" title="誤解一:「RMS 相近,架構就等價」">
           <p>
-            錯。exp07(nearest,固定 −0.3 LSB)與 exp08(ef1)的 RMS 同量級,但 exp07 的能量
-            集中在離散 spur 且 mean ≠ 0,exp08 攤成 noise floor、mean → 0、瞬時 peak 反而變大
+            錯。exp07(nearest,週期 10 十階鋸齒)與 exp08(ef1)的 RMS 同量級,但 exp07 的能量
+            集中在離散 spur 且 mean ≈ +0.05 LSB ≠ 0,exp08 攤成 noise floor、mean → 0、瞬時 peak 反而變大
             (0.7 LSB)。單一 scalar 指標不能決定架構;要同時看 metrics 表(rms / p2p / mean)
             與 PSD 形狀。<EpistemicTag kind="EXPERIMENT" />
           </p>
@@ -979,6 +1099,8 @@ export default function Chapter17() {
             推薦架構鏈由實驗逐步支持:shared master accumulator(exp04/20)→ quantize once +
             modular reverse(exp06/09)→ fixed-latency look-ahead(exp10/11)→ calibrated
             tap/DTC mapping(exp12/13/19)→ nearest baseline,評估後才考慮 DSM(exp07/08)。
+            前提是 full fractional actuator:dsm_only 失鎖、gating 只是止血(exp21);
+            高階 MASH 只改頻譜、加大 peak(exp22)。
             <EpistemicTag kind="INFERENCE" />
           </li>
           <li>

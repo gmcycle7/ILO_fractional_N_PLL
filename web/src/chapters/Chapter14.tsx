@@ -293,7 +293,7 @@ export default function Chapter14() {
         { name: 'periodic(N=3.13)', data: per.data, color: ct.accent, width: 1.4 },
         { name: 'random(σ_ref)', data: rnd.data, color: ct.series[1], width: 1.4 },
         {
-          name: 'spurs(m·40 MHz)',
+          name: 'spurs(m·160 MHz)',
           data: spurs,
           type: 'scatter',
           color: ct.bad,
@@ -462,11 +462,11 @@ export default function Chapter14() {
         caption={
           <span>
             三個 config 皆走 linear injection map(K=0.3):灰 = 固定 route offset(+2
-            LSB);藍 = N=3.13 nearest 量化(週期 P=100);橘 = reference jitter 100 fs
-            rms。上圖 e_ZC_total(單位:<UnitSwitch />):fixed 的 miss 被 loop 收斂到
+            LSB);藍 = N=3.13 nearest 量化(fine-code 誤差週期 P=25);橘 = reference jitter
+            100 fs rms。上圖 e_ZC_total(單位:<UnitSwitch />):fixed 的 miss 被 loop 收斂到
             0,代價是 θ⁺(中圖)停在 −2π·(2/256) ≈ −0.049 rad 的 static offset;periodic 留下
             週期 ripple;random 留下 noise。下圖為 θ⁺ 的 PSD(Hann periodogram,sample rate =
-            f_ref):periodic → m×40 MHz 的 spurs(紅點,f_spur = m/P·f_ref,P=100);random →
+            f_ref):periodic → m×160 MHz 的 spurs(紅點,f_spur = m/P·f_ref,P=25);random →
             平坦 floor;fixed 是 DC offset,不出現在 PSD。
             <EpistemicTag kind="EXPERIMENT" /> <EpistemicTag kind="INFERENCE" />
           </span>
@@ -586,8 +586,9 @@ export default function Chapter14() {
             <EpistemicTag kind="EXPERIMENT" />
           </li>
           <li>
-            periodic(藍):e_ZC_total 呈 ±half-LSB 內的週期 ripple;PSD 出現 m×40 MHz spurs
-            (P=100 → f_ref/P = 40 MHz)。<EpistemicTag kind="EXPERIMENT" />
+            periodic(藍):e_ZC_total 呈 ±half-LSB 內的週期 ripple;PSD 出現 m×160 MHz spurs
+            (fine-code 誤差週期 P=25 → f_ref/P = 160 MHz;0.28 LSB/拍 = 7/25)。
+            <EpistemicTag kind="EXPERIMENT" />
           </li>
           <li>
             random(橘):時域無結構,PSD 為平坦 floor — 三種 error 性質對應三種頻譜後果。

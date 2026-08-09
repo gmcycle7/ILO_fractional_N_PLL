@@ -7,6 +7,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useChapterNDiv } from '../lib/globalParams';
 import {
   ChapterShell,
   SectionQuestion,
@@ -63,13 +64,14 @@ const QUANT_OPTIONS: { value: Quantizer; label: string }[] = [
   { value: 'truncate', label: 'truncate' },
   { value: 'ef1', label: 'ef1(1st-order DSM)' },
   { value: 'mash11', label: 'mash11(MASH 1-1)' },
+  { value: 'mash111', label: 'mash111(MASH 1-1-1)' },
 ];
 
 export default function Chapter09() {
   const { unit } = useUnit();
   const ct = useChartTheme();
   const { setStatus } = useSimStatus();
-  const [nDiv, setNDiv] = useState(3.13);
+  const [nDiv, setNDiv] = useChapterNDiv();
   const [quant, setQuant] = useState<Quantizer>('ef1');
 
   // 主模擬:mode D(預設),quantizer 可切換
@@ -84,9 +86,54 @@ export default function Chapter09() {
     return presetConfigs(preset).map((c) => simulate(replaceConfig(c, { n_cycles: N_CYCLES })));
   }, []);
 
+  // ef1 vs mash11 vs mash111(N=3.13、mode D、full actuator):
+  // accumulated state(dsm_state)對照 output word(dsm_out = A_FB)增量
+  const orders = useMemo(() => {
+    const qs: Quantizer[] = ['ef1', 'mash11', 'mash111'];
+    const sims = qs.map((q) =>
+      simulate(fromPartial({ n_div: 3.13, arch_mode: 'D', quantizer: q, n_cycles: N_CYCLES })),
+    );
+    const gn = sims[0].g * 3.13; // 每拍理想增量 G·N(LSB)
+    const dA = sims.map((s) => {
+      const a = s.data.A_FB;
+      const out = new Float64Array(a.length - 1);
+      for (let k = 0; k < a.length - 1; k++) {
+        out[k] = a[k + 1] - a[k] - gn;
+      }
+      return out;
+    });
+    // 三種 quantizer 的 dsm_state 應重合(同一條 frac 遞迴);量測浮點差上界
+    let maxStateDiff = 0;
+    // n_int 序列逐拍比較(bit 層是否可分辨階數)
+    let nIntDiff = 0;
+    for (let i = 1; i < sims.length; i++) {
+      const s0 = sims[0].data.dsm_state;
+      const si = sims[i].data.dsm_state;
+      const n0 = sims[0].data.n_int;
+      const ni = sims[i].data.n_int;
+      for (let k = 0; k < s0.length; k++) {
+        const d = Math.abs(si[k] - s0[k]);
+        if (d > maxStateDiff) maxStateDiff = d;
+        if (ni[k] !== n0[k]) nIntDiff += 1;
+      }
+    }
+    const stats = dA.map((arr) => {
+      let mn = Infinity;
+      let mx = -Infinity;
+      const levels = new Set<number>();
+      for (let k = 0; k < arr.length; k++) {
+        if (arr[k] < mn) mn = arr[k];
+        if (arr[k] > mx) mx = arr[k];
+        levels.add(Math.round(arr[k] * 1e6) / 1e6);
+      }
+      return { min: mn, max: mx, rms: rms(arr), levels: levels.size };
+    });
+    return { qs, sims, dA, stats, maxStateDiff, nIntDiff };
+  }, []);
+
   useEffect(() => {
-    setStatus('done', `${N_CYCLES} cycles × 3 configs`);
-  }, [sim, exp20, setStatus]);
+    setStatus('done', `${N_CYCLES} cycles × 6 configs`);
+  }, [sim, exp20, orders, setStatus]);
 
   const tVco = sim.t_vco_s;
   const tVco20 = exp20[0].t_vco_s;
@@ -189,6 +236,42 @@ export default function Chapter09() {
       }),
     [exp20, unit, tVco20, ct],
   );
+
+  // DSM 部署對照圖:accumulated state(上)vs output-word 增量(下)
+  const optOrderState = useMemo(() => {
+    const colors = [ct.accent, ct.warn, ct.bad];
+    return makeLineOption({
+      xLabel: 'k (reference cycle)',
+      yLabel: 'dsm_state (LSB)',
+      series: orders.qs.map((q, i) => ({
+        name: q,
+        data: toXY(orders.sims[i].data.dsm_state, 64),
+        step: 'middle' as const,
+        showSymbol: false,
+        color: colors[i],
+        width: i === 0 ? 2.6 : 1.4,
+        dashed: i > 0,
+      })),
+      yMin: -0.1,
+      yMax: 1.1,
+    });
+  }, [orders, ct]);
+
+  const optOrderOut = useMemo(() => {
+    const colors = [ct.accent, ct.warn, ct.bad];
+    return makeLineOption({
+      xLabel: 'k (reference cycle)',
+      yLabel: 'ΔA_FB − G·N (LSB)',
+      series: orders.qs.map((q, i) => ({
+        name: q,
+        data: toXY(orders.dA[i], 64),
+        step: 'middle' as const,
+        showSymbol: false,
+        color: colors[i],
+        width: i === 0 ? 2.2 : 1.4,
+      })),
+    });
+  }, [orders, ct]);
 
   const exp20Stats = useMemo(
     () => ({
@@ -388,7 +471,7 @@ export default function Chapter09() {
           <span>
             x 軸:reference cycle k(sample rate = f_ref,MODEL_SPEC §17);y 軸:
             quantizer 內部 state(單位 LSB;ef1 為 error-feedback 殘量 e ∈ [0,1),
-            mash11 為第一級 accumulator acc1)。nearest / floor / truncate 為
+            mash11 / mash111 為第一級 accumulator acc1)。nearest / floor / truncate 為
             memoryless,state 恆為 0 — 用右側面板切換 quantizer 觀察差異。這個 state
             就是「accumulated quantization error」:丟掉它,就丟掉了 sub-LSB 的累積
             資訊。
@@ -443,6 +526,65 @@ export default function Chapter09() {
         }
       >
         <EChart option={optExp20} height={300} group="ch9-k" />
+      </SectionFigure>
+
+      <SectionFigure
+        title="真實 DSM 部署對照 — MASH accumulator、DTC QNC、與高階 carry-out(ef1 vs mash11 vs mash111)"
+        caption={
+          <span>
+            兩圖皆為 N=3.13、mode D、full actuator、{N_CYCLES} cycles(前 64 拍)。
+            上:<code>dsm_state</code>(ef1 = error-feedback 殘量 e;mash11 / mash111 =
+            第一級 accumulator acc1,單位 LSB)— 三條軌跡<b>重合</b>(實測最大差{' '}
+            {orders.maxStateDiff.toExponential(2)} LSB,浮點誤差級)。下:每拍 output
+            word 增量偏差 <M>{'\\Delta A_{FB}[k] - G\\,N'}</M>(LSB):ef1 取{' '}
+            {orders.stats[0].levels} 個 level(範圍 {trimNumber(orders.stats[0].min, 3)} 到 +
+            {trimNumber(orders.stats[0].max, 3)},rms {trimNumber(orders.stats[0].rms, 3)});
+            mash11 取 {orders.stats[1].levels} 個(rms {trimNumber(orders.stats[1].rms, 3)});
+            mash111 取 {orders.stats[2].levels} 個(範圍 {trimNumber(orders.stats[2].min, 3)}{' '}
+            到 +{trimNumber(orders.stats[2].max, 3)},rms {trimNumber(orders.stats[2].rms, 3)})
+            <EpistemicTag kind="EXPERIMENT" />。同一段模擬中三種 quantizer 的整數除頻
+            bit <M>{'n[k]'}</M> 逐拍相異 {orders.nIntDiff} 次(N=3.13 下全為
+            /3-/4)— bit 層完全看不出階數差異,更看不出 phase。
+          </span>
+        }
+      >
+        <p>
+          本章的論證(injection 要拉累積量)不是本模型的特殊需求,它正對應真實
+          fractional-N PLL 中 DSM 的兩大部署方式:
+        </p>
+        <p>
+          <b>(a) divider-modulating MASH。</b>經典 fractional-N 把 MASH 掛在除頻器上
+          調變瞬時除數 <M>{'n[k]'}</M>。injection 需要的量是 accumulated quantization
+          error — 即本章的 <M>{'p[k]=\\sum_{j<k}(N-n[j])'}</M> — 而這正是 MASH{' '}
+          <b>第一級 accumulator 的內容物</b>:ef1 的殘量遞迴{' '}
+          <M>{'e[k]=\\operatorname{frac}(u[k]+e[k-1])'}</M> 與 MASH 第一級{' '}
+          <M>{'acc_1[k]=\\operatorname{frac}(acc_1[k-1]+\\operatorname{frac}(u[k]))'}</M>{' '}
+          是同一條遞迴 <EpistemicTag kind="EXACT" />(上圖三線重合;浮點差 &lt;
+          1e-11 LSB <EpistemicTag kind="EXPERIMENT" />)。換言之,真實 MASH 晶片裡
+          injection 端要的 state <b>已經存在於 DSM 內部</b> — 該佈線拉的是
+          accumulator 內容,不是 carry-out bit。
+        </p>
+        <p>
+          <b>(b) DTC-assisted quantization-noise cancellation(QNC)。</b>現代
+          fractional-N PLL 用 DSM residue(= 同一個 accumulated state)驅動
+          cancellation DTC,在 phase detector 之前抵消量化誤差。本架構的 shared-code
+          scheme 正是 QNC 的 <b>injection-side 類比</b>:同一份累積 state,一份決定
+          feedback edge,一份經 modular reverse 決定 injection pulse;差別只在誤差
+          被抵消的位置(PD 輸入前 vs VCO edge 上)。<EpistemicTag kind="INFERENCE" />
+        </p>
+        <p>
+          <b>(c) 高階 MASH 的瞬時 carry-out 更不可用。</b>mash11 輸出含{' '}
+          <M>{'(c_2-c_2^{prev})'}</M>、mash111 再加{' '}
+          <M>{'(c_3-2c_3^{prev}+c_3^{prev2})'}</M>(MODEL_SPEC §6)— 當拍輸出字混入
+          k−1、k−2 拍的 carry,單一樣本跨越多個 cycle <EpistemicTag kind="EXACT" />。
+          canonical check(§6,Test 15):<M>{'u[k]=3k+0.25'}</M> 時 mash111 前 8 個
+          輸出為 0, 4, 5, 11, 10, 18, 16, 22 — 增量 4, 1, 6, <b>−1</b>, 8, <b>−2</b>,
+          6,在每拍 +3 的 ramp 輸入下甚至出現<b>負增量</b>
+          <EpistemicTag kind="EXACT" />。下圖:輸出字擺幅隨階數變大,accumulated
+          state 卻一樣 — 階數越高,「只看當拍輸出」離 phase 資訊越遠。
+        </p>
+        <EChart option={optOrderState} height={260} group="ch9-k" />
+        <EChart option={optOrderOut} height={260} group="ch9-k" />
       </SectionFigure>
 
       <SectionCode
@@ -635,6 +777,14 @@ for (let k = 0; k < n - 1; k++) {
           這也是 Ch1 系統圖中「兩條路徑在 master accumulator 交會」的理由,以及 Ch8
           Mode D 被推薦的根本原因。
         </p>
+        <p>
+          對照真實部署(本章新增的 DSM 部署對照圖):divider-modulating MASH 的
+          第一級 accumulator 內容、DTC QNC 的 cancellation residue、本架構的 shared
+          final code — 三者是<b>同一個累積量</b>的三種化身
+          <EpistemicTag kind="INFERENCE" />;而高階 MASH(mash11 / mash111)的瞬時
+          carry-out 混入多拍 carry,單拍輸出比一階更遠離 phase 資訊,更不可作為
+          injection 的來源。<EpistemicTag kind="EXACT" />
+        </p>
       </SectionTakeaway>
 
       <SectionLimitation>
@@ -644,7 +794,8 @@ for (let k = 0; k < n - 1; k++) {
             的行為抽象,未建模實際 DSM 硬體的位寬、pipeline 或 dither 電路;模擬不含
             analog 誤差(tap/DTC mismatch)、VCO random noise 與 latency(見
             Ch12–Ch15)。「p 與 x_ideal 重合」的緊密程度依 quantizer 而定:nearest
-            下差距 ≤ half-LSB <EpistemicTag kind="EXACT" />;ef1 / mash11 暫態可較大
+            下差距 ≤ half-LSB <EpistemicTag kind="EXACT" />;ef1 / mash11 / mash111
+            暫態可較大
             (n_int 測試範圍放寬為 2–5,MODEL_SPEC §4)。互動模擬固定 {N_CYCLES}{' '}
             cycles、seed 12345。
           </p>
@@ -674,8 +825,8 @@ for (let k = 0; k < n - 1; k++) {
           onChange={setQuant}
         />
         <p style={{ fontSize: 12, opacity: 0.75 }}>
-          experiment 20 對照圖固定為 N=3.13 / ef1(mode D vs mode A),不隨上方參數
-          改變。
+          experiment 20 對照圖固定為 N=3.13 / ef1(mode D vs mode A);DSM 部署對照圖
+          固定為 N=3.13 / mode D(ef1 vs mash11 vs mash111)。兩者皆不隨上方參數改變。
         </p>
       </ParamPanel>
     </ChapterShell>

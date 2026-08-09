@@ -8,6 +8,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useChapterAlpha } from '../lib/globalParams';
 import {
   ChapterShell,
   SectionQuestion,
@@ -86,7 +87,7 @@ export function wrap01(x: number): number {
 }`;
 
 export default function Chapter03() {
-  const [alpha, setAlpha] = useState(0.13);
+  const [alpha, setAlpha] = useChapterAlpha();
   const [wheelK, setWheelK] = useState(0);
   const [playing, setPlaying] = useState(false);
   const { unit } = useUnit();

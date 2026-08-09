@@ -35,13 +35,14 @@ COLUMNS = [
     "c_FB", "n_int", "u_FB_ideal", "u_FB_digital", "u_FB_analog", "e_FB_abs",
     "dsm_state", "dsm_out", "u_INJ_ideal", "R_INJ", "j_INJ", "c_INJ",
     "u_INJ_digital", "u_INJ_analog", "e_INJ_abs", "e_pair_digital",
-    "e_pair_analog", "e_ZC_hw", "theta_minus", "e_inj", "delta_theta",
-    "theta_plus", "e_ZC_total", "seq_id", "k_computed", "k_applied",
+    "e_pair_analog", "e_ZC_hw", "inj_fired", "theta_minus", "e_inj",
+    "delta_theta", "theta_plus", "e_ZC_total", "seq_id", "k_computed",
+    "k_applied",
 ]
 
 _INT_COLUMNS = {"k", "A_FB", "I_FB", "R_FB", "m_FB", "c_FB", "n_int",
-                "dsm_out", "R_INJ", "j_INJ", "c_INJ", "seq_id", "k_computed",
-                "k_applied"}
+                "dsm_out", "R_INJ", "j_INJ", "c_INJ", "inj_fired", "seq_id",
+                "k_computed", "k_applied"}
 
 _SUMMARY_SIGNALS = ["e_FB_abs", "e_INJ_abs", "e_pair_digital",
                     "e_pair_analog", "e_ZC_hw", "e_ZC_total"]
@@ -142,11 +143,21 @@ def simulate(cfg: SimConfig) -> SimResult:
     # --- computed-domain command streams ---
     fb = run_feedback(cfg, a_id, s_id, dither_stream=streams["dither_fb"])
     inj = run_injection(cfg, x_id, fb["R_FB"], dtc_inj, tap_tbl,
-                        dither_stream=streams["dither_inj"])
+                        dither_stream=streams["dither_inj"],
+                        dsm_stream=streams["dsm_inj"])
 
     # --- latency pipeline (section 13) ---
     lat = apply_latency(cfg, n, lat_stream=streams["lat"])
     idx = lat["idx"]
+
+    # per-command metadata (spec section 13): every command carries the state
+    # it was computed from and the command words derived from it.
+    for k in range(n):
+        i = int(idx[k])
+        m = lat["metadata"][k]
+        m["P_state"] = float(a_id[i])
+        m["R_FB"] = int(fb["R_FB"][i])
+        m["R_INJ"] = int(inj["R_INJ"][i])
 
     # --- applied-domain quantities (errors vs the CURRENT ideal state) ---
     s_fb_act = fb["s_FB_actual"][idx]
@@ -172,8 +183,20 @@ def simulate(cfg: SimConfig) -> SimResult:
     else:
         n_int = np.zeros(1, dtype=np.int64)
 
+    # --- injection gating (section 14): inj_fired convention:
+    # inj_model == 'none'      -> all 0 (no pulses exist to gate)
+    # gate 'off'               -> all 1
+    # gate 'threshold'         -> 1 iff |e_ZC_hw| <= inj_gate_threshold_cycles
+    if cfg.inj_model == "none":
+        inj_fired = np.zeros(n, dtype=np.int64)
+    elif cfg.inj_gate_mode == "threshold":
+        inj_fired = (np.abs(e_zc_hw)
+                     <= cfg.inj_gate_threshold_cycles).astype(np.int64)
+    else:
+        inj_fired = np.ones(n, dtype=np.int64)
+
     # --- injection dynamics (section 14) ---
-    dyn = run_dynamics(cfg, e_zc_hw, streams)
+    dyn = run_dynamics(cfg, e_zc_hw, streams, fired=inj_fired)
 
     data = {
         "k": ks,
@@ -202,6 +225,7 @@ def simulate(cfg: SimConfig) -> SimResult:
         "e_pair_digital": e_pair_dig,
         "e_pair_analog": e_pair_an,
         "e_ZC_hw": e_zc_hw,
+        "inj_fired": inj_fired,
         "theta_minus": dyn["theta_minus"],
         "e_inj": dyn["e_inj"],
         "delta_theta": dyn["delta_theta"],

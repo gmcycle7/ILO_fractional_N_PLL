@@ -702,7 +702,8 @@ export function ePair(
           </li>
           <li>
             誤差圖:e_FB_abs 與 e_INJ_abs 互為鏡像(相加恆 0);兩者的包絡由 α 的
-            fractional 走位決定,呈週期性 pattern(N=3.13 → 週期 100 拍)
+            fractional 走位決定,呈週期性 pattern(N=3.13 → 週期 25 拍,因 fine-code
+            每拍走 0.28 LSB = 7/25;x_ideal 本身則因 α = 13/100 而是 100 拍一循環)
             <EpistemicTag kind="EXPERIMENT" />。
           </li>
           <li>

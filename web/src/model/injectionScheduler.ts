@@ -17,6 +17,20 @@
  *     D (default): quantize once + modular reverse:
  *        R_INJ = (R_zero - R_FB) mod 256  ->  e_pair_digital == 0 exactly.
  *
+ * Independent DSM state (spec section 7, modes A/B/C): when the quantizer is
+ * a stateful DSM type the injection-side instance is seeded with a DISTINCT
+ * deterministic initial state drawn from the 'dsm_inj' PRNG stream
+ * (section 12, offset 10):
+ *     ef1     -> e0 = one uniform draw
+ *     mash11  -> acc1, acc2 = two uniform draws (c2_prev stays 0)
+ *     mash111 -> acc1, acc2, acc3 = three uniform draws (in that order;
+ *                c2_prev, c3_prev, c3_prev2 stay 0)
+ * nearest/floor/truncate are stateless and unaffected.
+ *
+ * Actuator mode 'dsm_only' (spec section 7.1): the fractional injection
+ * actuator is absent — R_INJ = 0, tap j = 0, c_INJ = 0 on every cycle
+ * (regardless of arch_mode; no 'dsm_inj' draws are consumed).
+ *
  * Mappings (input digital code R_INJ; target u_target = R_INJ/G):
  *     naive      : j = floor(R/32), c = R mod 32   (lower half of DTC range)
  *     nearest    : argmin over j in 0..7, c in 0..63 of
@@ -36,7 +50,7 @@ import type { SimConfig } from './config';
 import { configG } from './config';
 import type { DTCModel } from './dtcModel';
 import { pymod, wrap01, wrapCycles, wrapCyclesArr } from './phaseMath';
-import { makeQuantizer } from './quantizers';
+import { ErrorFeedbackFirstOrder, Mash11, Mash111, makeQuantizer } from './quantizers';
 import type { Mulberry32 } from './rng';
 
 export interface InjectionResult {
@@ -94,12 +108,27 @@ export function runInjection(
   dtcInj: DTCModel,
   tapTbl: ArrayLike<number>,
   ditherStream: Mulberry32 | null = null,
+  dsmStream: Mulberry32 | null = null,
 ): InjectionResult {
   const g = configG(cfg);
   const n = xNominal.length;
   const tapStep = Math.floor(g / cfg.n_tap); // 32 LSB
 
   const uIdeal = uInjIdeal(xNominal, cfg.z0_cycles);
+
+  // --- actuator mode 'dsm_only' (spec section 7.1): no fractional actuator
+  if (cfg.actuator_mode === 'dsm_only') {
+    const uInjAnalogConst = tapTbl[0] + dtcInj.delayCycles(0) + cfg.route_inj_cycles;
+    const uInjAnalog = new Float64Array(n).fill(uInjAnalogConst);
+    return {
+      u_INJ_ideal: uIdeal,
+      R_INJ: new Float64Array(n),
+      j_INJ: new Float64Array(n),
+      c_INJ: new Float64Array(n),
+      u_INJ_digital: new Float64Array(n),
+      u_INJ_analog: uInjAnalog,
+    };
+  }
 
   // --- R_INJ per architecture mode ---
   const rInj = new Float64Array(n);
@@ -110,6 +139,21 @@ export function runInjection(
   } else {
     // A, B, C: independent quantizer instance on G * u_INJ_ideal
     const q = makeQuantizer(cfg.quantizer);
+    // distinct deterministic DSM state per spec section 7 ('dsm_inj' stream)
+    if (dsmStream !== null) {
+      if (cfg.quantizer === 'ef1') {
+        (q as ErrorFeedbackFirstOrder).seedState(dsmStream.next());
+      } else if (cfg.quantizer === 'mash11') {
+        const acc1 = dsmStream.next();
+        const acc2 = dsmStream.next();
+        (q as Mash11).seedState(acc1, acc2);
+      } else if (cfg.quantizer === 'mash111') {
+        const acc1 = dsmStream.next();
+        const acc2 = dsmStream.next();
+        const acc3 = dsmStream.next();
+        (q as Mash111).seedState(acc1, acc2, acc3);
+      }
+    }
     const useDither = cfg.dither_amp_lsb > 0.0 && ditherStream !== null;
     for (let k = 0; k < n; k++) {
       let u = g * uIdeal[k];

@@ -84,12 +84,13 @@ in order, matching the Python model).
 |---|---|---|---|
 | `r_zero` | 0 | LSB | modular-reverse zero offset `R_zero` (§1, A6) |
 | `shared_mode` | 1 | – | 1 = Mode D shared code (recommended, §7); 0 = Mode A independent re-quantization |
-| `map_mode` | 0 | – | §8 decode: 0 = naive floor (`j=⌊R/32⌋, c=R mod 32`); 1 = nearest phase (tie-break smaller c, then smaller j). Calibrated joint optimization is Python-only |
+| `map_mode` | 0 | – | §8 decode: 0 = naive floor (`j=⌊R/(G/8)⌋, c=R mod G/8`); 1 = nearest phase (tie-break smaller c, then smaller j; candidate grid follows `b_dtc`: c ∈ 0..2^b_dtc−1, taps fixed at 8 — matches Python for any `b_dtc`). Calibrated joint optimization is Python-only |
 | `lat_cycles` | 0 | ref cycles | pipeline latency L, 0..8 (B3, §13); shift register of reals |
-| `look_ahead` | 1 | – | independent mode only: 1 = compute from state k+L (correct); 0 = from state k (bug mode; α=0.13, L=1 → 46.8°, Test 5) |
+| `look_ahead` | 1 | – | independent mode only: 1 = compute from state k+L (correct); 0 = from state k (bug mode; α=0.13, L=1 → 46.8°, Test 5). With `q_mode=2` and `lat_cycles≥1` the ef1 state is primed at `initial_step` (see below) |
 | `n_int_base`, `alpha`, `s0`, `b_dtc` | 3, 0.13, 0, 6 | as above | independent-mode trajectory (§3) |
 | `z0` | 0.0 | cycles | desired zero-crossing phase (§5, A5) |
 | `q_mode` | 1 | – | independent-mode quantizer instance (own ef1 state, §7) |
+| `e_q_init` | 0.0 | LSB frac | initial private ef1 state (`q_mode=2`, `shared_mode=0`). The Python model seeds this from the first `'dsm_inj'` mulberry32 draw (§7/§12); set 0.7047782763838768 for base seed 12345 to be vector-exact. Default 0.0 is the neutral §6 init, **not** vector-exact vs Python A/B/C + ef1 |
 | `vth`, `v_per_code`, `t_tran` | 0.5, 1.0, 1e-12 | V, V/LSB, s | encoding |
 
 Latency note: in `shared_mode=1` this block cannot look ahead (it does not own
@@ -98,6 +99,23 @@ correct-by-construction operation requires the *feedback* command path to be
 delayed by the same `lat_cycles` so both arms stay aligned (§13 metadata
 discussion). Pair-error identity `(R_FB + R_INJ) mod 256 = R_zero` holds
 per-edge only when both codes are sampled from the same k.
+
+ef1 look-ahead priming: the Python golden model quantizes *every* state index
+0, 1, 2, … in order and only re-times when each command is applied
+(`injection_scheduler.py` + `latency_pipeline.py`). With `shared_mode=0`,
+`q_mode=2` (ef1) and `look_ahead=1`, this module's first quantization (edge 0)
+targets state index `lat_cycles`, so `@(initial_step)` pre-runs the private
+quantizer over state indices `0..lat_cycles−1` (outputs discarded) — the ef1
+state is `frac(cumsum of inputs)`, so skipping them would offset the state and
+the `R_INJ` stream **permanently**, not just at start-up. With priming — and
+with `e_q_init` set to the golden model's seeded initial state (§7 seeds the
+injection-side ef1 instance from the `'dsm_inj'` stream; 0.7047782763838768
+at base seed 12345) — the applied `R_INJ` stream is vector-exact against the
+Python vectors for every edge `k ≥ lat_cycles`; the first `lat_cycles`
+outputs are start-up fill values (Python instead applies command k already at
+edge k < L, as if look-ahead had been running before t = 0). `look_ahead=0`
+(bug mode) needs no priming — there edge k quantizes state index k, the same
+order as Python — but still needs the matching `e_q_init`.
 
 ---
 
@@ -168,7 +186,7 @@ delay, so the output pulse width follows the input.
 | `inl_sin_amp_s` | 0.0 | s | sinusoidal INL amplitude (item 6) |
 | `p2_s`, `p3_s` | 0.0 | s | polynomial INL coefficients (item 7) |
 | `use_tap` | 0 | – | 1 = add per-tap skew from `tap_sel_in` (item 1, C1) |
-| `tap0`..`tap7` | 0.0 | s | per-tap static skew; canonical "1° all taps" @ 80 ps → 222.22e-15 each (Test 6) |
+| `tap0`..`tap7` | 0.0 | s | per-tap static skew; canonical "1° all taps" @ 80 ps → 222.22e-15 each (Test 6). Defaults are **mismatch-only**: in an all-behavioral full loop fold the nominal `N·T_vco/8` tap phase (10 ps/tap @ 80 ps) into `tapN` — see hookup rule 3 |
 | `n_codes` | 64 | – | 2^b_dtc (B1) |
 | `vth`, `v_per_code` | 0.5, 1.0 | V, V/LSB | input encoding |
 | `vhi`, `vlo`, `t_rise` | 1, 0, 1e-12 | V, V, s | output shape |
@@ -213,11 +231,35 @@ Practical rules:
    edge is racing (cross-module same-time event order is not LRM-guaranteed).
    Give consumers a delayed copy of `ref_clk` (e.g. +T_ref/4) or arm the DTC
    trigger later in the cycle, so codes are settled when sampled.
-3. **One pulse per reference cycle** into the injection model (A4); keep DTC
+3. **Nominal tap/PMUX phases are part of the loop math — include them.** The
+   schedulers' codes assume the analog paths add the *nominal* phase offsets
+   on top of the DTC delay: `j_INJ·T_vco/8` (injection tap) and
+   `m_FB·T_vco/4` (feedback PMUX). In the Python golden model these live in
+   `tap_actual(j) = j/8 + delta_tap[j]` and `pmux_actual(m) = m/4 +
+   delta_pmux[m]` (§4–§5, `model/python/tap_model.py`), and `u_INJ_analog`
+   includes the `j/8` term. `dtc_nonideal_model`'s `tap0..tap7` default to
+   **mismatch-only** (0 s), so an all-behavioral testbench that wires
+   `j_inj_out → tap_sel_in` with default taps drops the nominal tap phase
+   entirely and the injection pulses land nowhere near the intended zero
+   crossing. The rule for an all-behavioral bench:
+   * **Injection path**: on the INJ `dtc_nonideal_model` set `use_tap = 1`
+     and `tapN = N·(T_vco/8) + skew_N`. At the canonical 12.5 GHz
+     (T_vco = 80 ps): tap0..tap7 = 0, 10, 20, 30, 40, 50, 60, 70 ps plus
+     any per-tap mismatch. `tap0..tap7` then carry **nominal + mismatch**,
+     not mismatch only.
+   * **Feedback path**: add the nominal PMUX delay `m_FB·(T_vco/4)`
+     (= 0/20/40/60 ps at 80 ps T_vco) plus any PMUX skew — e.g. a second
+     `dtc_nonideal_model` in tap mode (`use_tap = 1`,
+     `tap_sel_in ← m_fb_out`, `tapM = M·(T_vco/4) + pmux-skew_M` for
+     M = 0..3; taps 4..7 unused) in series with the FB DTC.
+   When replacing a behavioral block with the transistor tap mux / PMUX,
+   the real circuit provides these nominal phases itself — drop them from
+   the behavioral parameters again.
+4. **One pulse per reference cycle** into the injection model (A4); keep DTC
    input pulses shorter than `T_ref − max(t_d)`.
-4. **Divider modulus**: `n_int_out` is the modulus for the interval [k, k+1),
+5. **Divider modulus**: `n_int_out` is the modulus for the interval [k, k+1),
    issued at edge k — registered-output semantics, sample it like RTL.
-5. The `s_ideal_out` debug node grows without bound; don't lint/limit-check
+6. The `s_ideal_out` debug node grows without bound; don't lint/limit-check
    that node, or leave it unconnected.
 
 ## Driving from the CSV command vectors (`test_vectors/csv/`)
@@ -293,6 +335,10 @@ Two ways to use them:
 * **No PRNG parity** — the §12 mulberry32 streams are not implemented;
   `$rdist_*` calls are deliberately absent (call-count per timestep is
   tool-dependent, and bit-parity with Python would be impossible anyway).
+  The one PRNG-derived value needed for *digital* vector parity — the §7
+  seeded initial ef1 state of the independent injection quantizer (first
+  `'dsm_inj'` draw) — is passed in by hand via
+  `reverse_injection_scheduler.e_q_init` instead.
 
 ## Suggested bring-up sequence
 
@@ -313,7 +359,10 @@ Two ways to use them:
    ramps at `delta_f` uncorrected; `k_inj = 0.3, delta_f = 1 MHz` → locks with
    static offset `theta_ss = asin(2π·Δf·T_ref/K_inj)`; `k_inj` ↑ → residual ↓;
    `inj_map = 2` (ideal reset) is the upper bound. Only then close the full
-   loop (scheduler → DTC → injection) and look at `e_inj_dbg` per cycle.
+   loop (scheduler → DTC → injection) — with the nominal tap/PMUX phases
+   folded into the behavioral delay path per hookup rule 3, otherwise the
+   injection pulses miss the intended zero crossing by up to 7·T_vco/8 —
+   and look at `e_inj_dbg` per cycle.
 
 Each step has a Python golden-model counterpart — debug numerical mismatches
 against Python *before* suspecting the simulator.

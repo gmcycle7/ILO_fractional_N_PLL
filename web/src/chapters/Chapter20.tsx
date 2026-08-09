@@ -167,6 +167,41 @@ const QA_LIST: QA[] = [
   },
 ];
 
+/**
+ * 補充問答:DSM 使用模式與 reverse injection 的相容性(exp21/exp22)。
+ * 量測值全部來自 golden model(512 cycles、seed 12345)。
+ */
+const DSM_QA: QA[] = [
+  {
+    n: 1,
+    q: '哪些 DSM 使用模式可以與 reverse injection 共存?各自怎麼共存?',
+    a: '四種模式,結論各異:(1) divider-modulating MASH 可以共存,但必須把 accumulated quantization state 餵給 fine actuator(DTC/PMUX)—— 即 mode D + mash quantizer + full actuator;(2) 純 dsm_only(無 fine actuator)不能無條件共存,必須 gating 且性能仍差;(3) full fractional actuator(DTC-QNC 等效)是推薦 baseline;(4) phase-domain DSM(shared final code 上的 ef1/mash)是選配,經 spur-vs-peak 評估後才用。以下三題附量測數字。',
+    basis: 'exp21/exp22;MODEL_SPEC §6/§7.1/§14',
+    tag: 'EXPERIMENT',
+  },
+  {
+    n: 2,
+    q: 'divider-MASH(調 divider 的 DSM)怎麼配 reverse injection 才正確?',
+    a: '把 MASH 建在 shared master accumulator 上(mode D),整數部分走 divider(N=3.13 時 n_int 只用 {3,4}),accumulated 殘餘交給 DTC —— 殘餘不小:e_FB_abs 峰值 1.36 LSB(mash11)/ 1.76 LSB(mash111),都超過 DTC 的 half-LSB 量化預算數倍,沒有 fine actuator 就沒有人吃掉它。做對之後 e_pair_digital 仍恆 0(identity 與 quantizer 無關),e_ZC_total rms 0.00268 / 0.00467 cycle(mash11 / mash111)。掃 N∈[3,3.25] 時 n_int 可達 {2,3,4}(小 α 才出現 2),divider 整數餘裕要照最壞情況設計。',
+    basis: 'exp22 量測(rms 0.47/0.69/1.19 LSB、峰值 0.76/1.36/1.76 LSB);Q3(bit 不含 phase);Ch9/Ch11',
+    tag: 'EXPERIMENT',
+  },
+  {
+    n: 3,
+    q: '純 dsm_only(無 PMUX/DTC/tap)撐得起 reverse injection 嗎?',
+    a: '撐不起。integer-cycle actuator 使 e_ZC_hw 掃過 ±0.5 cycle(rms 0.289 cycle),kick 落點任意,loop 直接失鎖:theta_plus rms(last 256)1.81 rad(exp21b)。加 threshold gating(fire iff |e_ZC_hw| ≤ 0.0625 cycle)後回到有界 lock,但只 fire 67/512(13.1%),residual 0.102 rad —— 仍比 full actuator 的 0.015 rad 差約 7 倍。gating 是止血,不是解方。',
+    basis: 'exp21 三組量測(512/512 vs 67/512 fire;0.015 / 1.81 / 0.102 rad);MODEL_SPEC §7.1、§14 gating',
+    tag: 'EXPERIMENT',
+  },
+  {
+    n: 4,
+    q: '那 baseline 該是哪一種?phase-domain DSM 又何時用?',
+    a: 'baseline 是 full fractional actuator(PMUX+DTC+tap;DTC-based quantization-noise-cancellation 的等效):exp21a 量測 512/512 fire、|e_ZC_hw| ≤ 0.00297 cycle、theta_plus rms 0.015 rad,是 dsm_only 任一變體達不到的。phase-domain DSM 是其上的選配:mode D 下換 quantizer 不破壞 identity,但階數越高瞬時誤差越大(e_FB_abs rms 0.47→0.69→1.19 LSB、峰值 0.76→1.36→1.76 LSB),換到的只是頻譜形狀 —— 只有 spur 需求值得付出 peak 時才選,預設 nearest。',
+    basis: 'exp21a;exp22;exp07/08(nearest vs ef1 的 spur-vs-peak 原型)',
+    tag: 'INFERENCE',
+  },
+];
+
 /** 比較 dashboard 的 6 組 config(id 對應 experiments.py / EXPERIMENTS)。 */
 const DASH_CONFIGS: { id: string; label: string; partial: Partial<SimConfig> }[] = [
   { id: 'exp03', label: 'Mode D + nearest(baseline)', partial: { n_div: 3.13 } },
@@ -178,7 +213,7 @@ const DASH_CONFIGS: { id: string; label: string; partial: Partial<SimConfig> }[]
     label: '1° tap mismatch',
     partial: { n_div: 3.125, tap_mismatch_cycles: Array(8).fill(1.0 / 360.0) as number[] },
   },
-  { id: 'exp13', label: '1% INJ DTC gain', partial: { n_div: 3.125, dtc_inj_gain: 1.01 } },
+  { id: 'exp13', label: '1% INJ DTC gain', partial: { n_div: 3.13, dtc_inj_gain: 1.01 } },
 ];
 
 const TS_MODE_D_EXCERPT = `// web/src/model/injectionScheduler.ts — R_INJ per architecture mode(逐字節錄)
@@ -224,15 +259,17 @@ const CHAIN: { step: string; why: string }[] = [
   { step: 'Calibrated tap/DTC decode(需要時)', why: 'redundancy + argmin 吃掉 tap/DTC mismatch(exp19)' },
   { step: 'Fixed-latency look-ahead', why: '46.8° bug → half-LSB 內(Test 5、exp10/11)' },
   { step: 'Nearest 為 baseline quantizer', why: 'bounded ±half-LSB deterministic error(exp03/07)' },
-  { step: '評估 spur 後才選 shared DSM', why: 'DSM 改頻譜、不減 peak;必要才用(exp08/09)' },
+  { step: '評估 spur 後才選 shared DSM', why: 'DSM 改頻譜、不減 peak,階數越高 peak 越大;必要才用(exp08/09/22)' },
 ];
 
-/** MODEL_SPEC §20 honesty 清單(faithful)。 */
+/** MODEL_SPEC §20 honesty 清單(faithful),加上 Ch13 的 gating/loop 交互限制。 */
 const HONESTY: string[] = [
   'scheduler equations 是 exact digital timing model',
   'DTC/tap mismatch 是 behavioral nonideality model',
   'sinusoidal injection map 是 approximation;真實 phase response 需 transistor-level transient/PSS/PDR extraction',
   'shorting energy 是 normalized proxy',
+  'threshold gating 的判準是 deterministic 的 e_ZC_hw(scheduler 可預先計算),不含 noise;真實電路的 gate 決策若含 jitter/metastability/量測誤差,行為會偏離本模型(§14)',
+  'gating 與 loop dynamics 的交互只以 per-cycle kick mask 建模:非 fire 拍 delta_theta = 0、theta 照常累積 detuning 與 noise;fire rate 與 residual(exp21c:67/512、0.102 rad)是 behavioral 量測值,不是 closed-form 保證,且解讀 e_ZC_total 必須連同 inj_fired mask 一起看(§16、Ch13)',
   '本專案未執行 Spectre;Verilog-A 提供 source 與 usage guide,未經 simulator 驗證',
   'behavioral result 不等同 silicon result',
 ];
@@ -304,7 +341,10 @@ export default function Chapter20() {
         <ul>
           <li>原始需求 §26 的 18 個設計問題,逐條的最終答案是什麼?各自依據哪個
             experiment / 公式?</li>
-          <li>綜合 20 個 experiments,推薦的架構鏈長什麼樣?每一環為什麼?</li>
+          <li>哪些 DSM 使用模式可以與 reverse injection 共存?divider-MASH、純
+            dsm_only、full actuator、phase-domain DSM 四者的量測結論(exp21/exp22)
+            各是什麼?</li>
+          <li>綜合 22 個 experiments,推薦的架構鏈長什麼樣?每一環為什麼?</li>
           <li>哪些結論是 exact、哪些是 behavioral 假設、哪些只是 approximation ——
             誠實邊界在哪裡?</li>
         </ul>
@@ -407,6 +447,31 @@ export default function Chapter20() {
       </SectionFigure>
 
       <SectionFigure
+        title="補充問答:DSM 使用模式與 reverse injection 的相容性(exp21/exp22)"
+        caption={
+          <span>
+            actuator_mode(full / dsm_only,§7.1)、injection gating(§14)與 mash111
+            加入 model 後的四個補充問題。量測值全部來自 golden model
+            (512 cycles、seed 12345);exp21/exp22 可在第 17 章一鍵重播。
+          </span>
+        }
+      >
+        <div style={{ maxHeight: 420, overflowY: 'auto' }}>
+          {DSM_QA.map((qa) => (
+            <details key={qa.n} style={{ borderBottom: '1px solid var(--border)', padding: '6px 4px' }}>
+              <summary style={{ cursor: 'pointer' }}>
+                <strong>D{qa.n}.</strong> {qa.q} <EpistemicTag kind={qa.tag} />
+              </summary>
+              <p style={{ margin: '8px 0 4px' }}>{qa.a}</p>
+              <p style={{ margin: '0 0 4px', color: 'var(--fg-subtle)', fontSize: '0.9em' }}>
+                依據:{qa.basis}
+              </p>
+            </details>
+          ))}
+        </div>
+      </SectionFigure>
+
+      <SectionFigure
         title="結論 dashboard:六組 config 的 RMS 誤差"
         caption={
           <span>
@@ -487,8 +552,9 @@ export default function Chapter20() {
           <li><code>exp10</code>(latency bug)的 rms e_FB_abs ≈ 0.13 cycle(46.8°),
             比 <code>exp11</code>(look-ahead)大兩個數量級 —— Q9 的直接證據;
             兩者 config 只差一個 boolean。</li>
-          <li><code>exp12/exp13</code> 的 e_pair_digital = 0 但 e_ZC_hw 非零:
-            shared code 消不掉 analog 誤差 —— Q5 的直接證據。</li>
+          <li><code>exp12/exp13</code> 的 e_pair_digital = 0 但 e_ZC_hw 非零
+            (exp12:靜態 222.2 fs;exp13(N=3.13):rms 104.8 fs、峰值 205.9 fs,
+            491/512 拍非零):shared code 消不掉 analog 誤差 —— Q5 的直接證據。</li>
           <li>把 n_cycles 從 512 調到 1024:各 rms 幾乎不變(誤差是 deterministic
             pattern,不是隨 N 收斂的隨機量)。</li>
         </ul>
@@ -500,7 +566,8 @@ export default function Chapter20() {
             錯。mode D 消除的只是<strong>兩路的數位相對誤差</strong>。absolute
             quantization(±half-LSB)、tap/DTC/route mismatch、latency、VCO random
             noise 全部還在(Q5/Q6)。dashboard 裡 exp12/exp13 的 e_ZC_hw 就是證據:
-            pair 為零、zero-crossing 誤差照樣超過 half-LSB。
+            pair 為零,zero-crossing 誤差峰值照樣超過 half-LSB(exp12 靜態 222.2 fs、
+            exp13 峰值 205.9 fs,皆 &gt; 156.25 fs)。
           </p>
         </Callout>
         <Callout type="warn" title="誤解:「模擬顯示可行,代表 silicon 可行」">
@@ -514,7 +581,7 @@ export default function Chapter20() {
       </SectionMisconception>
 
       <SectionTakeaway>
-        <p>推薦架構鏈(每一環附依據;這是全站 20 個 experiments 的總結,不是先驗信念):</p>
+        <p>推薦架構鏈(每一環附依據;這是全站 22 個 experiments 的總結,不是先驗信念):</p>
         <ol>
           {CHAIN.map((c) => (
             <li key={c.step} style={{ marginBottom: 4 }}>
@@ -531,7 +598,7 @@ export default function Chapter20() {
       </SectionTakeaway>
 
       <SectionLimitation>
-        <Callout type="honesty" title="已知限制(MODEL_SPEC §20,逐條)">
+        <Callout type="honesty" title="已知限制(MODEL_SPEC §20 + §14 gating,逐條)">
           <ul>
             {HONESTY.map((h) => (
               <li key={h}>{h}</li>

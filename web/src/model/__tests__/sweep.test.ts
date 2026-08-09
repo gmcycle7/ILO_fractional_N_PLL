@@ -44,8 +44,12 @@ describe('N sweep legality (Test 8)', () => {
   const cases: Array<[Quantizer, Set<number>]> = [
     ['nearest', new Set([3, 4])],
     ['floor', new Set([3, 4])],
-    ['ef1', new Set([2, 3, 4, 5])],
-    ['mash11', new Set([2, 3, 4, 5])],
+    // DSM quantizers: {2,3,4}; 2 only for alpha < ~3/256, 5 unreachable
+    // for N in [3, 3.25] (MODEL_SPEC section 4); measured set for mash111
+    // is also {2,3,4} — NOT wider than mash11
+    ['ef1', new Set([2, 3, 4])],
+    ['mash11', new Set([2, 3, 4])],
+    ['mash111', new Set([2, 3, 4])],
   ];
   for (const [quant, allowed] of cases) {
     it(`quantizer '${quant}' stays legal over N in [3, 3.25]`, () => {
@@ -53,6 +57,58 @@ describe('N sweep legality (Test 8)', () => {
         const res = simulate(fromPartial({ n_div: nDiv, quantizer: quant, n_cycles: 512 }));
         check(res, allowed);
       }
+    });
+  }
+});
+
+describe('N sweep legality, dsm_only actuator (section 7.1)', () => {
+  // measured (mirror of tests/test_sweep.py): nearest/floor {3,4};
+  // ef1 {2,3,4,5}.  mash11/mash111 violate divider legality at N=3.13
+  // (instantaneous ratio 0 -> duplicate edge) and must throw.
+  const cases: Array<[Quantizer, Set<number>]> = [
+    ['nearest', new Set([3, 4])],
+    ['floor', new Set([3, 4])],
+    ['ef1', new Set([2, 3, 4, 5])],
+  ];
+  for (const [quant, allowed] of cases) {
+    it(`dsm_only quantizer '${quant}' stays legal over N in [3, 3.25]`, () => {
+      for (const nDiv of NS) {
+        const res = simulate(
+          fromPartial({
+            n_div: nDiv,
+            quantizer: quant,
+            n_cycles: 512,
+            actuator_mode: 'dsm_only',
+          }),
+        );
+        const d = res.data;
+        for (let k = 1; k < d.k.length; k++) {
+          expect(d.A_FB[k] - d.A_FB[k - 1]).toBeGreaterThan(0);
+        }
+        for (let k = 0; k < d.k.length; k++) {
+          expect(d.A_FB[k] % 256).toBe(0); // whole cycles only
+          expect(d.R_FB[k]).toBe(0);
+          expect(d.R_INJ[k]).toBe(0);
+        }
+        for (let k = 0; k < d.k.length - 1; k++) {
+          expect(allowed.has(d.n_int[k])).toBe(true);
+        }
+      }
+    });
+  }
+
+  for (const quant of ['mash11', 'mash111'] as Quantizer[]) {
+    it(`dsm_only '${quant}' at N=3.13 throws (duplicate edge, documented)`, () => {
+      expect(() =>
+        simulate(
+          fromPartial({
+            n_div: 3.13,
+            quantizer: quant,
+            n_cycles: 512,
+            actuator_mode: 'dsm_only',
+          }),
+        ),
+      ).toThrow(/monotonic/);
     });
   }
 });

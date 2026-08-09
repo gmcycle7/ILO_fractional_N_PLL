@@ -6,6 +6,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useChapterNDiv } from '../lib/globalParams';
 import {
   ChapterShell, SectionQuestion, SectionIntuition, SectionMath, SectionExample,
   SectionFigure, SectionCode, SectionLineByLine, SectionObserve,
@@ -306,7 +307,7 @@ function TestbenchSvg() {
 const N_PRESETS = [3.0, 3.125, 3.13, 3.1375, 3.25];
 
 export default function Chapter19() {
-  const [nDiv, setNDiv] = useState(3.13);
+  const [nDiv, setNDiv] = useChapterNDiv();
   const [quant, setQuant] = useState<Quantizer>('nearest');
   const [latency, setLatency] = useState(0);
   const [lookahead, setLookahead] = useState(true);

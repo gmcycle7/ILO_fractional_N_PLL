@@ -9,7 +9,8 @@ latency of 1 cycle with probability p_late, drawn from the 'lat' stream).
   applied at cycle k was computed from state s_ideal[k - extra] (the fixed L
   is fully compensated; only the un-anticipated random extra latency leaks).
 - lookahead=False (bug mode): the command applied at cycle k was computed
-  from state s_ideal[k - L - extra]; phase error = wrapCycles(L*alpha).
+  from state s_ideal[k - L - extra]; phase error = wrapCycles(-L*alpha)
+  (error = actual - ideal, spec section 2; magnitude |wrapCycles(L*alpha)|).
 
 Start-up: for k where the index would be negative it is clamped to 0
 (pipeline pre-filled with the k=0 command).
@@ -33,7 +34,8 @@ def apply_latency(cfg, n: int, lat_stream=None) -> dict:
         k_applied  : k
         seq_id     : unique id of the applied command (== idx)
         metadata   : list of per-cycle dicts {k_computed, k_intended,
-                     k_applied, seq_id}
+                     k_applied, seq_id}; simulate() enriches each entry
+                     with P_state, R_FB, R_INJ (spec section 13)
     """
     ks = np.arange(n, dtype=np.int64)
     extra = np.zeros(n, dtype=np.int64)

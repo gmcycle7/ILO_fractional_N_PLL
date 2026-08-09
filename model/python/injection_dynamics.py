@@ -29,6 +29,13 @@ Sinusoidal fixed point / lock [APPROX]:
     K_inj * sin(theta_ss) = 2*pi*Delta_f*T_ref
     lock condition:  |2*pi*Delta_f*T_ref| <= K_inj
     stable solution: cos(theta_ss) > 0  ->  theta_ss = asin(a / K_inj)
+
+Injection gating (spec section 14): optional ``fired`` mask (0/1 per cycle,
+computed by simulate() from |e_ZC_hw| <= inj_gate_threshold_cycles when
+inj_gate_mode == 'threshold').  A non-fired cycle applies NO phase kick
+(Delta_theta = 0; theta keeps accumulating detuning/noise); e_inj is still
+recorded as the error a pulse would have seen, and PRNG stream consumption
+is identical with or without gating.
 """
 
 import math
@@ -67,10 +74,13 @@ def _delta_theta(model: str, k_inj: float, e: float, lut_e, lut_d) -> float:
     raise ValueError(f"unknown inj_model '{model}'")
 
 
-def run_dynamics(cfg, e_zc_hw_cycles: np.ndarray, streams: dict) -> dict:
+def run_dynamics(cfg, e_zc_hw_cycles: np.ndarray, streams: dict,
+                 fired=None) -> dict:
     """Run the per-reference-cycle injection phase map.
 
     e_zc_hw_cycles: deterministic hardware zero-crossing error (cycles).
+    fired: optional 0/1 per-cycle gating mask; cycles with fired == 0 apply
+    no phase kick (Delta_theta = 0).  None means every cycle fires.
     Returns theta arrays (rad) and e_ZC_total (cycles) = e_inj / (2*pi).
     """
     n = len(e_zc_hw_cycles)
@@ -114,7 +124,10 @@ def run_dynamics(cfg, e_zc_hw_cycles: np.ndarray, streams: dict) -> dict:
         if cfg.sigma_pulse_s > 0.0 and s_pulse is not None:
             eps_rand += two_pi * (cfg.sigma_pulse_s * s_pulse.gauss()) / t_vco
         e = wrap_radians(tm + epsilon_hw[k] + eps_rand)
-        dth = _delta_theta(cfg.inj_model, cfg.k_inj, e, lut_e, lut_d)
+        if fired is not None and fired[k] == 0:
+            dth = 0.0   # gated out: no phase kick this cycle
+        else:
+            dth = _delta_theta(cfg.inj_model, cfg.k_inj, e, lut_e, lut_d)
         tp = wrap_radians(tm + dth)
 
         theta_minus[k] = tm

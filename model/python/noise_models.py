@@ -7,7 +7,7 @@ non-negative here so ``>>`` is already logical).
 
 Named streams (seed = base_seed + offset):
     ref:1  vco_w:2  vco_rw:3  dither_fb:4  dither_inj:5
-    dnl_fb:6  dnl_inj:7  lat:8  pulse:9
+    dnl_fb:6  dnl_inj:7  lat:8  pulse:9  dsm_inj:10
 """
 
 import math
@@ -25,6 +25,7 @@ STREAM_OFFSETS = {
     "dnl_inj": 7,
     "lat": 8,
     "pulse": 9,
+    "dsm_inj": 10,
 }
 
 

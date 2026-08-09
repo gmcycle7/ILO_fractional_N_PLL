@@ -132,8 +132,22 @@ Integer divider action 由 absolute code 推導:
 n_integer[k] = I_FB[k+1] - I_FB[k]
 ```
 
-對 `N ∈ [3, 3.25]` 正常操作,`n_integer[k] ∈ {3, 4}`(nearest/floor quantizer;
-DSM quantizer 允許暫態出現 2 或 5,MASH 1-1 理論範圍更寬,測試檢查 `{2,3,4,5}`)。
+對 `N ∈ [3, 3.25]` 正常操作,`n_integer[k] ∈ {3, 4}`(nearest/floor quantizer)。
+DSM quantizer(ef1 與 mash11)給出 `n_integer[k] ∈ {2, 3, 4}`:2 只在
+`alpha < ~3/256 ≈ 0.012` 時出現;5 對 `N ∈ [3, 3.25]` 不可達,
+且 mash11 的可達集合與 ef1 相同(並非更寬)。測試檢查 `{2,3,4}`。
+
+`mash111` 的可達集合 `[EXPERIMENT]`:對 `N ∈ [3, 3.25]`(0.001 步進 grid、
+512 cycles、seed 12345)實測 `n_integer[k] ∈ {2, 3, 4}` — 與 mash11 **相同,
+並非更寬**(直覺上 3 階 shaping 的 ±數 LSB 擺動仍不足以跨越額外的
+integer-cycle 邊界;phase quantizer 作用在 absolute fine code 上,每拍增量
+~`G*N ≈ 800 LSB`)。測試檢查 `{2,3,4}`。
+
+`actuator_mode='dsm_only'`(§7.1)時 quantizer 作用在 **integer-cycle**
+granularity,集合變寬 `[EXPERIMENT]`(同一 grid 實測):nearest/floor →
+`{3,4}`;ef1 → `{2,3,4,5}`;mash11 / mash111 在 `N ∈ (3, 3.25)` 的多數值
+會使瞬時 divide ratio 觸及 0(duplicate edge)而違反 edge monotonicity
+assertion — 模型**故意** raise(§7.1;classic MASH 需要更大的 integer part)。
 
 feedback absolute quantization error:
 
@@ -239,14 +253,28 @@ z0 = 0 時:u_INJ_ideal[k] = wrap01( -x_nominal[k] )
    y = M + c1 + (c2 - c2_prev);  c2_prev = c2
    ```
    (acc1, acc2, c2_prev init 0)
-6. optional triangular dither:`u' = u + d_amp * (U1 + U2 - 1)`,U 來自 §12 PRNG,
-   在 quantize 前加入,預設 off。
+6. `mash111` — MASH 1-1-1 phase quantizer:
+   ```
+   M = floor(u); f = u - M
+   acc1 += f;    c1 = floor(acc1); acc1 -= c1
+   acc2 += acc1; c2 = floor(acc2); acc2 -= c2
+   acc3 += acc2; c3 = floor(acc3); acc3 -= c3
+   y = M + c1 + (c2 - c2_prev) + (c3 - 2*c3_prev + c3_prev2)
+   c2_prev = c2;  c3_prev2 = c3_prev;  c3_prev = c3
+   ```
+   (state update **嚴格依此順序**;acc1, acc2, acc3, c2_prev, c3_prev,
+   c3_prev2 全部 init 0。canonical check `[EXACT]`:`u[k] = 3k + 0.25`
+   (binary-exact)→ 前 8 個輸出 `0, 4, 5, 11, 10, 18, 16, 22`。)
+7. optional triangular dither:`u' = u + d_amp * (U1 + U2 - 1)`,U 來自 §12 PRNG,
+   在 quantize 前加入,預設 off。`d_amp` 單位為 **quantizer LSB**
+   (full actuator = 1 fine LSB;`dsm_only`(§7.1)= 1 VCO cycle)。
 
 **0.3 LSB canonical example** `[EXACT]`(Test 4):
 `u[k] = m[k] + 0.3` 時:
 
 - `nearest` → 每拍 error 固定 `−0.3 LSB`
-- `ef1` → error sequence `−0.3, −0.3, −0.3, +0.7, −0.3, …`(pattern 0,0,0,1 循環),
+- `ef1` → error sequence `−0.3, −0.3, −0.3, +0.7, −0.3, …`(carry pattern
+  0,0,0,1,0,0,1,0,0,1 以週期 10 循環,carry rate 3/10 = 0.3),
   長期平均 → 0,但 peak instantaneous |error| 由 0.3 增為 0.7 LSB。
 
 ---
@@ -256,11 +284,20 @@ z0 = 0 時:u_INJ_ideal[k] = wrap01( -x_nominal[k] )
 Feedback 一律 `A_FB = Q_FB(A_ideal)`。差別在 injection code 如何產生:
 
 - **Mode A — independent ideal-target quantization**:
-  `R_INJ[k] = Q_INJ(G * u_INJ_ideal[k]) mod G`,Q_INJ 與 Q_FB 同型但**獨立 instance**(獨立 error state)。
+  `R_INJ[k] = Q_INJ(G * u_INJ_ideal[k]) mod G`,Q_INJ 與 Q_FB 同型但**獨立 instance**
+  (獨立 error state;DSM 型 quantizer 之初始 state 依 Mode B 的 `dsm_inj` seeding 規則)。
 - **Mode B — independent DSMs**:同 A 但兩邊都用 DSM 型 quantizer、不同 state/seed。
+  獨立 state 的 seeding `[EXACT]`:injection 側 DSM instance 的初始 state 由 §12 的
+  named PRNG stream `dsm_inj`(offset 10)決定性地產生 —
+  `ef1` → 初始 error state `e0` = 一次 uniform draw;
+  `mash11` → `acc1`, `acc2` = 兩次 uniform draws(依序;`c2_prev` 維持 0);
+  `mash111` → `acc1`, `acc2`, `acc3` = 三次 uniform draws(依序;
+  `c2_prev`, `c3_prev`, `c3_prev2` 維持 0)。
+  feedback 側 DSM state 仍 init 0;nearest/floor/truncate 無 state,不受影響。
   平均正確,cycle-by-cycle reverse 關係錯誤 → 標記「不建議」。
 - **Mode C — shared high-resolution phase state**:兩邊共用 master accumulator 值
-  `P[k] = A_ideal[k]`(以及由它導出的 `u_INJ_ideal`),但**各自 quantize**。
+  `P[k] = A_ideal[k]`(以及由它導出的 `u_INJ_ideal`),但**各自 quantize**;
+  DSM 型 quantizer 的 injection 側初始 state 依 Mode B 的 `dsm_inj` seeding 規則。
 - **Mode D — quantize once + modular reverse(預設推薦)**:
   ```
   R_INJ[k] = (R_zero - R_FB[k]) mod 256
@@ -279,6 +316,28 @@ u_zero_offset = R_zero / G
 Shared final code 消除的是 **feedback/injection 的數位相對 mismatch**;
 **不能**消除:absolute quantization error、DTC analog gain/INL、tap mismatch、
 route mismatch、latency error、VCO random noise。
+
+### 7.1 Actuator modes `[EXACT]`:`full` vs `dsm_only`
+
+`actuator_mode` 選擇 fractional actuator 是否存在:
+
+- **`full`(預設)**:如上,`A_FB = Q_FB(A_ideal)`(fine 1/G-cycle 解析度),
+  injection 側依 arch mode 產生 `R_INJ` 並 decode 到 (j, c)。
+- **`dsm_only`**:classic divider-modulating DSM(無 PMUX/DTC/tap actuator)。
+  quantization 發生在 **INTEGER-CYCLE granularity**:
+  ```
+  A_FB[k] = Q(A_ideal[k] / G) * G      (quantizer 作用在 cycles)
+  ```
+  因此 `R_FB = 0, m_FB = 0, c_FB = 0`(恆為 0);`dsm_out` 為整數 cycle 數
+  `Q(A_ideal/G)`。injection 側 actuator 不存在:`R_INJ = 0`、tap `j = 0`、
+  `c_INJ = 0`(不論 arch_mode;`dsm_inj` stream 不消耗 draw)。
+  `e_ZC_hw` 沿用 §14 同一公式(`u_INJ_actual = 0`,ideal 參數下)
+  → `e_ZC_hw = wrapCycles(x_ideal - z0)`,掃過 **±0.5 cycle** 全範圍。
+  decode/assert 邏輯不變:edge monotonicity 照常檢查;`n_integer` 集合
+  隨 quantizer 變寬(實測值見 §4)。`[EXPERIMENT]` mash11/mash111 在
+  `N ∈ (3, 3.25)` 的多數值使瞬時 divide ratio 觸及 0(duplicate edge)→
+  monotonicity assertion **故意** raise:MASH 階數 m 的瞬時 ratio 擺動需要
+  更大的 integer part 才合法(classic 設計約束),本 model 不掩蓋它。
 
 ---
 
@@ -399,7 +458,8 @@ z0 = r*cos(2*pi*u2);  z1 = r*sin(2*pi*u2)
 ```
 
 每個 noise source 使用**獨立 named stream**,seed = `base_seed + streamOffset`:
-`ref:1, vco_w:2, vco_rw:3, dither_fb:4, dither_inj:5, dnl_fb:6, dnl_inj:7, lat:8, pulse:9`。
+`ref:1, vco_w:2, vco_rw:3, dither_fb:4, dither_inj:5, dnl_fb:6, dnl_inj:7, lat:8, pulse:9, dsm_inj:10`。
+(`dsm_inj` 供 §7 mode A/B/C injection 側 DSM 初始 state seeding 使用。)
 預設 `base_seed = 12345`。
 跨語言 tolerance:純數位路徑 `1e-12`(整數 code 完全相等);含 noise 路徑 `1e-9`(libm 差異)。
 
@@ -412,9 +472,10 @@ latency `L`:cycle k 計算的 command 於 cycle `k+L` 被 apply。
 - **正確(look-ahead)**:apply 於 k+L 的 command 由 `s_ideal[k+L]`(即 state `P[k+L]`)計算。
   理想 accumulator 的 look-ahead:`x[k+L] = wrap01(x[k] + L*alpha)`。
 - **錯誤(bug mode)**:apply 於 k+L 的 command 由 `s_ideal[k]` 計算,
-  phase error = `wrapCycles(L*alpha)`。
+  phase error = `wrapCycles(-L*alpha)`(§2 sign convention:error = actual − ideal;
+  magnitude = `|wrapCycles(L*alpha)|`)。
 
-Canonical example `[EXACT]`(Test 5):`alpha=0.13, L=1` → error `= 0.13 cycle = 46.8°`,
+Canonical example `[EXACT]`(Test 5):`alpha=0.13, L=1` → |error| `= 0.13 cycle = 46.8°`,
 遠大於 half-LSB `0.703125°`(66.6 倍)。
 
 每筆 command 附帶 metadata:`{k_computed, k_intended, k_applied, P_state, R_FB, R_INJ, seq_id}`。
@@ -458,6 +519,28 @@ local stability: |1 - K_inj*cos(theta_ss)| < 1  → 取 cos(theta_ss) > 0 的解
 `K_inj → 0`:無 injection(random walk / detuning ramp);K_inj 增大:更快收斂、更小 residual
 (behavioral approximation,**不**宣稱等同 transistor-level shorting)。
 
+### Injection gating `[EXACT]`(digital gate,deterministic)
+
+`inj_gate_mode`:
+
+- **`off`(預設)**:每拍都 fire。
+- **`threshold`**:第 k 拍 fire **若且唯若** `|e_ZC_hw[k]| <= inj_gate_threshold_cycles`
+  (預設 0.0625 cycle)。gate 判準是 **deterministic** 的 `e_ZC_hw`
+  (scheduler 可預先計算),不是含 noise 的 `e_inj`。
+
+非 fire 的拍**不施加 phase kick**:`Delta_theta[k] = 0`,
+`theta_plus[k] = wrapRadians(theta_minus[k])` — theta 照常累積 detuning/noise。
+`e_inj[k]` 仍照常記錄(「若 fire 會看到的誤差」);PRNG stream 消耗與
+gating 無關(有無 gating 逐 draw 相同)。
+
+Per-cycle int column **`inj_fired`**(1/0)的 convention `[EXACT]`:
+
+```
+inj_model == 'none'                  -> inj_fired ≡ 0   (根本沒有 pulse 可 gate)
+inj_model != 'none', gate 'off'      -> inj_fired ≡ 1
+inj_model != 'none', gate 'threshold'-> inj_fired[k] = (|e_ZC_hw[k]| <= threshold)
+```
+
 ---
 
 ## 15. Shorting injection zero-crossing error `[APPROX]`
@@ -494,6 +577,11 @@ model 需同時輸出 individual contributions 與 jointly-simulated total,並�
 - `e_abs[k]`:actual − ideal(單邊 absolute)
 - `e_pair[k]`:FB + INJ − integer cycle(兩邊相對)
 - `e_ZC[k]`:VCO actual phase at pulse − desired zero crossing(最終物理量)
+
+Gating 下的解讀(§14):`inj_fired[k] = 0` 的拍沒有 correction,
+`e_ZC_total[k]` 反映的是**未修正**的累積 residual(theta 繼續走);
+分解 error contributions 時必須連同 `inj_fired` mask 一起看,
+否則會把「gate 決策」誤讀成「injection 失效」。
 
 ---
 
@@ -533,7 +621,20 @@ Python 產生 `test_vectors/*.json`,TS 讀取並比對。Schema:
 `n3p130_ef1_shared`(Mode D + ef1), `n3p130_ef1_independent`(Mode B),
 `n3p130_mash11`, `n3p130_latency_bug`(L=1, no look-ahead),
 `n3p130_lookahead`(L=1, correct), `n3p125_tap_mismatch_1deg`,
-`n3p125_dtc_gain_1pct`, `n3p130_dynamics_sin`(K_inj=0.3, Δf=1 MHz, noise on)。
+`n3p125_dtc_gain_1pct`, `n3p130_dynamics_sin`(K_inj=0.3, Δf=1 MHz, noise on),
+`n3p130_mash111`(Mode D + mash111, full actuator),
+`n3p130_dsm_only_gated`(exp21c-style:ef1, dsm_only, threshold gating,
+sin K_inj=0.4, Δf=1 MHz, σ_vco_w=0.02 rad)。
+
+Schema 穩定性規則 `[EXACT]`:
+
+- 前 12 個為 **schema-v1** vectors,columns 與 config keys 維持原樣
+  (檔案 byte-identical,regression 由 `tests/test_vectors_committed.py` 釘住)。
+- **schema-v2** vectors(`n3p130_mash111`, `n3p130_dsm_only_gated`)在
+  columns 末端**追加** int column `inj_fired`(§14)。
+- config 序列化:schema-v2 新增欄位(`actuator_mode`, `inj_gate_mode`,
+  `inj_gate_threshold_cycles`)**等於預設值時省略**(`from_dict`/`fromPartial`
+  會補回預設,round-trip 仍 exact)— 這使 schema-v1 檔案不因新欄位而改變。
 
 另產生 `test_vectors/csv/` 每-cycle command CSV(給 Verilog-A testbench):
 欄位 `k, t_ref_ns, n_int, m_FB, c_FB, j_INJ, c_INJ, R_FB, R_INJ, seq_id`。
@@ -558,6 +659,9 @@ Python 產生 `test_vectors/*.json`,TS 讀取並比對。Schema:
 | 12 | PSD 軸 | sample rate = f_ref |
 | 13 | shared vs independent | pair-error 行為不同(shared≡0, independent≠0)|
 | 14 | injection models | K_inj→0 無修正;K_inj↑ residual↓;三種 model 趨勢合理 |
+| 15 | mash111 canonical | `u=3k+0.25` → 前 8 輸出 `0,4,5,11,10,18,16,22`;§6 遞迴逐拍相符;sweep n_int ⊆ {2,3,4}(= mash11,實測非更寬) |
+| 16 | dsm_only invariants | `A_FB` 為整 cycle、`R_FB=m_FB=c_FB=R_INJ=j=c_INJ≡0`、`e_pair_digital≡0`、`e_ZC_hw` 掃 ±0.5 cycle;n_int:nearest/floor {3,4}、ef1 {2,3,4,5};mash11/mash111 @N=3.13 → monotonicity assertion raise |
+| 17 | injection gating | `inj_fired` 遵守 §14 convention;fired mask = (\|e_ZC_hw\|≤threshold);非 fire 拍 `delta_theta≡0`;exp21:gating 使 dsm_only tail rms 1.81 → 0.10 rad |
 
 ---
 

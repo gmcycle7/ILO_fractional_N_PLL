@@ -51,6 +51,11 @@ export class ErrorFeedbackFirstOrder implements QuantizerState {
     this.e = 0.0;
   }
 
+  /** Seed a distinct deterministic initial error state (spec section 7). */
+  seedState(e0: number): void {
+    this.e = e0;
+  }
+
   quantize(u: number): number {
     const v = u + this.e;
     const y = Math.floor(v);
@@ -85,6 +90,12 @@ export class Mash11 implements QuantizerState {
     this.c2Prev = 0;
   }
 
+  /** Seed distinct deterministic initial accumulator states (spec section 7). */
+  seedState(acc1: number, acc2: number): void {
+    this.acc1 = acc1;
+    this.acc2 = acc2;
+  }
+
   quantize(u: number): number {
     const m = Math.floor(u);
     const f = u - m;
@@ -96,6 +107,68 @@ export class Mash11 implements QuantizerState {
     this.acc2 -= c2;
     const y = m + c1 + (c2 - this.c2Prev);
     this.c2Prev = c2;
+    return y;
+  }
+
+  /** First-stage accumulator (reported as dsm_state). */
+  get state(): number {
+    return this.acc1;
+  }
+}
+
+/**
+ * MASH 1-1-1 phase quantizer, spec section 6 item 6:
+ *
+ *     M = floor(u); f = u - M
+ *     acc1 += f;    c1 = floor(acc1); acc1 -= c1
+ *     acc2 += acc1; c2 = floor(acc2); acc2 -= c2
+ *     acc3 += acc2; c3 = floor(acc3); acc3 -= c3
+ *     y = M + c1 + (c2 - c2_prev) + (c3 - 2*c3_prev + c3_prev2)
+ *     c2_prev = c2;  c3_prev2 = c3_prev;  c3_prev = c3
+ *
+ * (states updated in exactly that order; acc1, acc2, acc3, c2_prev, c3_prev,
+ * c3_prev2 all init 0)
+ */
+export class Mash111 implements QuantizerState {
+  private acc1 = 0.0;
+  private acc2 = 0.0;
+  private acc3 = 0.0;
+  private c2Prev = 0;
+  private c3Prev = 0;
+  private c3Prev2 = 0;
+
+  reset(): void {
+    this.acc1 = 0.0;
+    this.acc2 = 0.0;
+    this.acc3 = 0.0;
+    this.c2Prev = 0;
+    this.c3Prev = 0;
+    this.c3Prev2 = 0;
+  }
+
+  /** Seed distinct deterministic initial accumulator states (spec section 7). */
+  seedState(acc1: number, acc2: number, acc3: number): void {
+    this.acc1 = acc1;
+    this.acc2 = acc2;
+    this.acc3 = acc3;
+  }
+
+  quantize(u: number): number {
+    const m = Math.floor(u);
+    const f = u - m;
+    this.acc1 += f;
+    const c1 = Math.floor(this.acc1);
+    this.acc1 -= c1;
+    this.acc2 += this.acc1;
+    const c2 = Math.floor(this.acc2);
+    this.acc2 -= c2;
+    this.acc3 += this.acc2;
+    const c3 = Math.floor(this.acc3);
+    this.acc3 -= c3;
+    const y = m + c1 + (c2 - this.c2Prev) + (c3 - 2 * this.c3Prev + this.c3Prev2);
+    this.c2Prev = c2;
+    this.c3Prev2 = this.c3Prev;
+    this.c3Prev = c3;
     return y;
   }
 
@@ -118,6 +191,8 @@ export function makeQuantizer(name: QuantizerName): QuantizerState {
       return new ErrorFeedbackFirstOrder();
     case 'mash11':
       return new Mash11();
+    case 'mash111':
+      return new Mash111();
     default:
       throw new Error(`unknown quantizer '${name as string}'`);
   }

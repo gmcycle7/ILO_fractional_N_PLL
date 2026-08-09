@@ -8,6 +8,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useChapterAlpha } from '../lib/globalParams';
 import {
   ChapterShell,
   SectionQuestion,
@@ -84,9 +85,112 @@ const ROUND_TIES: { u: number; py: number }[] = [
   { u: 3.5, py: 4 },
 ];
 
+/* --------------------------------------------------- notation table (全站) */
+
+interface NotationRow {
+  /** KaTeX source for the symbol */
+  tex: string;
+  /** ASCII name(s) used in code / test-vector columns; also the search key */
+  ascii: string;
+  /** meaning (zh-Hant, searchable) */
+  zh: string;
+  unit: string;
+  /** defining MODEL_SPEC section */
+  spec: string;
+  /** chapter where the symbol is introduced */
+  ch: string;
+}
+
+/**
+ * Every symbol used across the site, mapped back to its defining MODEL_SPEC
+ * section and the chapter that introduces it.  Definitions are quoted from
+ * MODEL_SPEC (EXACT); this table adds no new math.
+ */
+const NOTATION: NotationRow[] = [
+  // ---- §1 system parameters
+  { tex: 'f_{ref}', ascii: 'f_ref', zh: 'reference 頻率(預設 4 GHz)', unit: 'Hz', spec: '§1', ch: 'Ch0' },
+  { tex: 'T_{ref} = 1/f_{ref}', ascii: 'T_ref', zh: 'reference 週期(250 ps)', unit: 's', spec: '§1', ch: 'Ch0' },
+  { tex: 'N = 3 + \\alpha', ascii: 'N n_div', zh: 'fractional divide ratio(= f_vco/f_ref)', unit: '無因次', spec: '§1', ch: 'Ch0' },
+  { tex: '\\alpha', ascii: 'alpha', zh: 'N 的小數部分;每拍相對 VCO phase grid 多轉的量', unit: 'cycles/拍', spec: '§1, §3', ch: 'Ch3' },
+  { tex: 'f_{vco} = N f_{ref}', ascii: 'f_vco', zh: 'VCO 頻率(12–13 GHz)', unit: 'Hz', spec: '§1', ch: 'Ch0' },
+  { tex: 'T_{vco} = 1/f_{vco}', ascii: 'T_vco', zh: 'VCO 週期(76.9–83.3 ps);phase 單位換算基準', unit: 's', spec: '§1', ch: 'Ch0' },
+  { tex: 'B_{DTC} = 6', ascii: 'B_DTC b_dtc', zh: 'feedback 與 injection DTC 位元數', unit: 'bit', spec: '§1', ch: 'Ch5' },
+  { tex: 'G = 4 \\cdot 2^{B_{DTC}} = 256', ascii: 'G LSB', zh: '每 T_vco 的 fine phase 單位數;1 LSB = 1/256 cycle', unit: 'LSB/cycle', spec: '§1', ch: 'Ch0' },
+  { tex: 'N_{TAP} = 8', ascii: 'N_TAP n_tap', zh: 'injection tap 數(0°, 45°, …, 315°;間距 32 LSB)', unit: '無因次', spec: '§1', ch: 'Ch7' },
+  { tex: 'N_{PMUX} = 4', ascii: 'N_PMUX n_pmux', zh: 'feedback PMUX 相位數(間距 T_vco/4)', unit: '無因次', spec: '§1', ch: 'Ch4' },
+  { tex: 'z_0', ascii: 'z0 z0_cycles', zh: '期望 injection zero-crossing phase(可校正參數)', unit: 'cycles', spec: '§1, §5', ch: 'Ch6' },
+  { tex: 'R_{zero}', ascii: 'R_zero r_zero', zh: 'modular reverse 的 digital zero offset code', unit: 'LSB(整數)', spec: '§1, §7', ch: 'Ch8' },
+  { tex: 's_0', ascii: 's0', zh: '初始 absolute phase coordinate', unit: 'cycles', spec: '§1, §3', ch: 'Ch3' },
+  // ---- §2 wrap / quantize primitives
+  { tex: '\\operatorname{wrap01}(x)', ascii: 'wrap01', zh: '位置 wrap:x − ⌊x⌋ → [0,1);位置/command 用它', unit: 'cycles', spec: '§2', ch: 'Ch2' },
+  { tex: '\\operatorname{wrapCycles}(x)', ascii: 'wrapCycles wrap_cycles', zh: '帶符號最短差 wrap → (−0.5, 0.5];誤差一律用它', unit: 'cycles', spec: '§2', ch: 'Ch2' },
+  { tex: '\\operatorname{wrapRadians}(t)', ascii: 'wrapRadians wrap_radians', zh: 'radians 版 wrap → (−π, π](dynamics 介面)', unit: 'rad', spec: '§2', ch: 'Ch2' },
+  { tex: '\\operatorname{qNearest}, \\operatorname{qFloor}', ascii: 'qNearest qFloor round', zh: '量化 primitives:⌊x+0.5⌋(half-up)與 ⌊x⌋;禁止內建 round()', unit: 'LSB', spec: '§2', ch: 'Ch2' },
+  // ---- §3 ideal trajectory
+  { tex: 's_{ideal}[k] = s_0 + kN', ascii: 's_ideal', zh: '第 k 個 ref edge 的理想 VCO absolute phase coordinate(乘法計算,非累加)', unit: 'cycles', spec: '§3', ch: 'Ch3' },
+  { tex: 'x_{ideal}[k]', ascii: 'x_ideal', zh: '理想 fractional phase state = wrap01(s_ideal[k])', unit: 'cycles', spec: '§3', ch: 'Ch3' },
+  // ---- §4 feedback path
+  { tex: 'A_{ideal}[k] = G\\, s_{ideal}[k]', ascii: 'A_ideal', zh: '高解析理想 fine code(實數,量化前)', unit: 'LSB', spec: '§4', ch: 'Ch4' },
+  { tex: 'A_{FB}[k]', ascii: 'A_FB', zh: '量化後 absolute fine code = Q_FB(A_ideal)(非負整數,嚴格遞增)', unit: 'LSB', spec: '§4', ch: 'Ch4' },
+  { tex: 'I_{FB}[k]', ascii: 'I_FB', zh: 'integer cycle index = ⌊A_FB/G⌋', unit: 'cycle', spec: '§4', ch: 'Ch4' },
+  { tex: 'R_{FB}[k]', ascii: 'R_FB', zh: 'feedback fine code = A_FB mod G ∈ {0..255}', unit: 'LSB', spec: '§4', ch: 'Ch4' },
+  { tex: 'm_{FB}[k]', ascii: 'm_FB', zh: 'PMUX code = ⌊R_FB/64⌋ ∈ {0..3}', unit: 'code', spec: '§4', ch: 'Ch4' },
+  { tex: 'c_{FB}[k]', ascii: 'c_FB', zh: 'feedback DTC code = R_FB mod 64 ∈ {0..63}', unit: 'code', spec: '§4', ch: 'Ch5' },
+  { tex: 'n_{int}[k]', ascii: 'n_int n_integer', zh: '瞬時 divider 動作 = I_FB[k+1] − I_FB[k] ∈ {3,4}(DSM quantizer:{2,3,4})', unit: 'cycle', spec: '§4', ch: 'Ch4' },
+  { tex: 's_{FB,actual},\\ t_{FB,actual}', ascii: 's_FB_actual t_FB_actual', zh: '實際 feedback edge:A_FB/G(cycles)與 × T_vco(秒)', unit: 'cycles / s', spec: '§4', ch: 'Ch2' },
+  { tex: 'u_{FB,ideal}[k]', ascii: 'u_FB_ideal', zh: 'feedback 理想 fractional 目標(= x_ideal[k])', unit: 'cycles', spec: '§4', ch: 'Ch5' },
+  { tex: 'u_{FB,digital}[k]', ascii: 'u_FB_digital', zh: 'feedback fractional digital 值 = R_FB/G', unit: 'cycles', spec: '§4', ch: 'Ch4' },
+  { tex: 'u_{FB,analog}[k]', ascii: 'u_FB_analog u_FB_actual', zh: '含 analog 誤差的 feedback phase = pmux_actual(m_FB) + dtc_fb_actual(c_FB) + route_FB', unit: 'cycles', spec: '§4, §10', ch: 'Ch5' },
+  { tex: 'e_{FB,abs}[k]', ascii: 'e_FB_abs', zh: 'feedback absolute 誤差 = wrapCycles(s_FB_actual − s_ideal)', unit: 'cycles', spec: '§4', ch: 'Ch5' },
+  // ---- §5 injection geometry
+  { tex: 'x_{nominal}[k]', ascii: 'x_nominal', zh: 'deterministic fractional trajectory(通常 = x_ideal)', unit: 'cycles', spec: '§5.1', ch: 'Ch6' },
+  { tex: '\\eta_{vco}[k]', ascii: 'eta_vco eta', zh: 'VCO random 偏移(noise / PLL residual / detuning)— injection 要修正的對象', unit: 'cycles', spec: '§5.1', ch: 'Ch6' },
+  { tex: 'x_{vco,actual}[k]', ascii: 'x_vco_actual', zh: '實際 VCO base phase = x_nominal + η_vco', unit: 'cycles', spec: '§5.1', ch: 'Ch6' },
+  { tex: '\\varphi_{tap}[j],\\ \\delta_{tap}[j]', ascii: 'phi_tap delta_tap tap_mismatch', zh: '第 j 個 tap 的 nominal phase j/8 與 mismatch 偏移(actual = j/8 + δ_tap)', unit: 'cycles', spec: '§5.1, §10', ch: 'Ch7' },
+  { tex: '\\tau_{INJ}[k],\\ d_{INJ}[k]', ascii: 'tau_INJ d_INJ', zh: 'injection DTC delay(秒)與 normalized 版 τ_INJ/T_vco', unit: 's / cycles', spec: '§5.1', ch: 'Ch7' },
+  { tex: 'u_{INJ,ideal}[k]', ascii: 'u_INJ_ideal', zh: 'injection 理想 command = wrap01(z0 − x_nominal);反向(−α/拍)的來源', unit: 'cycles', spec: '§5.2', ch: 'Ch6' },
+  { tex: 'e_{ZC}[k],\\ \\theta_{ZC}[k]', ascii: 'e_ZC theta_ZC', zh: 'zero-crossing alignment error = wrapCycles(x_vco_actual + φ_tap_actual + d_INJ − z0);θ_ZC = 2π e_ZC', unit: 'cycles / rad', spec: '§5.1', ch: 'Ch6' },
+  // ---- §6 quantizers
+  { tex: 'Q_{FB},\\ Q_{INJ}', ascii: 'Q_FB Q_INJ quantizer', zh: 'final phase quantizer instance(floor / nearest / truncate / ef1 / mash11 / mash111)', unit: '無因次', spec: '§6', ch: 'Ch5' },
+  { tex: 'e\\ (\\text{ef1 state})', ascii: 'dsm_state ef1 state e', zh: 'error-feedback DSM 殘差 state ∈ [0,1)(v = u + e;y = ⌊v⌋;e = v − y)', unit: 'LSB', spec: '§6', ch: 'Ch11' },
+  { tex: '\\mathrm{dsm\\_out}[k]', ascii: 'dsm_out', zh: 'quantizer 每拍整數輸出(full:= A_FB;dsm_only:整數 cycle 數 Q(A_ideal/G))', unit: 'LSB 或 cycle', spec: '§6, §7.1', ch: 'Ch11' },
+  // ---- §7 architecture modes
+  { tex: 'R_{INJ}[k]', ascii: 'R_INJ', zh: 'injection fine code ∈ {0..255};Mode D:(R_zero − R_FB) mod 256', unit: 'LSB', spec: '§7', ch: 'Ch7' },
+  { tex: 'P[k]', ascii: 'P master accumulator P_state', zh: 'shared master accumulator state = A_ideal[k](mode C/D 兩路共用的真值)', unit: 'LSB', spec: '§7', ch: 'Ch8' },
+  { tex: 'e_{pair}[k]', ascii: 'e_pair e_pair_digital e_pair_analog', zh: '成對反向誤差 = wrapCycles(u_FB_actual + u_INJ_actual − u_zero_offset);digital / analog 兩層', unit: 'cycles', spec: '§7', ch: 'Ch8' },
+  { tex: 'u_{zero\\_offset} = R_{zero}/G', ascii: 'u_zero_offset', zh: 'pair 誤差的 digital 零點', unit: 'cycles', spec: '§7', ch: 'Ch8' },
+  // ---- §8 tap + DTC decode
+  { tex: 'j[k]', ascii: 'j_INJ tap index', zh: '選中 injection tap index ∈ {0..7}', unit: 'code', spec: '§8', ch: 'Ch7' },
+  { tex: 'c[k]', ascii: 'c_INJ', zh: 'injection DTC code ∈ {0..63}(range 64 LSB = 2× tap spacing → redundancy)', unit: 'code', spec: '§8', ch: 'Ch7' },
+  { tex: 'u_{INJ,digital}[k]', ascii: 'u_INJ_digital', zh: '= wrap01((32j + c)/256)', unit: 'cycles', spec: '§8', ch: 'Ch7' },
+  { tex: 'u_{INJ,analog}[k]', ascii: 'u_INJ_analog u_INJ_actual', zh: '含 analog 誤差的 injection phase = tap_actual[j] + DTC_actual(c) + route_INJ', unit: 'cycles', spec: '§8, §10', ch: 'Ch7' },
+  { tex: 'e_{INJ,abs}[k]', ascii: 'e_INJ_abs', zh: 'injection absolute 誤差 = wrapCycles(u_INJ_digital − u_INJ_ideal)', unit: 'cycles', spec: '§9', ch: 'Ch7' },
+  // ---- §10 analog non-idealities
+  { tex: 'g_{FB},\\ g_{INJ}', ascii: 'g_FB g_INJ dtc gain', zh: 'DTC gain error(1% × 20 ps range → 最大 200 fs ≈ 0.64 LSB)', unit: '無因次', spec: '§10', ch: 'Ch15' },
+  { tex: 'route_{FB},\\ route_{INJ}', ascii: 'route_FB route_INJ route skew', zh: 'route skew(固定 delay,正值)', unit: 'cycles', spec: '§10', ch: 'Ch15' },
+  { tex: '\\sigma_{ref},\\ \\sigma_{pulse}', ascii: 'sigma_ref sigma_pulse jitter', zh: 'reference / injection pulse timing jitter(rms,white)', unit: 's', spec: '§10', ch: 'Ch15' },
+  { tex: '\\sigma_{vco,w},\\ \\sigma_{vco,rw}', ascii: 'sigma_vco_w sigma_vco_rw', zh: 'VCO white / random-walk phase noise 強度', unit: 'rad, rad/√cycle', spec: '§10', ch: 'Ch13' },
+  // ---- §13 latency
+  { tex: 'L', ascii: 'L latency_cycles lookahead', zh: 'pipeline latency:cycle k 算的 command 於 k+L apply;look-ahead 用 x[k+L] = wrap01(x[k] + Lα)', unit: 'ref cycles', spec: '§13', ch: 'Ch12' },
+  // ---- §14 injection dynamics
+  { tex: '\\theta_{-}[k],\\ \\theta_{+}[k]', ascii: 'theta theta_minus theta_plus', zh: 'injection 前/後 residual phase(deterministic trajectory 已移除)', unit: 'rad', spec: '§14', ch: 'Ch13' },
+  { tex: '\\Delta f', ascii: 'delta_f detuning', zh: 'VCO free-running detuning(相對 N·f_ref)', unit: 'Hz', spec: '§14', ch: 'Ch13' },
+  { tex: 'K_{inj}', ascii: 'K_inj k_inj', zh: 'injection 強度 ∈ [0,1](linear / sin map 的 kick 增益)', unit: '無因次', spec: '§14', ch: 'Ch13' },
+  { tex: 'e_{ZC,hw}[k],\\ \\varepsilon_{hw}[k]', ascii: 'e_ZC_hw epsilon_hw', zh: 'deterministic hardware scheduling 誤差 = wrapCycles(x_ideal + u_INJ_analog − z0);ε_hw = 2π e_ZC_hw;gating 判準', unit: 'cycles / rad', spec: '§5.1, §14', ch: 'Ch6' },
+  { tex: 'e_{inj}[k]', ascii: 'e_inj', zh: 'pulse 當下實際看到的總誤差 = wrapRadians(θ_− + ε_hw)(含 noise)', unit: 'rad', spec: '§14', ch: 'Ch13' },
+  { tex: '\\Delta\\theta[k]', ascii: 'delta_theta kick', zh: 'injection phase kick(reset:−e_inj;linear:−K_inj e_inj;sin:−K_inj sin(e_inj))', unit: 'rad', spec: '§14', ch: 'Ch13' },
+  { tex: 'e_{ZC,total}[k]', ascii: 'e_ZC_total', zh: '最終 zero-crossing 誤差(含 dynamics 與 noise)= e_inj/(2π)', unit: 'cycles', spec: '§14, §16', ch: 'Ch6' },
+  { tex: '\\mathrm{inj\\_fired}[k]', ascii: 'inj_fired inj_gate', zh: '該拍是否施打 pulse(gating;threshold mode:|e_ZC_hw| ≤ 門檻才 fire)', unit: '0/1', spec: '§14', ch: 'Ch13' },
+  // ---- §15 shorting proxy
+  { tex: 'v_d,\\ V_p', ascii: 'v_d V_p', zh: 'differential 波形與峰值(shorting 能量 proxy 用)', unit: 'V', spec: '§15', ch: 'Ch14' },
+  { tex: '\\varepsilon_t', ascii: 'epsilon_t', zh: 'shorting 時刻的 timing 誤差', unit: 's', spec: '§15', ch: 'Ch14' },
+  { tex: 'E_{short,norm}', ascii: 'E_short E_short_norm', zh: 'normalized shorting energy proxy = sin²(2π ε_t/T_vco)(非真實能量)', unit: '無因次', spec: '§15', ch: 'Ch14' },
+];
+
 export default function Chapter02() {
-  const [alpha, setAlpha] = useState(0.125);
+  const [alpha, setAlpha] = useChapterAlpha();
   const [kShow, setKShow] = useState(4);
+  const [notationFilter, setNotationFilter] = useState('');
   const { unit } = useUnit();
   const ct = useChartTheme();
   const { setStatus } = useSimStatus();
@@ -154,6 +258,17 @@ export default function Chapter02() {
     ];
     return { tMax, rows };
   }, [res, kShow, ct, tRefPs, tVcoPs]);
+
+  /* ------------------------------------- notation table client-side filter */
+  const notationRows = useMemo(() => {
+    const q = notationFilter.trim().toLowerCase();
+    if (q === '') return NOTATION;
+    const terms = q.split(/\s+/);
+    return NOTATION.filter((r) => {
+      const hay = `${r.ascii} ${r.zh} ${r.unit} ${r.spec} ${r.ch}`.toLowerCase();
+      return terms.every((t) => hay.includes(t));
+    });
+  }, [notationFilter]);
 
   /* ------------------------------------------------ cycle-by-cycle table */
   const tableRows = useMemo(() => {
@@ -358,6 +473,78 @@ export default function Chapter02() {
         />
       </SectionFigure>
 
+      <SectionFigure
+        title="符號對照表 Notation table:全站符號 ↔ MODEL_SPEC ↔ 章節"
+        caption={
+          <span>
+            全站(Ch0–Ch20)使用的符號、意義、單位、定義所在的 MODEL_SPEC 節與首次出現章。
+            過濾框做 client-side 比對:對 ASCII 名(即程式碼 / test-vector 欄名,如{' '}
+            <code>e_pair</code>、<code>e_ZC_hw</code>)、中文意義、單位、spec 節(如 §14)與章號
+            (如 Ch13)取子字串,多個關鍵字以空白分隔為 AND。定義全部引自 MODEL_SPEC
+            (本表不新增數學);單位欄為該符號的自然顯示單位,內部計算一律 float64 cycles(§2)。
+            <EpistemicTag kind="EXACT" />
+          </span>
+        }
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <input
+            type="search"
+            value={notationFilter}
+            onChange={(e) => setNotationFilter(e.target.value)}
+            placeholder="過濾:符號 / 意義 / 單位 / §節 / 章,如 e_pair、rad、§14、Ch13"
+            aria-label="符號過濾"
+            style={{
+              flex: '1 1 300px',
+              maxWidth: 460,
+              background: 'var(--bg)',
+              color: 'var(--fg)',
+              border: '1px solid var(--border-strong)',
+              borderRadius: 4,
+              padding: '5px 9px',
+              fontFamily: 'var(--font-mono)',
+              fontSize: 12.5,
+            }}
+          />
+          <span style={{ fontSize: '0.85rem', color: 'var(--fg-subtle)' }}>
+            顯示 {notationRows.length} / {NOTATION.length} 個符號
+          </span>
+        </div>
+        <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: 480, marginTop: 10 }}>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>符號</th>
+                <th>意義</th>
+                <th>單位</th>
+                <th>MODEL_SPEC</th>
+                <th>首次出現</th>
+              </tr>
+            </thead>
+            <tbody>
+              {notationRows.map((r) => (
+                <tr key={r.ascii}>
+                  <td style={{ whiteSpace: 'nowrap' }}>
+                    <M>{r.tex}</M>
+                  </td>
+                  <td>{r.zh}</td>
+                  <td style={{ whiteSpace: 'nowrap' }}>{r.unit}</td>
+                  <td style={{ whiteSpace: 'nowrap' }}>{r.spec}</td>
+                  <td style={{ whiteSpace: 'nowrap' }}>{r.ch}</td>
+                </tr>
+              ))}
+              {notationRows.length === 0 && (
+                <tr>
+                  <td colSpan={5} style={{ color: 'var(--fg-subtle)' }}>
+                    無符合「{notationFilter}」的符號;試試 ASCII 欄名(e_pair、u_INJ_ideal)或
+                    §節號。
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </SectionFigure>
+
       <SectionCode
         language="typescript"
         title="web/src/model/phaseMath.ts(真實碼節錄)"
@@ -468,8 +655,8 @@ export default function Chapter02() {
         <Callout type="warn" title="誤解:「round 到最近整數,哪個語言都一樣」">
           <p>
             錯。Python round(2.5)=2、JS Math.round(2.5)=3。fractional-N scheduler 的 ideal
-            code 常常正好落在 .5(例如 α=0.125 時 <M>{'A_{ideal}'}</M> 逐拍 +32,任何 .5
-            的 offset 都會系統性出現),tie 行為不同 → 兩語言產生不同的 command 序列 →
+            code 常常正好落在 .5(例如 α=0.125 時 <M>{'A_{ideal}'}</M> 逐拍 +800、fine code
+            R 逐拍 +32,任何 .5 的 offset 都會系統性出現),tie 行為不同 → 兩語言產生不同的 command 序列 →
             golden model 交叉驗證直接失敗。這不是浮點誤差,是定義不同。
           </p>
         </Callout>
@@ -492,6 +679,10 @@ export default function Chapter02() {
           <li>
             量化一律 qFloor / qNearest(floor 形式):跨語言 bit-exact 是 test vector
             方法論(Ch18)的前提。
+          </li>
+          <li>
+            全站符號索引在本章的<strong>符號對照表</strong>:每個符號對回定義它的 MODEL_SPEC
+            節與首次出現章;後面章節遇到不認識的符號,回這裡用 ASCII 欄名或 §節號過濾即可。
           </li>
         </ul>
       </SectionTakeaway>

@@ -36,8 +36,8 @@ mulberry32 with named streams, base seed 12345 (MODEL_SPEC §12).
 | `phaseMath.ts` | `phase_math.py` | §2 wrap01/wrapCycles/wrapRadians/qNearest/qFloor |
 | `config.ts` | `config.py` | `SimConfig` (snake_case keys = JSON vector schema), `defaultConfig()`, `fromPartial()`, `replaceConfig()`, derived `configG/Alpha/TRefS/TVcoS` |
 | `phaseAccumulator.ts` | `phase_accumulator.py` | §3 `sIdeal`/`xIdeal`/`aIdeal` |
-| `quantizers.ts` | `dsm_first_order.py`, `mash11.py`, `feedback_scheduler.py` | §6 floor/nearest/truncate/`ErrorFeedbackFirstOrder`/`Mash11`, `makeQuantizer`, triangular dither |
-| `rng.ts` | `noise_models.py` | §12 `Mulberry32` (+ Box-Muller `gauss()`), named streams `ref:1 … pulse:9` |
+| `quantizers.ts` | `dsm_first_order.py`, `mash11.py`, `mash111.py`, `feedback_scheduler.py` | §6 floor/nearest/truncate/`ErrorFeedbackFirstOrder`/`Mash11`/`Mash111`, `makeQuantizer`, triangular dither |
+| `rng.ts` | `noise_models.py` | §12 `Mulberry32` (+ Box-Muller `gauss()`), named streams `ref:1 … dsm_inj:10` |
 | `dtcModel.ts` | `dtc_model.py` | §10, §11 gain/offset/INL/DNL behavioral DTC |
 | `tapModel.ts` | `tap_model.py` | §4, §5, §10 tap/PMUX tables with mismatch |
 | `feedbackScheduler.ts` | `feedback_scheduler.py` | §4 quantize + decode `A_FB → I/R/m/c`, assertions |
@@ -46,7 +46,7 @@ mulberry32 with named streams, base seed 12345 (MODEL_SPEC §12).
 | `injectionDynamics.ts` | `injection_dynamics.py` | §14 none/reset/linear/sin/lut maps, `lockCondition`, `sinFixedPointRad` |
 | `measurements.ts` | `measurements.py` | §17 rms/p2p/mean/histogram, plain radix-2 FFT, Hann periodogram (one-sided, fs = f_ref), `detectSpurs`, dBc helpers |
 | `errorDecomposition.ts` | `error_decomposition.py` | §16 per-term decomposition + joint total |
-| `experiments.ts` | `experiments.py` | the 20 presets `exp01…exp20` + `n3p13_shared_reverse` alias (same ids/configs) |
+| `experiments.ts` | `experiments.py` | the 22 presets `exp01…exp22` + `n3p13_shared_reverse` alias (same ids/configs) |
 | `simulate.ts` | `simulate.py` | full chain; `SimResult.data` keyed by the same column names (`COLUMNS`), `toRows()`, `summary()` |
 | `index.ts` | `__init__` | public re-export surface |
 

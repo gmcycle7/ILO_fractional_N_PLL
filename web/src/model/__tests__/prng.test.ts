@@ -44,12 +44,14 @@ describe('mulberry32 (spec section 12)', () => {
       dnl_inj: 7,
       lat: 8,
       pulse: 9,
+      dsm_inj: 10,
     });
     // stream seed = base_seed + offset
     const s = makeStream('ref', 12345);
     expect(s.next()).toBe(new Mulberry32(12346).next());
     const streams = makeAllStreams(12345);
     expect(streams.pulse.next()).toBe(new Mulberry32(12345 + 9).next());
+    expect(streams.dsm_inj.next()).toBe(new Mulberry32(12345 + 10).next());
   });
 
   it('gaussian pairs are deterministic and cached (Box-Muller)', () => {

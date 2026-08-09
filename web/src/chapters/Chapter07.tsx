@@ -7,6 +7,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useChapterAlpha } from '../lib/globalParams';
 import {
   ChapterShell,
   SectionQuestion,
@@ -83,7 +84,8 @@ export default function Chapter07() {
   const [uTarget, setUTarget] = useState(0.4);
   const [mapping, setMapping] = useState<InjMapping>('naive');
   const [tap3Deg, setTap3Deg] = useState(0); // tap 3 mismatch, degrees
-  const [alpha, setAlpha] = useState(0.13);
+  const [alpha, setAlpha] = useChapterAlpha();
+  const [eSchedLsb, setESchedLsb] = useState(0.5); // basin 圖:總排程誤差(LSB)
   const { unit } = useUnit();
   const ct = useChartTheme();
   const { setStatus } = useSimStatus();
@@ -189,6 +191,17 @@ export default function Chapter07() {
     });
     return withMarkLine(opt, 0, makeMarkLine([{ y: 31.5, label: 'naive 上限 c=31' }]));
   }, [codeRes, ct]);
+
+  // --- 1/8-cycle 對位模糊 basin 圖(純幾何,不跑 simulate)---
+  const eSchedCyc = eSchedLsb / 256;
+  // 被捕捉的 crossing(相對排定 crossing 的整數位移)與 capture 後殘留
+  const capturedTaps = Math.round(8 * eSchedCyc - wrapCycles(8 * eSchedCyc));
+  const residCyc = wrapCycles(8 * eSchedCyc) / 8;
+  const falseLock = capturedTaps !== 0;
+  const uPulse = 0.5 + eSchedCyc; // 排定 crossing 固定畫在 0.5(T4)
+  const uCaptured = 0.5 + capturedTaps / 8;
+  const pullColor = falseLock ? 'var(--warn-border)' : 'var(--accent)';
+  const xOf = (u: number) => 40 + u * 680; // phase axis 0..1 cycle -> px
 
   const tableRows = useMemo(() => {
     const d = codeRes.data;
@@ -455,6 +468,235 @@ export default function Chapter07() {
         <EChart option={cOption} height={260} group="ch7codes" />
       </SectionFigure>
 
+      <SectionFigure
+        title="1/8-cycle 對位模糊與 false-lock 風險:8 個 crossing 的 basins of attraction"
+        caption={
+          <span>
+            一維 phase 軸(0–1 VCO cycle):實心直線 = 8-phase ring 的 zero crossings
+            (間距 1/8 cycle = 32 LSB;排定的 crossing 固定畫在 T4);虛線 = basin 邊界
+            (每個 crossing ±1/16 cycle = ±16 LSB);高亮豎線 = injection pulse 實際落點
+            (排定 crossing + 總排程誤差 e<sub>sched</sub>);箭頭 = 被拉往的 crossing。
+            右側 ParamPanel 的「e_sched(對位圖)」slider 與 preset 可重現各誤差等級。
+            讀值單位:<UnitSwitch />
+          </span>
+        }
+      >
+        <p>
+          injection pulse 不知道「你要的是哪一個 crossing」。shorting 只會把 VCO 往 pulse
+          附近<strong>最近的</strong> zero crossing 拉(Ch13 sin map 的吸引行為);而 8-phase
+          ring 上,tap j 與 tap j+4 構成 4 組差動對、每組每個 T<sub>vco</sub> 有 2 個
+          crossing,合計每 1/8 cycle 就有一個 crossing —— 恰為 tap spacing 32 LSB。
+          所以「打在哪個 crossing」這件事,injection 本身完全不把關:
+          <strong>cycle-level(以及 1/8-cycle-level)的對位由 digital scheduler 全權負責</strong>。
+          <EpistemicTag kind="INFERENCE" />
+        </p>
+        <p>
+          幾何上,每個 crossing 的 basin of attraction 以相鄰 crossing 的中點為界:半寬 =
+          crossing 間距的一半 = <M>{'\\tfrac{1}{16}'}</M> cycle = 16 LSB = 22.5° = 5 ps
+          (T<sub>vco</sub> = 80 ps)。可接受的<strong>總</strong>排程誤差判準因此是
+          <EpistemicTag kind="INFERENCE" />
+        </p>
+        <MathBlock>
+          {'|e_{ZC,hw}| < \\tfrac{1}{16}\\ \\text{cycle} = 16\\ \\text{LSB} = 22.5^\\circ'}
+        </MathBlock>
+        <p>
+          超過這個界,pulse 距離<strong>隔壁</strong> crossing 更近,injection 會把 VCO 拉去
+          那裡。危險之處在於數位側完全無法察覺:shared code 的 pair identity 照樣成立
+          (e<sub>pair,digital</sub> ≡ 0)、divider 照樣吐出合法的 n<sub>int</sub> 序列,但
+          VCO 實際停在偏 1/8 cycle 整數倍的 <strong>false lock</strong>。注意這與圖 #3 的
+          redundancy 無關:redundant 替代解 (j−1, c+32) 落在<strong>同一個</strong> phase,
+          不改變排定的 crossing;本節說的是「實際 VCO 相對排程」的偏差。
+          <EpistemicTag kind="INFERENCE" />
+        </p>
+        <svg
+          viewBox="0 0 760 200"
+          style={{ width: '100%', maxWidth: 860, display: 'block' }}
+          role="img"
+          aria-label="1/8-cycle basins of attraction 一維相位軸示意圖"
+        >
+          {/* 排定 crossing 的 basin 底色 */}
+          <rect
+            x={xOf(0.5 - 1 / 16)}
+            y={86}
+            width={xOf(0.5 + 1 / 16) - xOf(0.5 - 1 / 16)}
+            height={62}
+            fill="var(--accent-soft)"
+          />
+          {/* phase 軸 */}
+          <line x1={40} y1={120} x2={720} y2={120} stroke="var(--border-strong)" strokeWidth={1.5} />
+          {/* basin 邊界(j/8 + 1/16) */}
+          {Array.from({ length: 8 }, (_, j) => j / 8 + 1 / 16).map((u) => (
+            <line
+              key={`b${u}`}
+              x1={xOf(u)}
+              y1={86}
+              x2={xOf(u)}
+              y2={148}
+              stroke="var(--border)"
+              strokeDasharray="3 3"
+            />
+          ))}
+          {/* 8 個 crossing(0 與 1 為同一 phase,都畫) */}
+          {Array.from({ length: 9 }, (_, j) => (
+            <g key={`c${j}`}>
+              <line
+                x1={xOf(j / 8)}
+                y1={96}
+                x2={xOf(j / 8)}
+                y2={144}
+                stroke={j === 4 ? 'var(--accent)' : 'var(--fg-subtle)'}
+                strokeWidth={j === 4 ? 2.5 : 1.5}
+              />
+              <text
+                x={xOf(j / 8)}
+                y={162}
+                textAnchor="middle"
+                fontSize={11}
+                fontFamily="var(--font-mono)"
+                fill={j === 4 ? 'var(--accent)' : 'var(--fg-subtle)'}
+              >
+                {`T${j % 8}`}
+              </text>
+            </g>
+          ))}
+          <text
+            x={xOf(0.5)}
+            y={178}
+            textAnchor="middle"
+            fontSize={11}
+            fill="var(--accent)"
+          >
+            排定 crossing
+          </text>
+          {/* 被捕捉的 crossing */}
+          <circle cx={xOf(uCaptured)} cy={120} r={5.5} fill={pullColor} />
+          {/* pulse 實際落點 */}
+          <line
+            x1={xOf(uPulse)}
+            y1={58}
+            x2={xOf(uPulse)}
+            y2={144}
+            stroke={pullColor}
+            strokeWidth={2}
+          />
+          <text
+            x={xOf(uPulse)}
+            y={50}
+            textAnchor="middle"
+            fontSize={11}
+            fontFamily="var(--font-mono)"
+            fill={pullColor}
+          >
+            pulse
+          </text>
+          {/* pull 方向箭頭 */}
+          {Math.abs(xOf(uPulse) - xOf(uCaptured)) > 8 && (
+            <g stroke={pullColor} fill={pullColor}>
+              <line
+                x1={xOf(uPulse)}
+                y1={72}
+                x2={xOf(uCaptured) + (uCaptured < uPulse ? 8 : -8)}
+                y2={72}
+                strokeWidth={1.5}
+              />
+              <polygon
+                points={
+                  uCaptured < uPulse
+                    ? `${xOf(uCaptured)},72 ${xOf(uCaptured) + 8},68 ${xOf(uCaptured) + 8},76`
+                    : `${xOf(uCaptured)},72 ${xOf(uCaptured) - 8},68 ${xOf(uCaptured) - 8},76`
+                }
+              />
+            </g>
+          )}
+        </svg>
+        <p style={{ marginTop: 8, fontSize: '0.9rem' }}>
+          e<sub>sched</sub> = {trimNumber(eSchedLsb, 4)} LSB ={' '}
+          {formatPhase(eSchedCyc, unit, tVco)};捕捉結果:
+          {falseLock ? (
+            <strong>
+              {' '}
+              false lock — 被拉去偏 {capturedTaps > 0 ? '+' : ''}
+              {capturedTaps}/8 cycle({capturedTaps * 45}°)的 crossing
+            </strong>
+          ) : (
+            <span> 正確 crossing(pulse 仍在排定 basin 內)</span>
+          )}
+          ;capture 後相對該 crossing 殘留 {formatPhase(residCyc, unit, tVco)}。
+        </p>
+        <p>
+          拿 Ch15 的 mismatch 實測與本站各 experiment 對照這個 16 LSB 的預算
+          (T<sub>vco</sub> = 80 ps 換算;各行來源標於表內):
+        </p>
+        <div style={{ overflowX: 'auto' }}>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>誤差來源</th>
+                <th>大小(LSB)</th>
+                <th>佔 basin 半寬 16 LSB</th>
+                <th>對位結果</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>quantization(nearest)上限 [EXACT]</td>
+                <td>0.5(156.25 fs)</td>
+                <td>3.1%</td>
+                <td>安全</td>
+              </tr>
+              <tr>
+                <td>1° tap mismatch(exp12)[EXACT]</td>
+                <td>0.711(222.2 fs)</td>
+                <td>4.4%</td>
+                <td>安全</td>
+              </tr>
+              <tr>
+                <td>1% INJ DTC gain 上限(exp13)[EXACT]</td>
+                <td>0.64(200 fs)</td>
+                <td>4.0%</td>
+                <td>安全</td>
+              </tr>
+              <tr>
+                <td>上述三者 worst-case 直加 [APPROX]</td>
+                <td>≈ 1.85</td>
+                <td>11.6%</td>
+                <td>安全(margin ≈ 8.6×)</td>
+              </tr>
+              <tr>
+                <td>latency bug L=1, α=0.13(exp10)[EXPERIMENT]</td>
+                <td>33.28(46.8°)</td>
+                <td>208%</td>
+                <td>跨 basin → false lock(偏 1 tap,殘留 1.28 LSB)</td>
+              </tr>
+              <tr>
+                <td>dsm_only 無 gating(exp21b)[EXPERIMENT]</td>
+                <td>rms ≈ 74(e_ZC_hw 掃滿 ±0.5 cycle)</td>
+                <td>—</td>
+                <td>每拍換 basin → unlock(θ rms 1.81 rad)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          與 PLL loop 的分工:<strong>loop 顧 absolute</strong>(把 frequency 與長期 phase
+          鎖住,讓 η<sub>vco</sub> 保持小)、<strong>scheduler 顧「選哪個 crossing」</strong>
+          (deterministic 的 cycle-level + 1/8-level 對位)、<strong>injection 只顧 basin
+          內的 local 收斂</strong>。三層失效的症狀完全不同:loop 失鎖是頻率漂;scheduler
+          跨 basin 是頻率正確、相位偏 n/8 cycle 的 false lock;injection 太弱只是 residual
+          jitter 變大。scheduler 一旦跨 basin,loop 不會自動救回 —— 因為 feedback path 用的
+          是同一套(錯誤的)digital 相位記帳。<EpistemicTag kind="INFERENCE" />
+        </p>
+        <p>
+          實測對照:mismatch 類誤差(合計 ≈ 1.85 LSB)只佔預算 11.6%,它們傷的是
+          <strong>精度</strong>(Ch15),不是對位;會跨 basin 的是 <strong>cycle-level
+          記帳錯誤</strong> —— exp10 的 L=1 latency bug 實測 e<sub>ZC,hw</sub> ≈ +0.13 cycle
+          (511/512 拍超過 1/16 cycle),exp21b 的 dsm_only 無 gating 則掃滿 ±0.5 cycle。
+          §14 的 gating 門檻預設 0.0625 cycle <strong>正是 basin 半寬</strong>:只在
+          deterministic 誤差已落在正確 basin 內才 fire,exp21c 實測以 67/512 的 fire rate
+          把 tail θ rms 從 1.81 rad 壓回 0.102 rad。<EpistemicTag kind="EXPERIMENT" />
+        </p>
+      </SectionFigure>
+
       <SectionCode
         language="typescript"
         title="web/src/model/injectionScheduler.ts(真實節錄:tap + DTC decode)"
@@ -575,7 +817,8 @@ if (cfg.inj_mapping === 'naive') {
           </li>
           <li>
             <strong>#10</strong>:j_INJ 逐拍下降(反向旋轉的 coarse 部分);α=0.13 時大約每拍退一格,
-            偶爾停留(因為 0.13 cycle = 33.28 LSB,略多於一格 32 LSB)。
+            偶爾一次退兩格、從不停留(因為 0.13 cycle = 33.28 LSB,略多於一格 32 LSB;多出的
+            1.28 LSB 累積滿一格 — 平均每 25 拍 — 該拍就退兩格)。
           </li>
           <li>
             <strong>#11</strong>:naive/nearest 的 c_INJ 永遠在虛線(c=31)下方;calibrated + tap3
@@ -619,6 +862,13 @@ if (cfg.inj_mapping === 'naive') {
             debug 時看 c_INJ 的分佈就能判斷 mapping 行為:c 永遠 ≤ 31 → naive/nearest;c 出現
             32–63 → calibrated 正在利用 redundancy。<EpistemicTag kind="EXPERIMENT" />
           </li>
+          <li>
+            對位判準:總 deterministic 排程誤差 |e<sub>ZC,hw</sub>| 必須 &lt; 1/16 cycle
+            (16 LSB,basin 半寬)。mismatch 類誤差(worst-case 直加 ≈ 1.85 LSB)有 ≈ 8.6×
+            margin;latency 類 bug(33.28 LSB)與 dsm_only 無 gating(±0.5 cycle)直接跨
+            basin → false lock / unlock。look-ahead(Ch12)與 gating 門檻 0.0625 cycle(§14)
+            是對位性的守門員,不只是精度問題。<EpistemicTag kind="INFERENCE" />
+          </li>
         </ul>
       </SectionTakeaway>
 
@@ -629,6 +879,10 @@ if (cfg.inj_mapping === 'naive') {
             實際校正有量測誤差與漂移,本模型不含。mapping 是 static 查表,不含 tap 切換的動態限制
             (glitch、settling)。DTC 的 gain/INL/DNL 為 behavioral 模型(§10,ASSUMPTION),
             tie-break 慣例是為了 Python↔TS 逐位一致所做的實作選擇。行為級結果不等同 silicon(§20)。
+            1/8-cycle 對位模糊一節的 basin 圖是 tap 幾何的<strong>推論</strong>(INFERENCE):
+            行為級 sin map(§14)把 e_inj 摺到 (−π, π],每拍只有單一 fixed point,
+            <strong>不會</strong>模擬 wrong-crossing capture;真實吸引域邊界取決於 pulse
+            寬度、波形斜率與 stage 間耦合,需 transistor-level 驗證。
           </p>
         </Callout>
       </SectionLimitation>
@@ -701,6 +955,25 @@ if (cfg.inj_mapping === 'naive') {
             label: n.toFixed(4),
             onClick: () => setAlpha(Number((n - 3).toFixed(4))),
           }))}
+        />
+        <Slider
+          label="e_sched(對位圖)"
+          value={eSchedLsb}
+          min={-40}
+          max={40}
+          step={0.01}
+          unit="LSB"
+          onChange={setESchedLsb}
+        />
+        <PresetButtons
+          label="e_sched preset"
+          presets={[
+            { label: 'half-LSB 0.5', onClick: () => setESchedLsb(0.5) },
+            { label: '1° tap 0.711', onClick: () => setESchedLsb(256 / 360) },
+            { label: '1% gain 0.64', onClick: () => setESchedLsb(0.64) },
+            { label: 'worst-case ≈1.85', onClick: () => setESchedLsb(0.5 + 256 / 360 + 0.64) },
+            { label: 'latency bug 33.28', onClick: () => setESchedLsb(33.28) },
+          ]}
         />
       </ParamPanel>
     </ChapterShell>

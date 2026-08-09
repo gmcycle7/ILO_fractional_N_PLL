@@ -1,5 +1,5 @@
 /**
- * The 20 canonical numerical experiments.
+ * The 22 canonical numerical experiments.
  * Mirror of model/python/experiments.py — SAME ids and configs.
  *
  * Each entry: id, name_zh, name_en, description, config (single SimConfig)
@@ -69,8 +69,10 @@ export const EXPERIMENTS: Experiment[] = [
       'A_ideal but quantize independently.',
     config: mk({ n_div: 3.13, arch_mode: 'C' }),
     expected_result:
-      'Average behavior correct; pair error can be nonzero ' +
-      '(independent quantizers), unlike mode D.',
+      'With independent NEAREST quantizers the pair still cancels exactly: ' +
+      'e_pair_digital == 0 on every cycle except exact half-LSB ties (none at ' +
+      'N=3.13; measured 0/512 nonzero). Genuine divergence needs DSM ' +
+      'quantizers with distinct state (see exp05).',
   },
   {
     id: 'exp05',
@@ -80,7 +82,10 @@ export const EXPERIMENTS: Experiment[] = [
       'Two independent ef1 DSMs (own state) for FB and INJ; ' +
       'correct on average, wrong cycle-by-cycle reverse.',
     config: mk({ n_div: 3.13, arch_mode: 'B', quantizer: 'ef1' }),
-    expected_result: 'e_pair_digital nonzero on many cycles (not recommended).',
+    expected_result:
+      "Distinct DSM states ('dsm_inj' seeding, spec section 7): " +
+      'e_pair_digital jumps in {-1, 0, +1} LSB, nonzero on a sustained ' +
+      '~64 percent of cycles (measured 326/512). Not recommended.',
   },
   {
     id: 'exp06',
@@ -109,8 +114,9 @@ export const EXPERIMENTS: Experiment[] = [
       'deterministic sub-LSB error pattern.',
     config: mk({ n_div: ALPHA_0P3, quantizer: 'nearest' }),
     expected_result:
-      '|e_FB_abs| <= 0.5 LSB, deterministic periodic pattern ' +
-      'from the 0.3-LSB grid offset (spur, not noise).',
+      'Ten-level periodic sawtooth (period 10) spanning the full +-0.5 LSB ' +
+      'range, mean ~ +0.05 LSB (measured +0.047 LSB over 512 cycles; FP ' +
+      'half-LSB ties can flip a +0.5 to -0.5). Deterministic spur, not noise.',
   },
   {
     id: 'exp08',
@@ -121,8 +127,9 @@ export const EXPERIMENTS: Experiment[] = [
       'DSM: long-term mean error -> 0, larger instantaneous peaks.',
     config: mk({ n_div: ALPHA_0P3, quantizer: 'ef1' }),
     expected_result:
-      'mean(e_FB_abs) -> 0; instantaneous error peaks grow to ' +
-      '~1 LSB (noise shaping trades DC for peaks).',
+      'mean(e_FB_abs) -> 0 (measured -0.002 LSB); multi-level shaped error ' +
+      'in 0.1-LSB steps with instantaneous peaks +-0.7 LSB (noise shaping ' +
+      'trades DC for peaks; spec section 6 Test 4).',
   },
   {
     id: 'exp09',
@@ -135,7 +142,9 @@ export const EXPERIMENTS: Experiment[] = [
       mk({ n_div: 3.13, arch_mode: 'B', quantizer: 'ef1' }),
     ],
     expected_result:
-      'Mode D: e_pair_digital == 0; mode B: e_pair_digital != 0 on many cycles (Test 13).',
+      'Mode D: e_pair_digital == 0 exactly; mode B (distinct DSM state via ' +
+      "'dsm_inj'): e_pair_digital != 0 on a sustained ~64 percent of cycles " +
+      '(measured 326/512; Test 13).',
   },
   {
     id: 'exp10',
@@ -144,7 +153,7 @@ export const EXPERIMENTS: Experiment[] = [
     description: 'Command computed at k applied at k+1 without look-ahead: ' + 'stale phase state.',
     config: mk({ n_div: 3.13, latency_cycles: 1, lookahead: false }),
     expected_result:
-      'Phase error wrapCycles(L*alpha) = 0.13 cycle = 46.8 deg ' + '(66.6x half-LSB).',
+      'Phase error wrapCycles(-L*alpha) = -0.13 cycle (|e| = 46.8 deg, 66.6x half-LSB).',
   },
   {
     id: 'exp11',
@@ -168,10 +177,14 @@ export const EXPERIMENTS: Experiment[] = [
     name_zh: '1% DTC gain mismatch',
     name_en: '1 percent DTC gain mismatch',
     description:
-      'FB DTC gain 1.00, INJ DTC gain 1.01 at N=3.125 ' + '(DTC full range T_vco/4 = 20 ps).',
-    config: mk({ n_div: 3.125, dtc_fb_gain: 1.0, dtc_inj_gain: 1.01 }),
+      'FB DTC gain 1.00, INJ DTC gain 1.01 at off-grid N=3.13 so the ' +
+      'injection DTC codes actually sweep (DTC full range T_vco/4, ~20 ps).',
+    config: mk({ n_div: 3.13, dtc_fb_gain: 1.0, dtc_inj_gain: 1.01 }),
     expected_result:
-      'Code-dependent error up to ~200 fs at full range ' + '(0.64 LSB), > half-LSB (Test 7).',
+      'Code-dependent gain error appears: e_pair_analog up to 96.7 fs ' +
+      '(0.01 * 31/256 cycle at the naive-mapping max code c_INJ=31), and ' +
+      'max|e_ZC_hw| = 205.9 fs (quantization <= 156.5 fs + gain error). ' +
+      'Full-range bound remains ~200 fs = 0.64 LSB (Test 7).',
   },
   {
     id: 'exp14',
@@ -259,19 +272,30 @@ export const EXPERIMENTS: Experiment[] = [
     name_zh: 'normalized vs fixed-time DTC 12-13 GHz 掃描',
     name_en: 'Normalized vs fixed-time DTC sweep 12-13 GHz',
     description:
-      'N in {3.0, 3.125, 3.25} (12/12.5/13 GHz) with ' + 'normalized vs fixed-time (312.5 fs) DTC LSB.',
+      'Off-grid N in {3.01, 3.06, 3.11, 3.16, 3.21, 3.24} (12.04-12.96 GHz) ' +
+      'so DTC codes sweep every cycle, each with normalized vs fixed-time ' +
+      '(312.5 fs) DTC LSB.',
     configs: [
-      mk({ n_div: 3.0, dtc_mode: 'normalized' }),
-      mk({ n_div: 3.0, dtc_mode: 'fixed_time' }),
-      mk({ n_div: 3.125, dtc_mode: 'normalized' }),
-      mk({ n_div: 3.125, dtc_mode: 'fixed_time' }),
-      mk({ n_div: 3.25, dtc_mode: 'normalized' }),
-      mk({ n_div: 3.25, dtc_mode: 'fixed_time' }),
+      mk({ n_div: 3.01, dtc_mode: 'normalized' }),
+      mk({ n_div: 3.01, dtc_mode: 'fixed_time' }),
+      mk({ n_div: 3.06, dtc_mode: 'normalized' }),
+      mk({ n_div: 3.06, dtc_mode: 'fixed_time' }),
+      mk({ n_div: 3.11, dtc_mode: 'normalized' }),
+      mk({ n_div: 3.11, dtc_mode: 'fixed_time' }),
+      mk({ n_div: 3.16, dtc_mode: 'normalized' }),
+      mk({ n_div: 3.16, dtc_mode: 'fixed_time' }),
+      mk({ n_div: 3.21, dtc_mode: 'normalized' }),
+      mk({ n_div: 3.21, dtc_mode: 'fixed_time' }),
+      mk({ n_div: 3.24, dtc_mode: 'normalized' }),
+      mk({ n_div: 3.24, dtc_mode: 'fixed_time' }),
     ],
     expected_result:
-      'normalized: phase LSB constant 1.40625 deg; ' +
-      'fixed_time: phase LSB scales with f_vco ' +
-      '(325.5/312.5/300.5 fs table, spec section 11).',
+      'All points off-grid: max|e_FB_abs| 144.7-155.7 fs (nonzero ' +
+      'everywhere). normalized: phase LSB constant 1.40625 deg, e_ZC_hw = ' +
+      'quantization only (<= half-LSB); fixed_time: 312.5-fs LSB != ' +
+      'T_vco/256 away from 12.5 GHz, adding code-dependent scaling error, ' +
+      'e.g. N=3.01: max|e_ZC_hw| 155.7 -> 489.0 fs and max|e_pair_analog| ' +
+      '0 -> 764.1 fs (spec section 11).',
   },
   {
     id: 'exp19',
@@ -314,6 +338,76 @@ export const EXPERIMENTS: Experiment[] = [
     expected_result:
       'Accumulated/shared state keeps the exact modular ' +
       'reverse pairing; bit-only independent state does not.',
+  },
+  {
+    id: 'exp21',
+    name_zh: 'DSM-only divider modulation:無 gating vs gating',
+    name_en: 'DSM-only divider modulation: ungated vs gated injection',
+    description:
+      'N=3.13, ef1, sin injection (K=0.4, 1 MHz detuning, ' +
+      'sigma_vco_w 0.02 rad): (a) full fractional actuator, ' +
+      '(b) dsm_only actuator (integer-cycle quantization, no ' +
+      'PMUX/DTC/tap) with gating off, (c) dsm_only with ' +
+      'threshold gating |e_ZC_hw| <= 0.0625 cycle.',
+    configs: [
+      mk({
+        n_div: 3.13,
+        quantizer: 'ef1',
+        actuator_mode: 'full',
+        inj_model: 'sin',
+        k_inj: 0.4,
+        delta_f_hz: 1e6,
+        sigma_vco_w_rad: 0.02,
+      }),
+      mk({
+        n_div: 3.13,
+        quantizer: 'ef1',
+        actuator_mode: 'dsm_only',
+        inj_model: 'sin',
+        k_inj: 0.4,
+        delta_f_hz: 1e6,
+        sigma_vco_w_rad: 0.02,
+      }),
+      mk({
+        n_div: 3.13,
+        quantizer: 'ef1',
+        actuator_mode: 'dsm_only',
+        inj_gate_mode: 'threshold',
+        inj_model: 'sin',
+        k_inj: 0.4,
+        delta_f_hz: 1e6,
+        sigma_vco_w_rad: 0.02,
+      }),
+    ],
+    expected_result:
+      '(a) full: 512/512 fire, |e_ZC_hw| <= 0.00297 cycle, residual ' +
+      'theta_plus rms (last 256) 0.015 rad. (b) dsm_only ungated: e_ZC_hw ' +
+      'sweeps the full +-0.5 cycle (rms 0.289), kicks land at arbitrary ' +
+      'pulse offsets and unlock the loop: theta_plus rms (last 256) 1.81 ' +
+      'rad. (c) dsm_only gated at 0.0625 cycle: fires 67/512 (13%), ' +
+      'theta_plus rms (last 256) 0.102 rad — gating restores a bounded ' +
+      'lock at a reduced correction rate (all measured, seed 12345).',
+  },
+  {
+    id: 'exp22',
+    name_zh: 'DSM 階數比較:ef1 vs mash11 vs mash111',
+    name_en: 'DSM order comparison: ef1 vs mash11 vs mash111',
+    description:
+      'N=3.13, mode D, full actuator, three configs differing only in the ' +
+      'quantizer order: ef1 (1st-order error feedback) vs mash11 vs mash111.',
+    configs: [
+      mk({ n_div: 3.13, arch_mode: 'D', quantizer: 'ef1' }),
+      mk({ n_div: 3.13, arch_mode: 'D', quantizer: 'mash11' }),
+      mk({ n_div: 3.13, arch_mode: 'D', quantizer: 'mash111' }),
+    ],
+    expected_result:
+      'Higher order spreads the instantaneous error (measured, 512 cycles): ' +
+      'e_FB_abs rms/peak 0.466/0.76 LSB (ef1), 0.686/1.36 LSB (mash11), ' +
+      '1.194/1.76 LSB (mash111); e_ZC_total rms 0.00182/0.00268/0.00467 ' +
+      'cycle respectively. n_int at N=3.13 stays {3,4} for all three; ' +
+      'reachable set over N in [3,3.25] is {2,3,4} for mash11 AND mash111 ' +
+      '(measured — not wider for mash111; 2 only at small alpha). ' +
+      'e_pair_digital == 0 for all (mode D).',
   },
 ];
 

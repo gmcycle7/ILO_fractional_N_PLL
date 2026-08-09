@@ -36,6 +36,8 @@ export type {
   InjMapping,
   DtcModeName,
   InjModel,
+  ActuatorMode,
+  InjGateMode,
 } from './config';
 export {
   defaultConfig,
@@ -53,7 +55,13 @@ export { sIdeal, xIdeal, aIdeal } from './phaseAccumulator';
 
 // quantizers (section 6)
 export type { QuantizerState } from './quantizers';
-export { makeQuantizer, ErrorFeedbackFirstOrder, Mash11, triangularDither } from './quantizers';
+export {
+  makeQuantizer,
+  ErrorFeedbackFirstOrder,
+  Mash11,
+  Mash111,
+  triangularDither,
+} from './quantizers';
 
 // deterministic PRNG (section 12)
 export type { StreamName, Streams } from './rng';
@@ -100,7 +108,7 @@ export {
 export type { Decomposition } from './errorDecomposition';
 export { decompose } from './errorDecomposition';
 
-// experiments / presets (the 20 canonical numerical experiments)
+// experiments / presets (the 22 canonical numerical experiments)
 export type { Experiment } from './experiments';
 export { EXPERIMENTS, PRESETS, getPreset, presetConfigs } from './experiments';
 

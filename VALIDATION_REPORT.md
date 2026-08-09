@@ -1,86 +1,105 @@
 # VALIDATION_REPORT.md
 
-日期:2026-08-08。
-本報告記錄實際執行過的測試與數值驗證。所有結果皆為本機實測,非預期值。
+最後更新:2026-08-09。
+本報告記錄實際執行過的測試、數值驗證與 review 過程。所有結果皆為本機實測,非預期值。
 
-## 1. 測試總覽
+## 1. 測試總覽(目前狀態)
 
 | Suite | 指令 | 結果 |
 |---|---|---|
-| Python golden model | `python3 -m pytest tests/ -q` | **61 passed, 0 failed** |
-| TypeScript mirror + 交叉驗證 + smoke | `cd web && npm test`(vitest) | **119 passed / 14 files, 0 failed** |
+| Python golden model | `python3 -m pytest tests/ -q` | **87 passed, 0 failed** |
+| TypeScript mirror + 交叉驗證 + smoke | `cd web && npm test`(vitest) | **141 passed / 15 files, 0 failed** |
 | TypeScript type check | `npx tsc --noEmit`(strict) | **0 errors** |
-| Production build | `cd web && npm run build` | **成功**(dist 3.2 MB;chapters lazy-loaded 16–32 kB/章)|
+| Production build | `cd web && npm run build` | **成功**(chapters lazy-loaded;echarts 為獨立 async chunk)|
 
-vitest 119 項包含:TS acceptance tests、**Python↔TS 交叉驗證**(12 組 JSON vectors,
-整數欄完全相等、float ≤1e-12、noise 路徑 ≤1e-9)、**21 個 preset smoke tests**
-(全部 experiments 模擬無 exception、關鍵欄位 finite)、**21 章 SSR render smoke tests**
-(每章 `renderToString` 無 throw)。
+vitest 141 項包含:TS acceptance tests、**Python↔TS 交叉驗證**(14 組 JSON vectors,
+整數欄完全相等、float ≤1e-12、noise 路徑 ≤1e-9)、committed-vector byte-identity、
+23 個 preset smoke tests、21 章 SSR render smoke tests、actuator/gating 行為測試。
 
-## 2. Acceptance tests(MODEL_SPEC §19)逐項狀態
+## 2. 全面正確性 Review(2026-08-09)
 
-| # | 內容 | 狀態 | 驗證位置 |
-|---|---|---|---|
-| 1 | N=3.125:LSB=312.5 fs、phase LSB=1.40625°、half-LSB=0.703125° | ✅ | pytest `test_units_constants` + vitest |
-| 2 | Mode D:`R_INJ=(−R_FB) mod 256`、`e_pair_digital≡0`(所有 k、所有 quantizer) | ✅ | pytest `test_mode_d_identity` + vitest |
-| 3 | u=0.337 → R_FB=86、R_INJ=170、∓85 fs、pair=0 | ✅ | 兩側皆有 |
-| 4 | 0.3 LSB ef1:mean→0、instantaneous ∈ {−0.3, +0.7} LSB | ✅ | pytest `test_quantizers` + vitest |
-| 5 | α=0.13、L=1 latency bug = 46.8° | ✅ | pytest `test_latency` + vitest |
-| 6 | 1° tap mismatch @80 ps = 222.22 fs | ✅ | pytest `test_mismatch` + vitest |
-| 7 | 1% DTC gain @20 ps = 200 fs | ✅ | 同上 |
-| 8 | N∈[3,3.25] sweep:edges monotonic、codes 合法、n_int 合法 | ✅ | pytest `test_sweep` + vitest |
-| 9 | Python↔TS deterministic vectors 一致 | ✅ | vitest cross-validation(12 vectors)|
-| 10 | `npm run build` 成功 | ✅ | 實測 exit 0 |
-| 11 | 所有 presets 載入無 runtime exception | ✅ | vitest `presets.smoke` + `render.smoke` + 瀏覽器實測 |
-| 12 | PSD x 軸 sample rate = f_ref | ✅ | pytest `test_measurements` + vitest |
-| 13 | shared final code vs independent DSM pair-error 行為不同(D≡0、B≠0) | ✅ | 兩側皆有 |
-| 14 | injection models 趨勢合理(K_inj→0 無修正;K_inj↑ residual↓;sin 固定點 = asin 解) | ✅ | pytest `test_dynamics` + vitest |
+以多 agent 交叉查核執行了一次完整 audit:8 路獨立 finder(spec↔Python、spec↔TS、
+21 章內容、測試品質、Verilog-A、canonical 數字重算)產生 40 個 findings,
+**每一個都經過獨立對抗式驗證**(2–3 個 agent 嘗試反駁):38 個 CONFIRMED、2 個被反駁。
+38 個確認問題全部修正,主要包括:
 
-## 3. 關鍵數值 checks(實測)
+1. **Mode B「independent DSMs」未真正獨立**(最嚴重):兩側 DSM state 因 complementary
+   輸入而鎖成鏡像,pair error 只在啟動出現 1 次。修正:modes A/B/C 的 injection 側
+   DSM instance 以獨立 PRNG stream `dsm_inj` 播種初始 state(MODEL_SPEC §7/§12)。
+   修正後實測:Mode B + ef1 的 `e_pair_digital` 在 **326/512 = 63.7%** cycles 非零
+   (值 ∈ {−1,0,+1} LSB);mash11 為 65.0%。Mode D 仍精確為 0。
+2. **Spec 數學錯誤**:0.3 LSB ef1 carry pattern 由錯誤的「週期 4」修正為
+   `0,0,0,1,0,0,1,0,0,1` 週期 10(carry rate 0.3);n_int 範圍修正為
+   nearest/floor {3,4}、DSM {2,3,4}(5 對 N≤3.25 不可達);latency bug 符號修正為 −L·α。
+3. **實驗 config 失效**:exp13 改為 off-grid N=3.13(修正後實測 max |e_ZC_hw| = 205.9 fs,
+   符合 1% × 20 ps 量級);exp18 sweep 改用 off-grid N 值使 fixed-time/normalized 差異可見。
+4. **章節數字錯誤**:N=3.13 quantization error 基本週期為 **25 拍**(spur 間距 160 MHz),
+   多處誤寫為 100 拍/40 MHz,已全部修正;exp07 實為 ±0.5 LSB 十階 sawtooth(mean +0.047)、
+   exp08 峰值 ±0.7 LSB,相關描述改為實測值。
+5. 其他:error decomposition 可加性 gap 改為 per-cycle 線性和定義;latency metadata 補
+   P_state/R_FB/R_INJ;新增 committed-vector byte-identity 回歸測試;Verilog-A ef1
+   look-ahead state priming、nearest decode 對 b_dtc 一般化、testbench nominal tap/PMUX
+   delay 規則補入 usage guide;Ch0–6 補查 86 條 claims 修正 5 處。
 
-- `wrapCycles(0.7) = −0.3`;`qNearest` 用 `floor(x+0.5)`(非語言內建 round,避免
-  banker's rounding 跨語言不一致)— Python 與 TS 逐位一致。
-- Mulberry32 PRNG:seed 12345 前 5 個輸出在 Python 與 TS pinned 為相同常數
-  (pytest `test_prng` / vitest 對應測試)。
-- Mode D identity 以「所有 quantizer mode × 512 cycles」驗證 `e_pair_digital` **精確為 0**
-  (非 tolerance 比較)。
-- On-grid case(N=3.125)`e_FB_abs ≡ 0` exact。
-- ef1 DSM 0.3 LSB case 的 error sequence 逐拍為 `−0.3,−0.3,−0.3,+0.7` 循環。
-- sin injection map 的 steady state 與 `asin(2πΔf·T_ref/K_inj)` 解析解一致(≤1e-6)。
-- 12 組 test vectors 重新生成兩次逐位 identical(deterministic 驗證)。
+## 3. Model 擴充(DSM 使用情境)
 
-## 4. 瀏覽器實測(vite preview,production bundle)
+為討論 fractional-N PLL 常見 DSM 用法的影響,擴充(Python + TS 同步,交叉驗證):
 
-- Ch0/Ch3/Ch17 實際載入:模擬在 browser 端執行完成(status bar 顯示 Done + cycle 數);
-  Ch17 渲染 4 個 ECharts、3 個表格、2 個 CSV export 按鈕;Ch3 phase wheel 有 Play/Step 控制。
-- Console **0 errors**。
-- Light/dark mode 切換實測正常(`data-theme` 切換、背景/圖表色跟隨)。
+- **`mash111`**(MASH 1-1-1)quantizer;實測 n_int 可達集合 {2,3,4},與 mash11 相同
+  (「更寬」的預期被實測推翻,已如實記載於 MODEL_SPEC §4)。
+- **`actuator_mode='dsm_only'`**:classic divider-modulating DSM(無 PMUX/DTC),
+  quantize 於整數 cycle,R_FB≡R_INJ≡0,e_ZC_hw 掃 ±0.5 cycle。
+  mash11/mash111 在 dsm_only 下多數 N 觸發 divide-ratio 0(非法,model 刻意 raise)。
+- **Injection gating**(`inj_gate_mode='threshold'`):只在 |e_ZC_hw| ≤ threshold 時 fire;
+  新增 `inj_fired` 欄位。
+- 新實驗 exp21/exp22 與新 vectors(共 14 JSON + 14 CSV)。
 
-## 5. Known limitations
+關鍵實測(seed 12345,512 cycles):
 
-1. **未執行 Spectre**:`model/veriloga/*.va` 為 simulator-friendly source,僅通過
-   靜態括號/區塊平衡檢查,未經任何 Verilog-A simulator 編譯或模擬。
-   simulator-dependent constructs(`@cross`、`transition` 變動延遲、`idtmod`、
-   analog-block 記憶狀態、`$bound_step`)已集中標記於 `// --- SIMULATOR-DEPENDENT ---`
-   區段,詳見 `VERILOGA_USAGE.md`。
-2. **Injection dynamics 是離散 phase map 近似**(reset/linear/sin/LUT),
-   不等同 continuous-time ILO 或 transistor-level shorting;amplitude 效應未建模。
-3. **Shorting energy 為 sin² normalized proxy**,非真實功率。
-4. **Error decomposition 的可加性只在 linear regime 近似成立**;model 同時輸出
-   逐項 contribution 與 joint total,差異即非線性交互項。
-5. **PDR/PRC 需自行萃取**:網站/model 支援 CSV LUT 匯入,但本專案不含任何
-   transistor-level 萃取結果。
-6. Python↔TS 的 noise 路徑 tolerance 為 1e-9(libm cos/sin/log 末位差異),
-   非逐位相等;純數位路徑為整數全等。
+| 實驗 | 結果 |
+|---|---|
+| exp21a full actuator | fire 512/512,θ⁺ rms(後 256)= **0.0149 rad** |
+| exp21b dsm_only 未 gated | e_ZC_hw rms 0.289/peak 0.5 cyc,θ⁺ rms = **1.811 rad(失鎖)** |
+| exp21c dsm_only gated 1/16 | fire 67/512(13.1%),θ⁺ rms = **0.102 rad(恢復 bounded lock)** |
+| exp22 ef1→mash11→mash111 | e_FB_abs rms 0.466→0.686→1.194 LSB;e_ZC_total rms 單調惡化 |
 
-## 6. Remaining transistor-level questions(留給 silicon 團隊)
+結論(EXPERIMENT→INFERENCE):DSM-only 架構下 ungated injection 有害;gating 只能部分
+補救;DTC-assisted 架構(本專案 full actuator,等價於 injection 側的 DTC QNC)才是
+與 reverse injection 相容的作法。網站 Ch11/Ch13/Ch20 詳述。
 
-1. 實際 VCO 各 node 的 PDR/PRC 形狀與 injection pulse width/強度的 trade-off
-   (K_inj 對應的物理量)。
-2. 8 個 injection taps 的實測 static mismatch 分佈與溫度/supply 漂移
-   (本 model 假設 static LUT)。
-3. DTC INL 的真實形狀(本 model 提供 sin/poly/LUT 三種 behavioral 形式)。
-4. injection pulse 對 VCO amplitude(非 phase)的擾動與 AM-PM 轉換。
-5. reference spur 的 board/package 耦合路徑(不在 behavioral scope 內)。
-6. calibration loop 的收斂與 dithering 策略(本 model 提供 calibrated mapping
-   的靜態最佳解,未建 calibration dynamics)。
+## 4. Acceptance tests(MODEL_SPEC §19)
+
+原 14 條全部通過(逐項見 §19 表與對應測試檔),加上新增:mash111 定義測試、
+dsm_only 不變量、gating 行為、exp21/exp22 一致性、committed-vector byte-identity。
+Canonical 數字(312.5 fs、1.40625°、0.703125°、0.337→86/170、∓85 fs、46.8°、
+222.22 fs、200 fs、wrapCycles(0.7)=−0.3、PRNG pinned values)全部以測試釘死。
+
+## 5. 瀏覽器實測
+
+- production build 於本機 preview 與 GitHub Pages 實測:章節載入、模擬執行、
+  console 0 errors、light/dark、responsive、hash 直達連結正常。
+- UI 改善(全部實測):上一章/下一章 + 鍵盤 ←/→、11 節浮動 TOC + scrollspy、
+  TopBar 全域 N 控制(sessionStorage 保留)、模擬 spinner(Ch17 改為 post-paint 計算)、
+  DebugTable sticky header + 欄位開關、全圖表 saveAsImage/restore toolbox、
+  echarts 延遲載入(首屏不再等 1.1 MB chunk)。
+
+## 6. Known limitations
+
+1. **未執行 Spectre**:Verilog-A 僅靜態檢查;simulator-dependent constructs 集中標記。
+   獨立 DSM 播種(mulberry32)無法在純 Verilog-A 重現(以 `e_q_init` 參數近似,已註明)。
+2. **Injection dynamics 為離散 phase map 近似**(reset/linear/sin/LUT);
+   PLL loop 未共模擬(Ch13 說明 loop-injection 互動為定性論述)。
+3. **Shorting energy 為 sin² proxy**。
+4. **Error decomposition 可加性僅 linear regime 近似**(per-cycle gap 已量化顯示)。
+5. Python↔TS noise 路徑 tolerance 1e-9(libm 差異);純數位路徑整數全等。
+6. Gating 使用 deterministic e_ZC_hw(非含 noise 的瞬時值)— 為 behavioral 簡化,
+   實際電路的 gate 決策資訊來源需另行設計(ASSUMPTIONS B7)。
+
+## 7. Remaining transistor-level questions
+
+1. 實際 VCO 各 node 的 PDR/PRC 與 pulse width/強度 trade-off(K_inj 的物理對應)。
+2. Taps/DTC 的實測 mismatch 分佈與漂移;DTC INL 真實形狀。
+3. Injection 對 VCO amplitude 的擾動與 AM-PM。
+4. Loop filter 與 injection 的完整 co-simulation(本 model 刻意分離)。
+5. Gated injection 的 gate 判斷在實際電路如何取得(需 calibration/observer 設計)。
+6. Calibration loop 收斂動態(本 model 只給 calibrated mapping 靜態最佳解)。

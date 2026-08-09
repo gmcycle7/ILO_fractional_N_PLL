@@ -4,9 +4,13 @@
  * CSV uses column KEYS as the header and RAW values (full float precision) so
  * an exported table can be diffed against Python golden model output; `fmt`
  * only affects on-screen display.
+ *
+ * The header row is sticky inside the scroll container, and columns can be
+ * shown/hidden via the 欄位 dropdown (display only — CSV always exports ALL
+ * columns regardless of visibility).
  */
 
-import { useCallback } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { trimNumber } from '../lib/format';
 
 export interface DebugColumn {
@@ -44,6 +48,34 @@ export default function DebugTable({
   maxHeight = 320,
   exportName = 'debug_table.csv',
 }: DebugTableProps) {
+  // Column visibility (default: all on). Missing key = visible.
+  const [hidden, setHidden] = useState<Record<string, boolean>>({});
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  const shownColumns = columns.filter((c) => hidden[c.key] !== true);
+  const hiddenCount = columns.length - shownColumns.length;
+
+  // Close the column menu on outside click / Escape.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (menuRef.current && e.target instanceof Node && !menuRef.current.contains(e.target)) {
+        setMenuOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [menuOpen]);
+
+  // CSV always exports ALL columns (full precision), independent of visibility.
   const exportCsv = useCallback(() => {
     const header = columns.map((c) => csvCell(c.key)).join(',');
     const lines = rows.map((row) => columns.map((c) => csvCell(row[c.key])).join(','));
@@ -62,16 +94,58 @@ export default function DebugTable({
   return (
     <div className="debug-table">
       <div className="debug-table-bar">
-        <span className="debug-table-count">{rows.length} rows</span>
-        <button type="button" className="debug-export" onClick={exportCsv}>
-          匯出 CSV
-        </button>
+        <span className="debug-table-count">
+          {rows.length} rows
+          {hiddenCount > 0 ? `(隱藏 ${hiddenCount} 欄)` : ''}
+        </span>
+        <div className="debug-table-actions">
+          <div className="debug-columns" ref={menuRef}>
+            <button
+              type="button"
+              className="debug-export"
+              aria-haspopup="true"
+              aria-expanded={menuOpen}
+              onClick={() => setMenuOpen((v) => !v)}
+            >
+              欄位
+            </button>
+            {menuOpen && (
+              <div className="debug-columns-menu" role="menu">
+                <div className="debug-columns-menu-bar">
+                  <button
+                    type="button"
+                    className="debug-export"
+                    onClick={() => setHidden({})}
+                    disabled={hiddenCount === 0}
+                  >
+                    全部顯示
+                  </button>
+                </div>
+                {columns.map((c) => (
+                  <label key={c.key} className="debug-columns-item">
+                    <input
+                      type="checkbox"
+                      checked={hidden[c.key] !== true}
+                      onChange={(e) =>
+                        setHidden((prev) => ({ ...prev, [c.key]: !e.target.checked }))
+                      }
+                    />
+                    <span>{c.label}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+          <button type="button" className="debug-export" onClick={exportCsv}>
+            匯出 CSV
+          </button>
+        </div>
       </div>
       <div className="debug-table-scroll" style={{ maxHeight }}>
         <table className="data-table">
           <thead>
             <tr>
-              {columns.map((c) => (
+              {shownColumns.map((c) => (
                 <th key={c.key}>{c.label}</th>
               ))}
             </tr>
@@ -79,7 +153,7 @@ export default function DebugTable({
           <tbody>
             {rows.map((row, ri) => (
               <tr key={ri}>
-                {columns.map((c) => (
+                {shownColumns.map((c) => (
                   <td key={c.key}>{c.fmt ? c.fmt(row[c.key], row) : defaultFmt(row[c.key])}</td>
                 ))}
               </tr>

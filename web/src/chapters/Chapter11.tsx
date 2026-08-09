@@ -73,6 +73,7 @@ const QUANT_OPTIONS: { value: Quantizer; label: string }[] = [
   { value: 'truncate', label: 'truncate' },
   { value: 'ef1', label: 'ef1(1st-order DSM)' },
   { value: 'mash11', label: 'mash11(MASH 1-1)' },
+  { value: 'mash111', label: 'mash111(MASH 1-1-1)' },
 ];
 
 interface Metrics {
@@ -160,9 +161,54 @@ export default function Chapter11() {
     [],
   );
 
+  // taxonomy (1): experiment 22 — DSM 階數比較(full actuator、mode D、512 cycles)
+  const exp22Sims = useMemo(() => presetConfigs(getPreset('exp22')).map((c) => simulate(c)), []);
+  // taxonomy (2): experiment 21 — full vs dsm_only ungated vs dsm_only gated(512 cycles)
+  const exp21Sims = useMemo(() => presetConfigs(getPreset('exp21')).map((c) => simulate(c)), []);
+  const [gateThr, setGateThr] = useState(0.0625);
+  const gatedSim = useMemo(
+    () =>
+      simulate(
+        replaceConfig(presetConfigs(getPreset('exp21'))[2], {
+          inj_gate_threshold_cycles: gateThr,
+        }),
+      ),
+    [gateThr],
+  );
+
+  const taxStats = useMemo(() => {
+    const nIntSet = (r: SimResult): string => {
+      const s = new Set<number>();
+      const ni = r.data.n_int;
+      for (let i = 0; i < ni.length; i++) s.add(ni[i]);
+      return `{${[...s].sort((a, b) => a - b).join(',')}}`;
+    };
+    const m22 = exp22Sims.map((r) => {
+      const e = r.data.e_FB_abs;
+      let peak = 0;
+      for (let i = 0; i < e.length; i++) peak = Math.max(peak, Math.abs(e[i]));
+      return {
+        quant: r.config.quantizer,
+        rmsLsb: rms(e) * r.g,
+        peakLsb: peak * r.g,
+        ezcRms: rms(r.data.e_ZC_total),
+        nInt: nIntSet(r),
+      };
+    });
+    const fired = (r: SimResult): number => {
+      let s = 0;
+      const f = r.data.inj_fired;
+      for (let i = 0; i < f.length; i++) s += f[i];
+      return s;
+    };
+    const tail = (r: SimResult): number => rms(r.data.theta_plus.subarray(256));
+    const m21 = exp21Sims.map((r) => ({ fired: fired(r), tail: tail(r) }));
+    return { m22, m21, gFired: fired(gatedSim), gTail: tail(gatedSim) };
+  }, [exp22Sims, exp21Sims, gatedSim]);
+
   useEffect(() => {
-    setStatus('done', `exp07/08: ${NC} cycles ×2, exp09: 256 ×2`);
-  }, [simNearest, simSel, pairSims, setStatus]);
+    setStatus('done', `exp07/08: ${NC} cycles ×2, exp09: 256 ×2, exp21/22: 512 ×7`);
+  }, [simNearest, simSel, pairSims, exp21Sims, exp22Sims, gatedSim, setStatus]);
 
   const tVco = simNearest.t_vco_s;
   const g = simNearest.g;
@@ -259,7 +305,6 @@ export default function Chapter11() {
           { name: 'nearest', data: histData.nearest, type: 'bar', color: ct.accent },
         ],
         zoom: false,
-        toolbox: false,
         legend: false,
       }),
     [histData, ct],
@@ -273,7 +318,6 @@ export default function Chapter11() {
         yLabel: 'count',
         series: [{ name: quant, data: histData.sel, type: 'bar', color: ct.warn }],
         zoom: false,
-        toolbox: false,
         legend: false,
       }),
     [histData, quant, dither, ct],
@@ -307,6 +351,62 @@ export default function Chapter11() {
         yMax: -80,
       }),
     [psdData, quant, dither, ct],
+  );
+
+  // taxonomy (1) 圖:exp22 e_FB_abs(LSB)前 64 拍
+  const optTax22 = useMemo(() => {
+    const colors = [ct.accent, ct.warn, ct.bad];
+    const names = ['ef1', 'mash11', 'mash111'];
+    return makeLineOption({
+      xLabel: 'k (reference cycle)',
+      yLabel: 'e_FB_abs (LSB)',
+      series: exp22Sims.map((r, i) => {
+        const e = r.data.e_FB_abs;
+        const pts: [number, number][] = [];
+        for (let k = 0; k < Math.min(64, e.length); k++) {
+          pts.push([k, e[k] * r.g]);
+        }
+        return {
+          name: names[i],
+          data: pts,
+          step: 'middle' as const,
+          showSymbol: false,
+          color: colors[i],
+          width: i === 0 ? 2.2 : 1.4,
+        };
+      }),
+    });
+  }, [exp22Sims, ct]);
+
+  // taxonomy (2) 圖:exp21 theta_plus(rad),gated series 隨 threshold slider 重算
+  const optTax21 = useMemo(
+    () =>
+      makeLineOption({
+        xLabel: 'k (reference cycle)',
+        yLabel: 'theta_plus (rad)',
+        series: [
+          {
+            name: 'dsm_only 無 gating(exp21b)',
+            data: toXY(exp21Sims[1].data.theta_plus),
+            showSymbol: false,
+            color: ct.bad,
+          },
+          {
+            name: `dsm_only + gating(threshold ${trimNumber(gateThr, 4)})`,
+            data: toXY(gatedSim.data.theta_plus),
+            showSymbol: false,
+            color: ct.accent,
+          },
+          {
+            name: 'full actuator(exp21a)',
+            data: toXY(exp21Sims[0].data.theta_plus),
+            showSymbol: false,
+            color: ct.good,
+            width: 2.2,
+          },
+        ],
+      }),
+    [exp21Sims, gatedSim, gateThr, ct],
   );
 
   const spurRow = (s: Spur, i: number, tag: string) => (
@@ -439,10 +539,13 @@ export default function Chapter11() {
         </div>
         <p>
           誤差序列 −0.3, −0.3, −0.3, <b>+0.7</b>, −0.3, −0.3, <b>+0.7</b>, …:瞬時值
-          只取 −0.3 / +0.7 兩值 <EpistemicTag kind="EXACT" />,長期平均 → 0(上節
+          只取 −0.3 / +0.7 兩值 <EpistemicTag kind="EXACT" />(進位 pattern
+          0,0,0,1,0,0,1,0,0,1 以週期 10 循環,每 10 拍進位 3 次),長期平均 → 0(上節
           telescoping bound),peak |error| 由 0.3 增為 0.7 LSB。以 N=3.125 的 LSB
           = 312.5 fs 換算:nearest 固定 −93.75 fs;ef1 在 −93.75 fs 與 +218.75 fs
-          之間跳動、平均 0。
+          之間跳動、平均 0。注意這是<b>常數 0.3-LSB 輸入</b>的 canonical 例(Test 4);
+          full-chain 的 exp07/exp08 輸入逐拍累積 0.3 LSB,誤差因此是 0.1-LSB 階梯的
+          多階序列(nearest:十階 ±0.5 LSB;ef1:峰值 ±0.7 LSB),不是 −0.3/+0.7 兩值。
         </p>
       </SectionExample>
 
@@ -570,6 +673,184 @@ export default function Chapter11() {
             </table>
           </div>
         </div>
+      </SectionFigure>
+
+      <SectionFigure
+        title="DSM 在 fractional-N PLL 的常見用法與對本架構的影響 —(1)divider-modulating MASH(experiment 22)"
+        caption={
+          <span>
+            exp22:N=3.13、mode D、full actuator、512 cycles,三組只差 quantizer
+            階數(前 64 拍)。<M>{'e_{FB,abs}'}</M> 的 rms / peak 隨階數上升(下表
+            實測值)<EpistemicTag kind="EXPERIMENT" />;三組的 e_pair_digital 皆恆為
+            0(mode D 的 modular-reverse identity,與階數無關)
+            <EpistemicTag kind="EXACT" />。
+          </span>
+        }
+      >
+        <p>
+          真實 fractional-N PLL 中,DSM 出現在四種不同的位置。這一節逐一檢視每種
+          部署「是什麼、對 reverse injection 有什麼影響、設計上該怎麼辦」;(1)(2)
+          由 exp22 / exp21 量測支撐,(3)(4) 對應本架構既有的選項。
+        </p>
+        <p>
+          <b>(1) divider-modulating DSM(MASH 1-1 / 1-1-1)— 是什麼:</b>經典
+          fractional-N 的作法,MASH 直接調變瞬時除數 <M>{'n[k]'}</M>,沒有
+          fractional actuator。本模型的對應是{' '}
+          <code>actuator_mode='dsm_only'</code>(MODEL_SPEC §7.1):quantization 移到
+          integer-cycle granularity,fine code 恆為 0。<b>對 n_int 的影響:</b>
+          nearest 下 <M>{'n[k]\\in\\{3,4\\}'}</M>;ef1 下擴為 {'{2,3,4}'}(N=3.13;
+          整個 N ∈ [3, 3.25] grid 實測為 {'{2,3,4,5}'})
+          <EpistemicTag kind="EXPERIMENT" />;mash11 / mash111 在 /3-/4 這麼小的
+          integer part 下瞬時除數會觸及 0(duplicate edge)→ 模型故意讓 edge
+          monotonicity assertion raise — classic MASH 需要更大的 integer part(§7.1)
+          <EpistemicTag kind="EXACT" />。<b>對 per-edge phase error 的影響:</b>
+          每拍 feedback edge 只能落在整數 VCO cycle 上,對 injection 而言{' '}
+          <M>{'e_{ZC,hw}=\\operatorname{wrapCycles}(x_{ideal}-z_0)'}</M> 掃過全範圍
+          ±0.5 <b>cycle</b>(不是 sub-LSB!exp21b 實測 rms{' '}
+          {trimNumber(rms(exp21Sims[1].data.e_ZC_hw), 4)} cycle)
+          <EpistemicTag kind="EXPERIMENT" />。<b>因此:</b>divider-modulating DSM 的
+          系統若要加 reverse injection,injection timing <b>必須</b>另外取得
+          accumulated state(Ch9:MASH 第一級 accumulator 內容)並配上 fractional
+          actuator(DTC),或者退而求其次做 gating(見 (2))。
+          <EpistemicTag kind="INFERENCE" />
+        </p>
+        <p>
+          即使 fractional actuator 存在(full,mode D),把 final-code quantizer
+          換成高階 MASH 仍有代價 — 這就是 exp22:
+        </p>
+        <EChart option={optTax22} height={280} />
+        <div style={{ overflowX: 'auto' }}>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>quantizer(exp22,512 cycles)</th>
+                <th>e_FB_abs rms (LSB)</th>
+                <th>e_FB_abs peak (LSB)</th>
+                <th>e_ZC_total rms (cycle)</th>
+                <th>n_int 集合</th>
+              </tr>
+            </thead>
+            <tbody>
+              {taxStats.m22.map((m) => (
+                <tr key={m.quant}>
+                  <td>{m.quant}</td>
+                  <td>{trimNumber(m.rmsLsb, 4)}</td>
+                  <td>{trimNumber(m.peakLsb, 4)}</td>
+                  <td>{trimNumber(m.ezcRms, 5)}</td>
+                  <td>{m.nInt}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p>
+          階數每升一級,瞬時誤差的 rms / peak 就變大一截(1−z⁻¹ 的冪次把更多能量
+          推到高頻,時域擺幅隨之變寬)<EpistemicTag kind="EXPERIMENT" />;而整數
+          bit 集合在 N=3.13 下三者同為 {'{3,4}'} — 階數的差異全部發生在 sub-cycle
+          code 層。<b>設計指引:</b>full actuator 下選 mash11 / mash111 只該為了
+          頻譜(spur)規格,且必須接受 Ch14 意義下更差的逐拍 zero-crossing 精度;
+          每拍直接作用的 injection 沒有 loop 低通可以把高頻 shaped noise 濾掉。
+          <EpistemicTag kind="INFERENCE" />
+        </p>
+      </SectionFigure>
+
+      <SectionFigure
+        title="DSM 常見用法(2)(3)(4)— DSM-only + injection(experiment 21)、DTC-assisted QNC、phase-domain DSM"
+        caption={
+          <span>
+            exp21:N=3.13、ef1、sin injection(K=0.4、Δf=1 MHz、σ_vco_w=0.02
+            rad)、512 cycles。綠:full actuator — {taxStats.m21[0].fired}/512 拍
+            fire,tail rms(後 256 拍){trimNumber(taxStats.m21[0].tail, 4)} rad;
+            紅:dsm_only 無 gating — kick 打在任意 phase,失鎖(tail rms{' '}
+            {trimNumber(taxStats.m21[1].tail, 4)} rad);藍:dsm_only + threshold
+            gating(slider,目前 {trimNumber(gateThr, 4)} cycle)—{' '}
+            {taxStats.gFired}/512 拍 fire,tail rms {trimNumber(taxStats.gTail, 4)}{' '}
+            rad <EpistemicTag kind="EXPERIMENT" />。injection dynamics 為 §14
+            sin map <EpistemicTag kind="APPROX" />。
+          </span>
+        }
+      >
+        <p>
+          <b>(2) DSM-only(無 DTC)直接配 injection — 是什麼:</b>只有
+          divider-modulating DSM、沒有任何 fractional actuator,injection pulse
+          仍逐拍發出。<b>對 reverse injection 的影響:</b>ungated 時 kick 落點誤差
+          就是上面 (1) 的 ±0.5-cycle 掃描 — 大部分拍的 kick 把 VCO 推<b>離</b>鎖點
+          而不是拉回來,反而把 loop 打失鎖:tail rms 由 full actuator 的{' '}
+          {trimNumber(taxStats.m21[0].tail, 4)} rad 惡化為{' '}
+          {trimNumber(taxStats.m21[1].tail, 4)} rad(×
+          {trimNumber(taxStats.m21[1].tail / taxStats.m21[0].tail, 3)})—{' '}
+          <b>主動有害</b> <EpistemicTag kind="EXPERIMENT" />。加上 deterministic
+          threshold gating(§14:只在 |e_ZC_hw| ≤ threshold 的拍 fire;判準是
+          scheduler 可預先算出的 e_ZC_hw,不含 noise)後,以預設 threshold
+          0.0625 cycle 為例:只剩 {taxStats.m21[2].fired}/512 拍(
+          {trimNumber((taxStats.m21[2].fired / 512) * 100, 2)}%)fire,但 tail rms
+          回到 {trimNumber(taxStats.m21[2].tail, 4)} rad — gating 用
+          correction rate 換回 bounded lock <EpistemicTag kind="EXPERIMENT" />。
+          用右側 ParamPanel 的 gate threshold slider 觀察 trade-off:threshold
+          越小、fire 越少、kick 越準;threshold → 0.5 等同無 gating。
+          <b>設計指引:</b>DSM-only + 每拍 injection 是錯誤組合;若無法加 DTC,
+          gating 是最低限度的補救,代價是校正頻寬。<EpistemicTag kind="INFERENCE" />
+        </p>
+        <EChart option={optTax21} height={300} />
+        <div style={{ overflowX: 'auto' }}>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>config(exp21 + slider)</th>
+                <th>fired / 512</th>
+                <th>theta_plus tail rms (rad)</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>(a) full actuator</td>
+                <td>{taxStats.m21[0].fired}</td>
+                <td>{trimNumber(taxStats.m21[0].tail, 4)}</td>
+              </tr>
+              <tr>
+                <td>(b) dsm_only,無 gating</td>
+                <td>{taxStats.m21[1].fired}</td>
+                <td>{trimNumber(taxStats.m21[1].tail, 4)}</td>
+              </tr>
+              <tr>
+                <td>(c) dsm_only,gating 0.0625 cycle</td>
+                <td>{taxStats.m21[2].fired}</td>
+                <td>{trimNumber(taxStats.m21[2].tail, 4)}</td>
+              </tr>
+              <tr style={{ fontWeight: 600 }}>
+                <td>dsm_only,gating {trimNumber(gateThr, 4)} cycle(slider)</td>
+                <td>{taxStats.gFired}</td>
+                <td>{trimNumber(taxStats.gTail, 4)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          <b>(3) DTC-assisted quantization-noise cancellation(QNC)— 是什麼:</b>
+          現代 fractional-N 的主流中間解:DSM 照樣調變 divider,但把 DSM 的
+          accumulated residue 送給一顆 cancellation DTC,在 phase detector 之前把
+          量化誤差抵消掉。<b>對本架構的意義:</b>本模型的 full actuator(shared
+          final code 驅動 PMUX+DTC)從 injection 視角看<b>就是</b> QNC:同一份
+          accumulated state,QNC 用它在 PD 前抵消誤差,本架構用它把 injection pulse
+          放到正確的 sub-cycle 位置 — exp21a 的 e_ZC_hw ≤{' '}
+          {trimNumber(Math.max(...Array.from(exp21Sims[0].data.e_ZC_hw).map(Math.abs)), 5)}{' '}
+          cycle 就是 cancellation 成功的量。<b>設計指引:</b>預算允許一顆 DTC 時,
+          這是 (1)(2) 與理想 fractional actuator 之間的自然折衷;需要 Ch15 的
+          gain/INL calibration 配套。<EpistemicTag kind="INFERENCE" />
+        </p>
+        <p>
+          <b>(4) phase-domain DSM 作用在 final code(本模型的 ef1 / mash11 /
+          mash111 選項)與 dithering — 是什麼:</b>本章前半的主角:quantizer 作用在
+          accumulated fine code 上、mode D 共享。<b>對 reverse injection 的影響:</b>
+          mode D 下 e_pair_digital 恆 0,DSM 只改變<b>絕對</b>誤差的統計:spur ↔
+          shaped noise(圖 #17),代價是瞬時 peak(0.3 → 0.7 LSB;mash11 1.36、
+          mash111 1.76 LSB,上節 exp22 表)<EpistemicTag kind="EXPERIMENT" />;
+          triangular dither 進一步把殘餘 tone 攤成 noise floor(圖 #16 / #17 的
+          dither preset)。<b>設計指引:</b>維持 quantize-once(mode D)前提下,
+          「nearest 的有界誤差 + spur」vs「DSM 的 shaped noise + 更大 peak」由 Ch16
+          頻譜規格決定 — 這正是本章 takeaway 的能力邊界清單。
+          <EpistemicTag kind="INFERENCE" />
+        </p>
       </SectionFigure>
 
       <SectionCode
@@ -766,6 +1047,15 @@ export function triangularDither(ditherAmpLsb: number, stream: Mulberry32): numb
           mode D 的 shared/quantize-once 結構(exp09:mode B 的 pair error 證明
           independent DSM 不可取)。<EpistemicTag kind="INFERENCE" />
         </p>
+        <p>
+          對照 DSM 部署 taxonomy(本章新增兩節):divider-modulating MASH 的系統要加
+          reverse injection,必拉 accumulated state + DTC(exp22:full actuator 下
+          階數仍以 rms/peak 為代價);DSM-only + 每拍 injection 是主動有害的組合,
+          threshold gating 只是部分補救(exp21:1.81 → 0.10 rad,fire rate 13%);
+          DTC-assisted QNC 與本架構的 full actuator 是同一個 accumulated state 的
+          兩種用法;phase-domain DSM 只在 mode D 的 quantize-once 前提下安全。
+          <EpistemicTag kind="EXPERIMENT" />
+        </p>
       </SectionTakeaway>
 
       <SectionLimitation>
@@ -775,8 +1065,11 @@ export function triangularDither(ditherAmpLsb: number, stream: Mulberry32): numb
             mash11 暫態允許 n_int ∈ 2–5(§4),對除頻器的可行性需另行確認。PSD 為
             單一 realization 的 Hann periodogram(固定 seed 12345),無 ensemble
             平均;dBc/Hz 標示依 §17 small-angle SSB convention,誤差幅度大時不成立。
-            全部為 digital 層比較 — DTC/tap 的 analog 誤差與 injection dynamics
-            (Ch13–Ch15)不在本章模擬內。
+            除 taxonomy 一節外全部為 digital 層比較 — DTC/tap 的 analog 誤差與
+            injection dynamics(Ch13–Ch15)不在其餘模擬內;taxonomy (2) 的 exp21
+            比較使用 §14 sin-map injection dynamics(APPROX、單一 seed 12345),
+            且 dsm_only 的 mash11 / mash111 在 N ∈ (3, 3.25) 多數值會觸發 edge
+            monotonicity assertion(§7.1),故 dsm_only 比較僅用 ef1。
           </p>
         </Callout>
       </SectionLimitation>
@@ -821,6 +1114,13 @@ export function triangularDither(ditherAmpLsb: number, stream: Mulberry32): numb
               },
             },
             {
+              label: 'mash111',
+              onClick: () => {
+                setQuant('mash111');
+                setDither(0);
+              },
+            },
+            {
               label: 'ef1 + dither 0.5',
               onClick: () => {
                 setQuant('ef1');
@@ -829,9 +1129,26 @@ export function triangularDither(ditherAmpLsb: number, stream: Mulberry32): numb
             },
           ]}
         />
+        <Slider
+          label="inj gate threshold(cycle,taxonomy 圖 (2))"
+          value={gateThr}
+          min={0}
+          max={0.5}
+          step={0.0025}
+          onChange={setGateThr}
+        />
+        <PresetButtons
+          label="Preset threshold"
+          presets={[0.03125, 0.0625, 0.125, 0.25, 0.5].map((t) => ({
+            label: String(t),
+            onClick: () => setGateThr(t),
+          }))}
+        />
         <p style={{ fontSize: 12, opacity: 0.75 }}>
           baseline 恆為 exp07(nearest,無 dither);兩組皆 N = 3 + 32.3/256、mode
           D、{NC} cycles、seed 12345。exp09 對照(mode D vs B)固定 ef1、256 cycles。
+          gate threshold slider 只影響 taxonomy 圖 (2) 的 dsm_only gated series
+          (exp21c config、512 cycles);其餘 taxonomy 模擬固定為 exp21 / exp22。
         </p>
       </ParamPanel>
     </ChapterShell>

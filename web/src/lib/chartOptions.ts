@@ -80,6 +80,31 @@ export function baseTooltip(t: ChartTheme): Record<string, unknown> {
   };
 }
 
+/**
+ * Consistent toolbox (dataZoom / restore / saveAsImage). Every chart on the
+ * site should carry this — makeLineOption includes it by default; custom
+ * (hand-built) options should spread `{ toolbox: baseToolbox(t) }`.
+ * Pass `dataZoom: false` for charts where box-zoom makes no sense.
+ */
+export function baseToolbox(
+  t: ChartTheme,
+  opts: { dataZoom?: boolean } = {},
+): Record<string, unknown> {
+  const { dataZoom = true } = opts;
+  return {
+    right: 8,
+    top: 2,
+    itemSize: 13,
+    iconStyle: { borderColor: t.textSubtle },
+    emphasis: { iconStyle: { borderColor: t.accent } },
+    feature: {
+      ...(dataZoom ? { dataZoom: { yAxisIndex: 'none' } } : {}),
+      restore: {},
+      saveAsImage: { backgroundColor: t.mode === 'dark' ? '#14171c' : '#ffffff' },
+    },
+  };
+}
+
 export function makeLineOption(args: MakeLineOptionArgs): EChartsOption {
   const t = getChartTheme();
   const {
@@ -150,22 +175,7 @@ export function makeLineOption(args: MakeLineOptionArgs): EChartsOption {
           ],
         }
       : {}),
-    ...(toolbox
-      ? {
-          toolbox: {
-            right: 8,
-            top: 2,
-            itemSize: 13,
-            iconStyle: { borderColor: t.textSubtle },
-            emphasis: { iconStyle: { borderColor: t.accent } },
-            feature: {
-              dataZoom: { yAxisIndex: 'none' },
-              restore: {},
-              saveAsImage: { backgroundColor: t.mode === 'dark' ? '#14171c' : '#ffffff' },
-            },
-          },
-        }
-      : {}),
+    ...(toolbox ? { toolbox: baseToolbox(t) } : {}),
     series: series.map((s, i) => ({
       name: s.name,
       type: s.type ?? 'line',

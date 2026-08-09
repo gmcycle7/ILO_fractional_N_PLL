@@ -16,6 +16,20 @@ Modes (feedback always A_FB = Q_FB(A_ideal)):
     D (default): quantize once + modular reverse:
        R_INJ = (R_zero - R_FB) mod 256  ->  e_pair_digital == 0 exactly.
 
+Independent DSM state (spec section 7, modes A/B/C): when the quantizer is a
+stateful DSM type the injection-side instance is seeded with a DISTINCT
+deterministic initial state drawn from the 'dsm_inj' PRNG stream (section 12,
+offset 10):
+    ef1     -> e0 = one uniform draw
+    mash11  -> acc1, acc2 = two uniform draws (c2_prev stays 0)
+    mash111 -> acc1, acc2, acc3 = three uniform draws (in that order;
+               c2_prev, c3_prev, c3_prev2 stay 0)
+nearest/floor/truncate are stateless and unaffected.
+
+Actuator mode 'dsm_only' (spec section 7.1): the fractional injection
+actuator is absent — R_INJ = 0, tap j = 0, c_INJ = 0 on every cycle
+(regardless of arch_mode; no 'dsm_inj' draws are consumed).
+
 Mappings (input digital code R_INJ; target u_target = R_INJ/G):
     naive      : j = floor(R/32), c = R mod 32   (lower half of DTC range only)
     nearest    : argmin over j in 0..7, c in 0..63 of
@@ -59,7 +73,8 @@ def _candidates(cfg, dtc_inj, tap_tbl, calibrated: bool):
 
 
 def run_injection(cfg, x_nominal: np.ndarray, r_fb: np.ndarray,
-                  dtc_inj, tap_tbl, dither_stream=None) -> dict:
+                  dtc_inj, tap_tbl, dither_stream=None,
+                  dsm_stream=None) -> dict:
     """Produce injection command stream (computed-domain, pre-latency)."""
     g = cfg.g
     n = len(x_nominal)
@@ -67,12 +82,37 @@ def run_injection(cfg, x_nominal: np.ndarray, r_fb: np.ndarray,
 
     u_ideal = u_inj_ideal(x_nominal, cfg.z0_cycles)
 
+    # --- actuator mode 'dsm_only' (spec section 7.1): no fractional actuator
+    if cfg.actuator_mode == "dsm_only":
+        zeros = np.zeros(n, dtype=np.int64)
+        u_inj_analog = np.full(
+            n, tap_tbl[0] + float(dtc_inj.delay_cycles(0)) + cfg.route_inj_cycles)
+        return {
+            "u_INJ_ideal": u_ideal,
+            "R_INJ": zeros,
+            "j_INJ": zeros.copy(),
+            "c_INJ": zeros.copy(),
+            "u_INJ_digital": np.zeros(n, dtype=np.float64),
+            "u_INJ_analog": u_inj_analog,
+        }
+
     # --- R_INJ per architecture mode ---
     r_inj = np.empty(n, dtype=np.int64)
     if cfg.arch_mode == "D":
         r_inj[:] = (cfg.r_zero - r_fb) % g
     else:  # A, B, C: independent quantizer instance on G * u_INJ_ideal
         q = make_quantizer(cfg.quantizer)
+        # distinct deterministic DSM state per spec section 7 ('dsm_inj' stream)
+        if dsm_stream is not None:
+            if cfg.quantizer == "ef1":
+                q.e = dsm_stream.next()
+            elif cfg.quantizer == "mash11":
+                q.acc1 = dsm_stream.next()
+                q.acc2 = dsm_stream.next()
+            elif cfg.quantizer == "mash111":
+                q.acc1 = dsm_stream.next()
+                q.acc2 = dsm_stream.next()
+                q.acc3 = dsm_stream.next()
         use_dither = cfg.dither_amp_lsb > 0.0 and dither_stream is not None
         for k in range(n):
             u = g * float(u_ideal[k])

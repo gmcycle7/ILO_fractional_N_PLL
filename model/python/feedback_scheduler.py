@@ -18,6 +18,7 @@ import numpy as np
 
 from .dsm_first_order import ErrorFeedbackFirstOrder
 from .mash11 import Mash11
+from .mash111 import Mash111
 from .phase_math import wrap_cycles_arr
 
 
@@ -55,6 +56,8 @@ def make_quantizer(name: str):
         return ErrorFeedbackFirstOrder()
     if name == "mash11":
         return Mash11()
+    if name == "mash111":
+        return Mash111()
     raise ValueError(f"unknown quantizer '{name}'")
 
 
@@ -62,8 +65,17 @@ def run_feedback(cfg, a_ideal: np.ndarray, s_ideal: np.ndarray,
                  dither_stream=None) -> dict:
     """Quantize the ideal fine-code trajectory and decode divider commands.
 
-    Optional triangular dither (spec section 6 item 6):
-        u' = u + d_amp * (U1 + U2 - 1),  U from the 'dither_fb' stream.
+    Optional triangular dither (spec section 6 item 7):
+        u' = u + d_amp * (U1 + U2 - 1),  U from the 'dither_fb' stream
+    (d_amp is in quantizer-LSB units: 1 fine LSB in 'full' actuator mode,
+    1 VCO cycle in 'dsm_only').
+
+    Actuator modes (spec section 7.1):
+        full     : A_FB = Q(A_ideal)          (fine 1/G-cycle quantization)
+        dsm_only : A_FB = Q(A_ideal / G) * G  (classic divider-modulating DSM;
+                   quantizer operates at INTEGER-CYCLE granularity, so
+                   R_FB = m_FB = c_FB = 0 always; dsm_out is the integer
+                   cycle count Q(A_ideal / G))
 
     Returns computed-domain (pre-latency) arrays; assertions per section 4.
     """
@@ -71,6 +83,7 @@ def run_feedback(cfg, a_ideal: np.ndarray, s_ideal: np.ndarray,
     n_dtc = 1 << cfg.b_dtc
     n = len(a_ideal)
     q = make_quantizer(cfg.quantizer)
+    dsm_only = cfg.actuator_mode == "dsm_only"
 
     a_fb = np.empty(n, dtype=np.int64)
     dsm_state = np.empty(n, dtype=np.float64)
@@ -78,11 +91,11 @@ def run_feedback(cfg, a_ideal: np.ndarray, s_ideal: np.ndarray,
 
     use_dither = cfg.dither_amp_lsb > 0.0 and dither_stream is not None
     for k in range(n):
-        u = float(a_ideal[k])
+        u = float(a_ideal[k]) / g if dsm_only else float(a_ideal[k])
         if use_dither:
             u += cfg.dither_amp_lsb * (dither_stream.next() + dither_stream.next() - 1.0)
         y = q.quantize(u)
-        a_fb[k] = y
+        a_fb[k] = y * g if dsm_only else y
         dsm_out[k] = y
         dsm_state[k] = q.state
 

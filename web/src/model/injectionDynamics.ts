@@ -30,6 +30,13 @@
  *     K_inj * sin(theta_ss) = 2*pi*Delta_f*T_ref
  *     lock condition:  |2*pi*Delta_f*T_ref| <= K_inj
  *     stable solution: cos(theta_ss) > 0  ->  theta_ss = asin(a / K_inj)
+ *
+ * Injection gating (spec section 14): optional `fired` mask (0/1 per cycle,
+ * computed by simulate() from |e_ZC_hw| <= inj_gate_threshold_cycles when
+ * inj_gate_mode == 'threshold').  A non-fired cycle applies NO phase kick
+ * (Delta_theta = 0; theta keeps accumulating detuning/noise); e_inj is still
+ * recorded as the error a pulse would have seen, and PRNG stream consumption
+ * is identical with or without gating.
  */
 
 import type { SimConfig } from './config';
@@ -108,12 +115,15 @@ function deltaTheta(
  * Run the per-reference-cycle injection phase map.
  *
  * eZcHwCycles: deterministic hardware zero-crossing error (cycles).
+ * fired: optional 0/1 per-cycle gating mask; cycles with fired == 0 apply
+ * no phase kick (Delta_theta = 0).  null means every cycle fires.
  * Returns theta arrays (rad) and e_ZC_total (cycles) = e_inj / (2*pi).
  */
 export function runDynamics(
   cfg: SimConfig,
   eZcHwCycles: ArrayLike<number>,
   streams: Streams,
+  fired: ArrayLike<number> | null = null,
 ): DynamicsResult {
   const n = eZcHwCycles.length;
   const twoPi = 2.0 * Math.PI;
@@ -170,7 +180,10 @@ export function runDynamics(
       epsRand += (twoPi * (cfg.sigma_pulse_s * sPulse.gauss())) / tVco;
     }
     const e = wrapRadians(tm + epsilonHw[k] + epsRand);
-    const dth = deltaTheta(cfg.inj_model, cfg.k_inj, e, lutE, lutD);
+    const dth =
+      fired !== null && fired[k] === 0
+        ? 0.0 // gated out: no phase kick this cycle
+        : deltaTheta(cfg.inj_model, cfg.k_inj, e, lutE, lutD);
     const tp = wrapRadians(tm + dth);
 
     thetaMinus[k] = tm;

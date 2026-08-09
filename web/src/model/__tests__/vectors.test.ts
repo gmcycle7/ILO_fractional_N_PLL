@@ -48,6 +48,7 @@ const INT_COLS = new Set([
   'R_INJ',
   'j_INJ',
   'c_INJ',
+  'inj_fired',
   'seq_id',
 ]);
 
@@ -69,8 +70,11 @@ const files = readdirSync(VECTOR_DIR)
   .sort();
 
 describe('Python golden test vectors (Test 9)', () => {
-  it('finds the 12 canonical vectors', () => {
-    expect(files.length).toBe(12);
+  it('finds the 14 canonical vectors', () => {
+    expect(files.length).toBe(14);
+    // the two schema-v2 vectors are present and carry inj_fired
+    expect(files).toContain('n3p130_mash111.json');
+    expect(files).toContain('n3p130_dsm_only_gated.json');
   });
 
   for (const file of files) {

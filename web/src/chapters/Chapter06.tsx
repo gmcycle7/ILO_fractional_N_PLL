@@ -7,6 +7,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useChapterAlpha } from '../lib/globalParams';
 import {
   ChapterShell,
   SectionQuestion,
@@ -66,7 +67,7 @@ const QUANTIZER_OPTIONS: { value: Quantizer; label: string }[] = [
 ];
 
 export default function Chapter06() {
-  const [alpha, setAlpha] = useState(0.13);
+  const [alpha, setAlpha] = useChapterAlpha();
   const [z0, setZ0] = useState(0);
   const [quantizer, setQuantizer] = useState<Quantizer>('nearest');
   const [tapMm, setTapMm] = useState(false); // 1° all-tap mismatch
@@ -348,7 +349,7 @@ export default function Chapter06() {
                 <td>7</td>
                 <td>digital latency error</td>
                 <td>pipeline delay L(§13)</td>
-                <td>可 —— 用 look-ahead 消除,否則 <M>{'\\operatorname{wrapCycles}(L\\alpha)'}</M></td>
+                <td>可 —— 用 look-ahead 消除,否則 <M>{'\\operatorname{wrapCycles}(-L\\alpha)'}</M></td>
                 <td><EpistemicTag kind="EXACT" /></td>
               </tr>
             </tbody>

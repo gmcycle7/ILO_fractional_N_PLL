@@ -7,6 +7,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useChapterAlpha } from '../lib/globalParams';
 import {
   ChapterShell,
   SectionQuestion,
@@ -110,7 +111,7 @@ if (n > 1) {
 }`;
 
 export default function Chapter04() {
-  const [alpha, setAlpha] = useState(0.13);
+  const [alpha, setAlpha] = useChapterAlpha();
   const [quantizer, setQuantizer] = useState<Quantizer>('nearest');
   const { unit } = useUnit();
   const ct = useChartTheme();
@@ -277,7 +278,9 @@ export default function Chapter04() {
           <M>{'A_{FB}'}</M> 的差約為 <M>{'G \\cdot N \\in [768, 832]'}</M>(N ∈ [3, 3.25]),
           nearest/floor quantizer 的每拍捨入誤差有界(|e| ≤ 1 LSB),所以整數 cycle 的差分只能是
           3 或 4;fraction R 累積滿 256 時 I 多進一位,該拍即為 /4。DSM 型 quantizer
-          (ef1/mash11)的暫態允許 2 或 5,MASH 1-1 理論範圍更寬,測試檢查 {'{2,3,4,5}'}。
+          (ef1/mash11)誤差界稍寬,暫態允許 2 — 但只在 α &lt; 3/256 ≈ 0.012 時偶爾出現;
+          5 在 N ≤ 3.25 下不可達,ef1 與 mash11 的可達集合同為 {'{2,3,4}'},測試即檢查{' '}
+          {'{2,3,4}'}。
           <EpistemicTag kind="EXACT" />
         </p>
         <p>
@@ -339,7 +342,8 @@ export default function Chapter04() {
         caption={
           <span>
             每拍 /3-/4 divider 吞掉的 VCO cycle 數。N = 3.130 時大多為 3,每逢 fraction 累積滿 1
-            cycle(約每 1/0.13 ≈ 7.7 拍)出現一次 4。切到 ef1 / mash11 可看到暫態的 2 或 5。
+            cycle(約每 1/0.13 ≈ 7.7 拍)出現一次 4。切到 ef1 / mash11 在本圖 128 拍內
+            n_int 仍只有 3 與 4 — 暫態的 2 只在 α &lt; 0.012 的長模擬偶現,5 永不出現。
           </span>
         }
       >
@@ -390,8 +394,8 @@ export default function Chapter04() {
             <M>{'c_{FB} \\in [0, 64)'}</M>。
           </li>
           <li>
-            PMUX wrap 時 <M>{'n_{int} \\geq 0'}</M> 且合法(nearest/floor 下為 {'{3,4}'};DSM 暫態
-            {'{2..5}'})。
+            PMUX wrap 時 <M>{'n_{int} \\geq 0'}</M> 且合法(nearest/floor 下為 {'{3,4}'};DSM 為
+            {'{2,3,4}'},2 僅見於 α &lt; 3/256 ≈ 0.012)。
           </li>
           <li>
             on-grid case(<M>{'\\alpha G'}</M> 為整數,如 N = 3.125)必須 exact:
@@ -475,8 +479,10 @@ export default function Chapter04() {
             N = 3.250 時 m 每拍 +1(α = 0.25 = 64 LSB),4 拍一循環。
           </li>
           <li>
-            切 quantizer 到 ef1/mash11:n_int 偶爾出現 2 或 5(DSM 把量化誤差搬到時間軸上,
-            Ch11);edge 仍嚴格單調——assertion 沒有 throw 就是證明。
+            切 quantizer 到 ef1/mash11:在預設與所有 preset 下 n_int 仍只有 3 與 4(DSM
+            把量化誤差搬到時間軸上,但誤差仍有界,Ch11);暫態的 2 只在 α 低於約 3/256 ≈ 0.012
+            的長模擬偶爾出現,5 對 N ≤ 3.25 永不可能;edge 仍嚴格單調——assertion 沒有 throw
+            就是證明。
           </li>
           <li>
             ideal vs actual 圖:N = 3.125 時兩線重合(on-grid exact);N = 3.130 時虛線在實線上下

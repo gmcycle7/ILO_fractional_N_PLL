@@ -8,6 +8,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useChapterAlpha } from '../lib/globalParams';
 import {
   ChapterShell,
   SectionQuestion,
@@ -103,7 +104,7 @@ table[c] =
   dnlCum[c] * lsbCycles;`;
 
 export default function Chapter05() {
-  const [alpha, setAlpha] = useState(0.13);
+  const [alpha, setAlpha] = useChapterAlpha();
   const [quantizer, setQuantizer] = useState<Quantizer>('nearest');
   const [dtcMode, setDtcMode] = useState<DtcModeName>('normalized');
   const { unit } = useUnit();
@@ -508,7 +509,7 @@ export default function Chapter05() {
             scale 效應)。虛線為 ±half-LSB = ±1/512 cycle。normalized mode 下兩線重合;切到
             fixed_time 並把 N 拉離 3.125(例如 3.01 或 3.24)時,e_FB_analog 隨 c_FB 出現放大的
             鋸齒、明顯衝出 half-LSB 界線(N = 3.130 因 12.52 GHz 貼近 12.5 GHz,效應只有幾十
-            fs)。quantizer 換 floor 可看到誤差變成單邊 [−1, 0) LSB;ef1 則在 ±1 LSB 內、平均為
+            fs)。quantizer 換 floor 可看到誤差變成單邊 (−1, 0] LSB;ef1 則在 ±1 LSB 內、平均為
             0。
           </span>
         }
@@ -603,8 +604,9 @@ export default function Chapter05() {
       <SectionObserve>
         <ul>
           <li>
-            圖 #9:c_FB 的 pattern 週期 = x_ideal 的週期(N = 3.125 → 2 拍 0/32;N = 3.130 → 100
-            拍)。DTC code 只是 fractional phase 的低 6 bits,沒有獨立的自由度。
+            圖 #9:c_FB 的 pattern 週期整除 x_ideal 的週期(N = 3.125 → 2 拍 0/32;N = 3.130 →
+            25 拍,因 25 × 33.28 LSB = 832 恰為 64 的整數倍,而 x_ideal 本身週期 100 拍)。DTC
+            code 只是 fractional phase 的低 6 bits,沒有獨立的自由度。
           </li>
           <li>
             圖 #13(normalized, nearest):e_FB_abs 嚴格落在 ±half-LSB 虛線之間,N = 3.125 時恆為

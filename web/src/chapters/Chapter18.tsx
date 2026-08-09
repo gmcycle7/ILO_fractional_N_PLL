@@ -29,7 +29,7 @@ import type { SimConfig } from '../model';
 const meta = chapterById(18)!;
 
 /**
- * 12 組 canonical test vector 的 config(MODEL_SPEC §18)。
+ * 14 組 canonical test vector 的 config(MODEL_SPEC §18)。
  * 逐字對應 model/python/cli.py 的 VECTOR_CONFIGS(其餘欄位皆為 spec 預設值,
  * n_cycles=512, seed=12345)。
  */
@@ -54,6 +54,21 @@ const VECTOR_CONFIGS: { id: string; partial: Partial<SimConfig>; note: string }[
     partial: { n_div: 3.13, inj_model: 'sin', k_inj: 0.3, delta_f_hz: 1e6, sigma_vco_w_rad: 0.01 },
     note: 'sin dynamics + noise',
   },
+  { id: 'n3p130_mash111', partial: { n_div: 3.13, quantizer: 'mash111' }, note: 'MASH 1-1-1(schema-v2)' },
+  {
+    id: 'n3p130_dsm_only_gated',
+    partial: {
+      n_div: 3.13,
+      quantizer: 'ef1',
+      actuator_mode: 'dsm_only',
+      inj_gate_mode: 'threshold',
+      inj_model: 'sin',
+      k_inj: 0.4,
+      delta_f_hz: 1e6,
+      sigma_vco_w_rad: 0.02,
+    },
+    note: 'dsm_only + gating(schema-v2)',
+  },
 ];
 
 /** model/python/ 檔案 → 職責(模組對照表)。 */
@@ -63,7 +78,7 @@ const MODULE_ROWS: { file: string; spec: string; role: string }[] = [
   { file: 'noise_models.py', spec: '§12', role: 'mulberry32 PRNG、Box-Muller Gaussian、named streams' },
   { file: 'config.py', spec: '§1, 6–8, 10–14', role: 'SimConfig dataclass;to_dict/from_dict JSON round-trip' },
   { file: 'phase_accumulator.py', spec: '§3', role: 's_ideal[k]=s0+kN(乘法)、x_ideal、A_ideal' },
-  { file: 'dsm_first_order.py / mash11.py', spec: '§6', role: 'ef1 error-feedback DSM、MASH 1-1 quantizer' },
+  { file: 'dsm_first_order.py / mash11.py / mash111.py', spec: '§6', role: 'ef1 error-feedback DSM、MASH 1-1 / MASH 1-1-1 quantizer' },
   { file: 'feedback_scheduler.py', spec: '§4, §6', role: 'A_FB=Q(A_ideal) → I/R/m/c decode、n_int、assertions' },
   { file: 'injection_scheduler.py', spec: '§5, §7, §8', role: 'u_INJ_ideal、mode A/B/C/D、tap+DTC 三種 mapping' },
   { file: 'tap_model.py / dtc_model.py', spec: '§10, §11', role: 'tap/PMUX mismatch 表、DTC gain/offset/INL/DNL' },
@@ -71,8 +86,8 @@ const MODULE_ROWS: { file: string; spec: string; role: string }[] = [
   { file: 'injection_dynamics.py', spec: '§14', role: 'reset/linear/sin(+LUT) injection map、lock condition' },
   { file: 'error_decomposition.py', spec: '§16', role: '逐項 error decomposition(individual vs joint)' },
   { file: 'measurements.py', spec: '§17', role: 'Hann periodogram PSD、spur 偵測、RMS/histogram/dBc' },
-  { file: 'simulate.py', spec: 'all', role: '全鏈 engine;SimResult 34 columns;summary()' },
-  { file: 'experiments.py', spec: '—', role: '20 個 canonical experiments + presets(exp01…exp20)' },
+  { file: 'simulate.py', spec: 'all', role: '全鏈 engine;SimResult 35 columns;summary()' },
+  { file: 'experiments.py', spec: '—', role: '22 個 canonical experiments + presets(exp01…exp22)' },
   { file: 'cli.py', spec: '§18', role: '--list-presets / --preset / --emit-vectors' },
 ];
 
@@ -193,14 +208,14 @@ return {
     "data": data,
 }`;
 
-const CLI_USAGE = `# 列出 20 個 experiment presets(exp01…exp20 + n3p13_shared_reverse)
+const CLI_USAGE = `# 列出 22 個 experiment presets(exp01…exp22 + n3p13_shared_reverse)
 python3 -m model.python.cli --list-presets
 
 # 跑單一 preset:寫出 results/<ID>/summary.json + timeseries.csv + psd.csv
 # (comparison presets 另寫 timeseries_<i>.csv / psd_<i>.csv)
 python3 -m model.python.cli --preset exp03 --out results
 
-# 產生 12 組 canonical JSON test vectors(各 512 cycles、seed 12345)
+# 產生 14 組 canonical JSON test vectors(各 512 cycles、seed 12345)
 # 以及 test_vectors/csv/ 下的 per-cycle command CSV(給 Verilog-A testbench)
 python3 -m model.python.cli --emit-vectors test_vectors`;
 
@@ -209,7 +224,7 @@ const VECTOR_COLUMNS_LIST =
   '"k", "s_ideal", "A_FB", "R_FB", "m_FB", "c_FB", "n_int", "R_INJ", "j_INJ", ' +
   '"c_INJ", "u_FB_digital", "u_INJ_digital", "e_FB_abs", "e_pair", "u_INJ_ideal", ' +
   '"e_INJ_abs", "u_FB_analog", "u_INJ_analog", "e_pair_analog", "e_ZC_hw", ' +
-  '"e_inj", "theta_plus", "seq_id"';
+  '"e_inj", "theta_plus", "seq_id"'; // schema-v2 vectors 末端另追加 "inj_fired"
 
 /** 模組結構圖(inline SVG,顏色一律 theme tokens)。 */
 function ModuleMapSvg() {
@@ -250,7 +265,7 @@ function ModuleMapSvg() {
       <text x={90} y={97} {...sub}>34 columns、summary()、to_csv()</text>
       <rect x={400} y={66} width={270} height={40} {...box} />
       <text x={410} y={83} {...label}>experiments.py</text>
-      <text x={410} y={97} {...sub}>EXPERIMENTS(exp01…exp20)、PRESETS</text>
+      <text x={410} y={97} {...sub}>EXPERIMENTS(exp01…exp22)、PRESETS</text>
       {/* Layer 2: chain stages */}
       <text x={10} y={150} {...layer}>chain</text>
       <rect x={30} y={128} width={170} height={40} {...box} />
@@ -291,7 +306,7 @@ function ModuleMapSvg() {
       <text x={460} y={289} {...sub}>§1/9/11 常數檢查值</text>
       <rect x={610} y={258} width={135} height={40} {...box} />
       <text x={620} y={275} {...label}>config.py</text>
-      <text x={620} y={289} {...sub}>SimConfig(37 欄位)</text>
+      <text x={620} y={289} {...sub}>SimConfig(39 欄位)</text>
       {/* arrows: primitives -> chain -> engine -> consumers */}
       <line x1={115} y1={258} x2={115} y2={234} {...arrow} />
       <line x1={302} y1={258} x2={302} y2={234} {...arrow} />
@@ -378,7 +393,7 @@ export default function Chapter18() {
           <li>Python golden model 由哪些模組組成?每個模組對應 MODEL_SPEC 哪一節?</li>
           <li><code>SimConfig</code> 有哪些欄位、預設值是什麼?</li>
           <li>CLI 怎麼用?<code>--list-presets</code> / <code>--preset</code> / <code>--emit-vectors</code> 各產生什麼檔案?</li>
-          <li>test vector JSON 的 schema 長什麼樣?12 組 canonical vectors 是哪些?</li>
+          <li>test vector JSON 的 schema 長什麼樣?14 組 canonical vectors 是哪些?</li>
           <li>Python 與 TypeScript 兩份實作如何交叉驗證?tolerance 為何是
             「integer 完全相等 / float 1e-12 / noise 1e-9」三級?</li>
         </ul>
@@ -391,7 +406,7 @@ export default function Chapter18() {
           compute 來源,<code>web/src/model/</code>),以及未經 simulator 驗證的
           <strong> Verilog-A</strong>(第 19 章)。數學契約只有一份 —— MODEL_SPEC.md;
           Python 是它的第一實作,其他實作不對 spec 直接負責,而是對「Python 產生的
-          test vectors」負責:Python 把 12 組 canonical 模擬結果凍結成 JSON,TS 端的
+          test vectors」負責:Python 把 14 組 canonical 模擬結果凍結成 JSON,TS 端的
           vitest 逐 cycle、逐 column 讀入比對。這樣「兩語言一致」不是口號,而是
           CI 裡每次都跑的數值事實。<EpistemicTag kind="EXACT" />
         </p>
@@ -472,7 +487,7 @@ export default function Chapter18() {
       </SectionFigure>
 
       <SectionFigure
-        title="SimConfig 欄位表(37 欄位,名稱與預設逐字對應 config.py)"
+        title="SimConfig 欄位表(39 欄位,名稱與預設逐字對應 config.py)"
         caption={
           <span>
             所有欄位經 <code>to_dict()/from_dict()</code> 與 JSON round-trip,直接嵌在每個
@@ -529,13 +544,14 @@ export default function Chapter18() {
       </SectionFigure>
 
       <SectionFigure
-        title="12 組 canonical test vectors:用 TS mirror 重播"
+        title="14 組 canonical test vectors:用 TS mirror 重播"
         caption={
           <span>
             右側選單選 vector(config 逐字對應 cli.py 的 VECTOR_CONFIGS;此處由 TS mirror
             以相同 config、相同 seed 重算)。軸:x = reference cycle k;y = 誤差,單位
             <UnitSwitch />。e_pair_digital 在 Mode D vectors 恆為 0;
-            <code>n3p130_ef1_independent</code>(Mode B)則明顯非零。
+            <code>n3p130_ef1_independent</code>(Mode B,獨立 ef1 state)則持續非零:
+            512 拍中 326 拍(約 64%)在 {'{'}−1, 0, +1{'}'} LSB 之間跳動。
           </span>
         }
       >
@@ -566,7 +582,7 @@ export default function Chapter18() {
         code={CLI_USAGE}
       >
         <p>
-          vector JSON 的 columns(23 欄,逐字對應 <code>VECTOR_COLUMNS</code>;
+          vector JSON 的 columns(schema-v1 23 欄,逐字對應 <code>VECTOR_COLUMNS</code>;schema-v2 vectors 末端追加 <code>inj_fired</code>;
           其中 <code>&quot;e_pair&quot;</code> 即 engine 的 <code>e_pair_digital</code>):
         </p>
         <p><code style={{ fontSize: '0.85em' }}>{VECTOR_COLUMNS_LIST}</code></p>
@@ -583,7 +599,7 @@ export default function Chapter18() {
             dynamics(Test 14)、measurements(§17)、N sweep(Test 8)、
             vectors 可重現性(<code>--emit-vectors</code> 兩次輸出 byte-for-byte 相同)。
             TS 端 <code>web/src/model/__tests__/</code> 有 12 個 vitest 檔對應,其中
-            <code>vectors.test.ts</code> 直接載入 12 組 JSON 逐 cycle 比對。
+            <code>vectors.test.ts</code> 直接載入 14 組 JSON 逐 cycle 比對。
           </p>
         </Callout>
       </SectionCode>
@@ -651,8 +667,8 @@ export default function Chapter18() {
           <li>選 <code>n3p130_nearest</code>:e_FB_abs 呈鋸齒狀、界在 ±0.5 LSB
             (±0.001953 cycle)內;<strong>e_pair_digital 整條是 0</strong>(Mode D identity)。</li>
           <li>切到 <code>n3p130_ef1_independent</code>(Mode B):e_pair_digital
-            出現 ±1 LSB 級的非零值 —— 兩個獨立 DSM state 各走各的。這就是 Test 13
-            「shared vs independent」的可視化。</li>
+            持續在 ±1 LSB 之間跳動(512 拍中 326 拍非零,約 64%)—— 兩個獨立 DSM state
+            各走各的。這就是 Test 13「shared vs independent」的可視化。</li>
           <li>切到 <code>n3p130_latency_bug</code>:e_FB_abs / e_INJ_abs 整段偏移約
             0.13 cycle(46.8°)—— Test 5 的 latency bug;換 <code>n3p130_lookahead</code>
             偏移消失,只剩 ±half-LSB 量化誤差。</li>

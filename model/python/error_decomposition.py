@@ -7,7 +7,10 @@ relative to the baseline.  The jointly-simulated total is also reported.
 
 Additivity is APPROXIMATE (linear regime only, spec [APPROX]) — the report
 includes both the individual contributions and the joint total so the
-difference is visible.
+difference is visible.  The additivity gap is computed PER-CYCLE per spec
+section 16: gap = rms((e_joint - e_base) - sum_terms(e_term - e_base));
+the RSS of the contributions is kept only as a separately-named
+uncorrelated-combination reference.
 """
 
 import numpy as np
@@ -66,33 +69,43 @@ def decompose(cfg, signal: str = "e_ZC_total") -> dict:
     Returns dict with:
         baseline_rms_cycles      : rms with all nonidealities off
         contributions            : {term: rms of (e_term - e_baseline)}
-        sum_of_contributions_rms : rss of the individual contributions
+        rss_reference_rms        : rss of the individual contributions
+                                   (uncorrelated-combination REFERENCE only,
+                                   not the spec section 16 additivity check)
         joint_total_rms_cycles   : rms of (e_full - e_baseline), jointly run
-        additivity_gap_cycles    : joint - rss (additivity is approximate)
+        additivity_gap_cycles    : rms of the per-cycle linear-sum residual
+                                   (e_joint - e_base) - sum_terms(e_term - e_base)
+                                   (spec section 16: additivity is per-cycle
+                                   linear, exact in the linear regime)
     """
     ideal = _ideal_overrides(cfg)
     base_cfg = cfg.replace(**ideal)
-    base = simulate(base_cfg).data[signal]
+    base = np.asarray(simulate(base_cfg).data[signal], dtype=np.float64)
 
     contributions = {}
+    sum_deltas = np.zeros_like(base)
     full_dict = cfg.to_dict()
     for term, fields_ in _TERMS.items():
         over = dict(ideal)
         for f in fields_:
             over[f] = full_dict[f]
         term_cfg = cfg.replace(**over)
-        x = simulate(term_cfg).data[signal]
-        contributions[term] = meas.rms(np.asarray(x) - np.asarray(base))
+        x = np.asarray(simulate(term_cfg).data[signal], dtype=np.float64)
+        delta = x - base
+        sum_deltas += delta
+        contributions[term] = meas.rms(delta)
 
-    joint = simulate(cfg).data[signal]
-    joint_rms = meas.rms(np.asarray(joint) - np.asarray(base))
+    joint = np.asarray(simulate(cfg).data[signal], dtype=np.float64)
+    joint_delta = joint - base
+    joint_rms = meas.rms(joint_delta)
     rss = float(np.sqrt(sum(v * v for v in contributions.values())))
+    gap = meas.rms(joint_delta - sum_deltas)
 
     return {
         "signal": signal,
         "baseline_rms_cycles": meas.rms(base),
         "contributions": contributions,
-        "sum_of_contributions_rms": rss,
+        "rss_reference_rms": rss,
         "joint_total_rms_cycles": joint_rms,
-        "additivity_gap_cycles": joint_rms - rss,
+        "additivity_gap_cycles": gap,
     }

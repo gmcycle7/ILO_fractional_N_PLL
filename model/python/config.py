@@ -8,11 +8,20 @@ through JSON (used by the test-vector schema, section 18).
 from dataclasses import dataclass, field, fields, asdict
 from typing import Optional, List
 
-_QUANTIZERS = ("floor", "nearest", "truncate", "ef1", "mash11")
+_QUANTIZERS = ("floor", "nearest", "truncate", "ef1", "mash11", "mash111")
 _ARCH_MODES = ("A", "B", "C", "D")
 _INJ_MAPPINGS = ("naive", "nearest", "calibrated")
 _DTC_MODES = ("normalized", "fixed_time")
 _INJ_MODELS = ("none", "reset", "linear", "sin", "lut")
+_ACTUATOR_MODES = ("full", "dsm_only")
+_INJ_GATE_MODES = ("off", "threshold")
+
+#: fields added after the schema-v1 test vectors were committed; they are
+#: omitted from to_dict() when they hold their defaults so every committed
+#: schema-v1 vector JSON stays byte-identical (from_dict fills the defaults
+#: back in, so the round-trip is still exact).
+_SCHEMA_V2_FIELDS = ("actuator_mode", "inj_gate_mode",
+                     "inj_gate_threshold_cycles")
 
 
 @dataclass
@@ -29,9 +38,12 @@ class SimConfig:
     r_zero: int = 0                # modular-reverse digital zero offset [A6]
 
     # --- digital scheduler ---
-    quantizer: str = "nearest"     # floor|nearest|truncate|ef1|mash11 [B5]
-    dither_amp_lsb: float = 0.0    # triangular dither amplitude (LSB), pre-quantize
+    quantizer: str = "nearest"     # floor|nearest|truncate|ef1|mash11|mash111 [B5]
+    dither_amp_lsb: float = 0.0    # triangular dither amplitude (quantizer LSB), pre-quantize
     arch_mode: str = "D"           # A|B|C|D (section 7; D = quantize once + modular reverse)
+    actuator_mode: str = "full"    # full|dsm_only (section 7.1; dsm_only =
+                                   # classic divider-modulating DSM, integer-
+                                   # cycle quantization, no fractional actuator)
     inj_mapping: str = "naive"     # naive|nearest|calibrated (section 8)
     dtc_mode: str = "normalized"   # normalized|fixed_time (section 11)
     dtc_lsb_fs: float = 312.5      # fixed_time DTC LSB in fs [B2]
@@ -63,6 +75,8 @@ class SimConfig:
     k_inj: float = 0.3             # lumped injection strength, [0, 1]
     delta_f_hz: float = 0.0        # VCO free-running detuning vs N*f_ref
     pdr_lut: Optional[List[List[float]]] = None  # [[e_rad, dtheta_rad], ...]
+    inj_gate_mode: str = "off"     # off|threshold (section 14 gating)
+    inj_gate_threshold_cycles: float = 0.0625  # fire iff |e_ZC_hw| <= threshold
 
     # ------------------------------------------------------------------
     def __post_init__(self):
@@ -76,6 +90,10 @@ class SimConfig:
             raise ValueError(f"dtc_mode must be one of {_DTC_MODES}")
         if self.inj_model not in _INJ_MODELS:
             raise ValueError(f"inj_model must be one of {_INJ_MODELS}")
+        if self.actuator_mode not in _ACTUATOR_MODES:
+            raise ValueError(f"actuator_mode must be one of {_ACTUATOR_MODES}")
+        if self.inj_gate_mode not in _INJ_GATE_MODES:
+            raise ValueError(f"inj_gate_mode must be one of {_INJ_GATE_MODES}")
         if len(self.tap_mismatch_cycles) != self.n_tap:
             raise ValueError("tap_mismatch_cycles must have n_tap entries")
         if len(self.pmux_mismatch_cycles) != self.n_pmux:
@@ -104,7 +122,15 @@ class SimConfig:
 
     # --- JSON round-trip ---
     def to_dict(self) -> dict:
-        return asdict(self)
+        """Full config dict, minus schema-v2 fields at their default values
+        (keeps the committed schema-v1 test vectors byte-identical;
+        ``from_dict`` restores the defaults so the round-trip is exact)."""
+        d = asdict(self)
+        defaults = _SCHEMA_V2_DEFAULTS
+        for name in _SCHEMA_V2_FIELDS:
+            if d[name] == defaults[name]:
+                del d[name]
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "SimConfig":
@@ -115,3 +141,8 @@ class SimConfig:
         d = self.to_dict()
         d.update(kw)
         return SimConfig.from_dict(d)
+
+
+#: default values of the schema-v2 fields (see _SCHEMA_V2_FIELDS / to_dict)
+_SCHEMA_V2_DEFAULTS = {f.name: f.default for f in fields(SimConfig)
+                       if f.name in _SCHEMA_V2_FIELDS}

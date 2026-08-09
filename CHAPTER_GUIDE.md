@@ -149,7 +149,7 @@ deterministic spur vs broadband vs static offset vs RJ vs PJ 五分類各給一�
 (不同 config 一鍵切換)。固定 seed 說明。
 
 **Ch17 Interactive Architecture Comparisons 互動式架構比較**
-20 個 experiment 一鍵 preset(from '../model' 的 EXPERIMENTS),每個顯示:
+22 個 experiment 一鍵 preset(from '../model' 的 EXPERIMENTS),每個顯示:
 setup(config diff)、equations 連結、expected、simulation result、
 what to observe、engineering conclusion。
 互動圖#29 comparison dashboard(多 config 同跑、指標表:RMS/peak/pair/ZC miss、

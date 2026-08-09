@@ -11,8 +11,10 @@ HALF_LSB_DEG = 0.703125
 
 
 def test_canonical_formula_exact():
-    # phase error = wrapCycles(L*alpha) = 0.13 cycle = 46.8 deg
-    assert cycles_to_degrees(wrap_cycles(1 * 0.13)) == pytest.approx(46.8, abs=1e-9)
+    # bug-mode phase error = wrapCycles(-L*alpha) (spec section 13, sign per
+    # section 2: error = actual - ideal); magnitude 0.13 cycle = 46.8 deg
+    assert wrap_cycles(-1 * 0.13) == pytest.approx(-0.13, abs=1e-12)
+    assert cycles_to_degrees(abs(wrap_cycles(-1 * 0.13))) == pytest.approx(46.8, abs=1e-9)
 
 
 def test_latency_bug_46p8_deg():
@@ -48,4 +50,10 @@ def test_metadata_bookkeeping():
     assert np.array_equal(d["seq_id"], np.arange(n))  # state of k applied at k
     assert len(ok.metadata) == n
     assert set(ok.metadata[3].keys()) == {"k_computed", "k_intended",
-                                          "k_applied", "seq_id"}
+                                          "k_applied", "seq_id", "P_state",
+                                          "R_FB", "R_INJ"}
+    # spec section 13: P_state/R_FB/R_INJ come from the command's state index
+    m3 = ok.metadata[3]
+    assert m3["P_state"] == ok.data["A_ideal"][3]
+    assert m3["R_FB"] == int(ok.data["R_FB"][3])
+    assert m3["R_INJ"] == int(ok.data["R_INJ"][3])

@@ -34,12 +34,14 @@ def test_uniform_range():
 def test_named_stream_offsets():
     assert STREAM_OFFSETS == {"ref": 1, "vco_w": 2, "vco_rw": 3,
                               "dither_fb": 4, "dither_inj": 5, "dnl_fb": 6,
-                              "dnl_inj": 7, "lat": 8, "pulse": 9}
+                              "dnl_inj": 7, "lat": 8, "pulse": 9,
+                              "dsm_inj": 10}
     # stream seed = base_seed + offset
     s = make_stream("ref", 12345)
     assert s.next() == Mulberry32(12346).next()
     streams = make_all_streams(12345)
     assert streams["pulse"].next() == Mulberry32(12345 + 9).next()
+    assert streams["dsm_inj"].next() == Mulberry32(12345 + 10).next()
 
 
 def test_gaussian_pairs_deterministic_and_cached():

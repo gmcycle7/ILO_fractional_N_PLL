@@ -6,7 +6,7 @@
  * static phase wheel and the site navigation map.
  */
 
-import { useState } from 'react';
+import { useChapterAlpha } from '../lib/globalParams';
 import type { CSSProperties } from 'react';
 import {
   ChapterShell,
@@ -130,7 +130,7 @@ export function defaultConfig(): SimConfig {
 }`;
 
 export default function Chapter00() {
-  const [alpha, setAlpha] = useState(0.125);
+  const [alpha, setAlpha] = useChapterAlpha();
   const ct = useChartTheme();
 
   const nDiv = 3 + alpha;
@@ -212,7 +212,7 @@ export default function Chapter00() {
           <EpistemicTag kind="EXACT" /> 因此 pairwise digital error 恆為零。最後,pipeline latency{' '}
           <M>{'L'}</M> 若不做 look-ahead,誤差為(Ch12):
         </p>
-        <MathBlock>{'e_{lat} = \\operatorname{wrapCycles}(L\\,\\alpha)'}</MathBlock>
+        <MathBlock>{'e_{lat} = \\operatorname{wrapCycles}(-L\\,\\alpha), \\qquad |e_{lat}| = |\\operatorname{wrapCycles}(L\\,\\alpha)|'}</MathBlock>
       </SectionMath>
 
       <SectionExample>
@@ -264,7 +264,7 @@ export default function Chapter00() {
           <StatCard
             label="latency bug @ α=0.13, L=1"
             value={`${trimNumber(latBugDeg, 4)}°`}
-            sub={`= wrapCycles(L·α)·360°,為 half-LSB 的 ${trimNumber(latBugDeg / halfLsbDeg, 3)} 倍 [EXACT]`}
+            sub={`= |wrapCycles(L·α)|·360°,為 half-LSB 的 ${trimNumber(latBugDeg / halfLsbDeg, 3)} 倍 [EXACT]`}
           />
           <StatCard
             label="1° tap mismatch"

@@ -8,8 +8,11 @@ root) — nothing on the website may deviate from them.
 ## 0. Stack and commands
 
 - React 19 + TypeScript (strict, `noUnusedLocals`, `noUnusedParameters`) + Vite.
-- Charts: `echarts` (imported as `import * as echarts from 'echarts'` inside
-  `components/EChart.tsx` only — chapters never import echarts directly).
+- Charts: `echarts`, loaded lazily via `import('echarts')` inside
+  `components/EChart.tsx` only (module-level cached promise; the echarts
+  chunk is async so first paint of chapter text never waits for it).
+  Chapters never import echarts directly — type-only imports
+  (`import type { EChartsOption } from 'echarts'`) are fine.
 - Math: `katex` via `components/Math.tsx` (KaTeX CSS is imported in `main.tsx`).
 - Tests: Vitest (`environment: node`), files `src/**/*.test.{ts,tsx}`.
 
@@ -44,13 +47,17 @@ web/
   src/
     main.tsx                entry: katex css, index.css, initTheme, <App/>
     App.tsx                 layout shell + hash routing + lazy chapters
+                            (+ footer 上一章/下一章 nav and global ←/→
+                            keyboard chapter switching, skipped while focus
+                            is in a form control)
     SimStatusContext.tsx    global simulation status context
     index.css               ALL global styles + CSS variables (both themes)
     lib/
       theme.ts              ThemeMode, ChartTheme tokens, subscribeTheme
       useChartTheme.ts      React hook: ChartTheme that tracks toggles
       format.ts             PhaseUnit, formatPhase, axis label helpers
-      chartOptions.ts       makeLineOption + axis/tooltip builders
+      chartOptions.ts       makeLineOption + axis/tooltip/toolbox builders
+      globalParams.tsx      global N (n_div) context + chapter hooks
       router.ts             hash router: useHashRoute, chapterHref
     components/             shared UI (documented in §5)
     chapters/
@@ -109,7 +116,30 @@ setStatus('running', 'N sweep 3.000…3.250');   // status: 'idle'|'running'|'do
 setStatus('done', '512 cycles');
 ```
 Set `running` before any non-trivial simulate() call and `done` after; the
-top bar displays it.
+top bar displays it (with a small spinner while `running`). For figure areas
+recomputed in a post-paint effect, wrap them in
+`<SimVeil active={runs === null}>` (`../components/SimVeil`) to overlay a
+subtle translucent veil + spinner (see Chapter17 for the pattern:
+`useState(null)` + `useEffect` + `setTimeout(0)` so preset switches paint
+immediately).
+
+### Global parameters — `../lib/globalParams`
+
+```tsx
+import { useChapterAlpha, useChapterNDiv, useGlobalNDiv } from '../lib/globalParams';
+const [alpha, setAlpha] = useChapterAlpha(); // chapter-local α = N − 3
+const [nDiv, setNDiv] = useChapterNDiv();    // chapter-local N
+const { nDiv, setNDiv } = useGlobalNDiv();   // raw context (TopBar N control)
+```
+
+The divide ratio N is a **global** parameter (sessionStorage `pll_n_div`,
+default 3.13, presets `N_DIV_PRESETS = [3.0, 3.125, 3.13, 3.1375, 3.25]`,
+clamped to [3, 3.25]). The TopBar renders a compact preset + numeric input
+control. Chapters that expose an N/α control MUST use `useChapterNDiv()` /
+`useChapterAlpha()` instead of `useState`: local state is seeded from the
+global value, re-initialized when the TopBar changes N, and written back on
+local change. Chapters without an N control ignore it. SSR-safe (render
+smoke tests run without a provider and fall back to the default value).
 
 ## 5. Component reference (import paths relative to `src/chapters/`)
 
@@ -124,8 +154,10 @@ interface EChartProps {
   className?: string;
 }
 ```
-Handles init/dispose, ResizeObserver resize, theme re-init, group connect.
-Give two charts the same `group` string to sync their axisPointer/zoom.
+Handles lazy echarts loading (placeholder box of the reserved height until
+the async echarts chunk arrives), init/dispose, ResizeObserver resize, theme
+re-init, group connect. Give two charts the same `group` string to sync
+their axisPointer/zoom.
 
 ### Chart options — `../lib/chartOptions`
 
@@ -145,8 +177,12 @@ makeLineOption({
 }): EChartsOption
 baseAxis(t, name?, formatter?)   // for hand-rolled options
 baseTooltip(t)                   // crosshair tooltip config
+baseToolbox(t, { dataZoom? })    // toolbox: dataZoom/restore/saveAsImage
 makeMarkLine([{ y?|x?, label?, color? }])   // dashed reference lines
 ```
+Every chart must carry the toolbox (saveAsImage + restore): makeLineOption
+includes it by default; hand-rolled options spread
+`{ toolbox: baseToolbox(t) }`.
 Per-reference-cycle sequences: x axis is `k` (sample rate = f_ref, MODEL_SPEC
 §17); use `step: 'middle'` + `showSymbol` for short sequences.
 
@@ -161,7 +197,10 @@ Children must be a raw TeX string. `throwOnError:false`, `trust:false`.
 ### ChapterShell + sections — `../components/ChapterShell` (named exports)
 
 `ChapterShell({ chapter?, titleZh?, titleEn?, children })` renders the
-chapter header and the `.chapter-grid` container.
+chapter header and the `.chapter-grid` container, plus (automatically, no
+chapter wiring) a floating collapsible mini-TOC of the 11 sections on
+>= 1280 px viewports with IntersectionObserver scrollspy; anchor ids
+`sec-<slug>` are stamped on the first occurrence of each section kind.
 
 Fixed 11-part structure (order binding; Figure/Code may repeat):
 
@@ -279,7 +318,9 @@ SVG rows of edge ticks over a shared axis; hovering an edge shows a readout.
 ```
 CSV export button is always present; CSV uses column **keys** as header and
 **raw** values (full precision, comparable against Python golden output);
-`fmt` affects screen only.
+`fmt` affects screen only. The header row is sticky inside the scroll
+container, and a 欄位 dropdown toggles per-column visibility (screen only —
+CSV always exports ALL columns regardless of visibility).
 
 ## 6. Model import contract (binding for chapter agents)
 

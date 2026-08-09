@@ -29,9 +29,19 @@ import PhaseWheel from '../components/PhaseWheel';
 import { makeLineOption, makeMarkLine } from '../lib/chartOptions';
 import { useChartTheme } from '../lib/useChartTheme';
 import { trimNumber } from '../lib/format';
+import { chapterHref } from '../lib/router';
 import { useSimStatus } from '../SimStatusContext';
 import { chapterById } from './index';
-import { simulate, fromPartial, sinFixedPointRad, lockCondition } from '../model';
+import {
+  simulate,
+  fromPartial,
+  sinFixedPointRad,
+  lockCondition,
+  getPreset,
+  presetConfigs,
+  replaceConfig,
+  rms,
+} from '../model';
 import type { InjModel } from '../model';
 
 const meta = chapterById(13)!;
@@ -77,6 +87,35 @@ export function sinFixedPointRad(kInj: number, deltaFHz: number, fRefHz: number)
   }
   return Math.asin(a / kInj);
 }`;
+
+const GATING_CODE = `// web/src/model/simulate.ts — gate mask(MODEL_SPEC §14 convention)
+const injFired = new Float64Array(n);
+if (cfg.inj_model !== 'none') {
+  for (let k = 0; k < n; k++) {
+    injFired[k] =
+      cfg.inj_gate_mode === 'threshold'
+        ? Math.abs(eZcHw[k]) <= cfg.inj_gate_threshold_cycles
+          ? 1
+          : 0
+        : 1;
+  }
+}
+
+// web/src/model/injectionDynamics.ts — 非 fire 的拍不施加 phase kick
+const dth =
+  fired !== null && fired[k] === 0
+    ? 0.0 // gated out: no phase kick this cycle
+    : deltaTheta(cfg.inj_model, cfg.k_inj, e, lutE, lutD);
+const tp = wrapRadians(tm + dth);`;
+
+/** Gate-threshold sweep points for 圖 #22c(cycles). */
+const GATE_SWEEP = [0.005, 0.01, 0.02, 0.03125, 0.0625, 0.09375, 0.125, 0.1875, 0.25, 0.375, 0.5];
+
+function sumInt(arr: ArrayLike<number>): number {
+  let s = 0;
+  for (let i = 0; i < arr.length; i++) s += arr[i];
+  return s;
+}
 
 type UiModel = Exclude<InjModel, 'none'>;
 
@@ -163,6 +202,34 @@ export default function Chapter13() {
 
   const resDyn = useMemo(() => simulate(cfgDyn), [cfgDyn]);
   const resNone = useMemo(() => simulate(cfgNone), [cfgNone]);
+
+  // --- gated injection(exp21:dsm_only 生存策略)---
+  const [gateTh, setGateTh] = useState(0.0625);
+  const exp21cfgs = useMemo(() => presetConfigs(getPreset('exp21')), []);
+  const resFull = useMemo(() => simulate(exp21cfgs[0]), [exp21cfgs]); // exp21a
+  const resUngated = useMemo(() => simulate(exp21cfgs[1]), [exp21cfgs]); // exp21b
+  const resGated = useMemo(
+    () => simulate(replaceConfig(exp21cfgs[2], { inj_gate_threshold_cycles: gateTh })), // exp21c
+    [exp21cfgs, gateTh],
+  );
+  const firedCount = useMemo(() => sumInt(resGated.data.inj_fired), [resGated]);
+  const tailRmsGated = useMemo(() => rms(resGated.data.theta_plus.subarray(256)), [resGated]);
+  const tailRmsUngated = useMemo(
+    () => rms(resUngated.data.theta_plus.subarray(256)),
+    [resUngated],
+  );
+  const gateSweep = useMemo(
+    () =>
+      GATE_SWEEP.map((th) => {
+        const res = simulate(replaceConfig(exp21cfgs[2], { inj_gate_threshold_cycles: th }));
+        return {
+          th,
+          frac: sumInt(res.data.inj_fired) / res.data.inj_fired.length,
+          tail: rms(res.data.theta_plus.subarray(256)),
+        };
+      }),
+    [exp21cfgs],
+  );
 
   useEffect(() => {
     setStatus(
@@ -272,6 +339,92 @@ export default function Chapter13() {
     }
     return opt;
   }, [resDyn, resNone, model, kInj, thetaRef, ct]);
+
+  // --- 圖 #22b:dsm_only gate off vs on(exp21b vs exp21c)+ inj_fired raster ---
+  const gateConvOption = useMemo(() => {
+    const xy = (arr: Float64Array) => Array.from(arr, (v, k) => [k, v] as [number, number]);
+    const raster: [number, number][] = [];
+    const f = resGated.data.inj_fired;
+    for (let k = 0; k < f.length; k++) {
+      if (f[k] === 1) raster.push([k, -3.8]);
+    }
+    const opt = makeLineOption({
+      xLabel: 'k (reference cycle)',
+      yLabel: 'θ⁺[k] (rad)',
+      yMin: -4.3,
+      yMax: 3.5,
+      yTickFormatter: (v) => (v < -3.4 ? '' : trimNumber(v, 3)),
+      series: [
+        {
+          name: 'θ⁺ dsm_only, gate off(exp21b)',
+          data: xy(resUngated.data.theta_plus),
+          color: ct.bad,
+          width: 1,
+        },
+        {
+          name: `θ⁺ dsm_only, gated th=${trimNumber(gateTh, 4)}(exp21c)`,
+          data: xy(resGated.data.theta_plus),
+          color: ct.accent,
+          width: 1.8,
+        },
+        {
+          name: 'θ⁺ full actuator(exp21a)',
+          data: xy(resFull.data.theta_plus),
+          color: ct.good,
+          dashed: true,
+        },
+        {
+          name: 'inj_fired = 1(gated,raster)',
+          data: raster,
+          type: 'scatter',
+          symbolSize: 3,
+          color: ct.warn,
+        },
+      ],
+    });
+    const o = opt as unknown as { series?: Record<string, unknown>[] };
+    if (o.series && o.series[0]) {
+      o.series[0].markLine = makeMarkLine([
+        { y: Math.PI, label: '+π' },
+        { y: -Math.PI, label: '−π' },
+      ]);
+    }
+    return opt;
+  }, [resGated, resUngated, resFull, gateTh, ct]);
+
+  // --- 圖 #22c:threshold trade-off(fired fraction vs tail rms)---
+  const gateSweepOption = useMemo(() => {
+    const opt = makeLineOption({
+      xLabel: 'inj_gate_threshold (cycles)',
+      yLabel: 'rad / fraction',
+      xTickFormatter: (v) => trimNumber(v, 3),
+      yTickFormatter: (v) => trimNumber(v, 3),
+      zoom: false,
+      series: [
+        {
+          name: 'tail rms θ⁺(後 256 拍,rad)',
+          data: gateSweep.map((p) => [p.th, p.tail] as [number, number]),
+          color: ct.accent,
+          width: 1.8,
+          showSymbol: true,
+          symbolSize: 6,
+        },
+        {
+          name: 'fired fraction ρ',
+          data: gateSweep.map((p) => [p.th, p.frac] as [number, number]),
+          color: ct.series[1],
+          dashed: true,
+          showSymbol: true,
+          symbolSize: 5,
+        },
+      ],
+    });
+    const o = opt as unknown as { series?: Record<string, unknown>[] };
+    if (o.series && o.series[0]) {
+      o.series[0].markLine = makeMarkLine([{ x: 0.0625, label: '預設 th=0.0625' }]);
+    }
+    return opt;
+  }, [gateSweep, ct]);
 
   return (
     <ChapterShell chapter={meta.id} titleZh={meta.titleZh} titleEn={meta.titleEn}>
@@ -399,6 +552,88 @@ export default function Chapter13() {
           phase 變成 detuning ramp + random walk;<M>{'K_{inj}'}</M> 增大:收斂更快、residual
           更小。<EpistemicTag kind="APPROX" />
         </p>
+      </SectionMath>
+
+      <SectionMath>
+        <p>
+          <strong>Gated injection(MODEL_SPEC §14)。</strong>digital gate 的定義{' '}
+          <EpistemicTag kind="EXACT" />:threshold mode 下第 k 拍 fire 若且唯若
+        </p>
+        <MathBlock>
+          {
+            '\\mathrm{inj\\_fired}[k] = \\big(\\,|e_{ZC,hw}[k]| \\le \\mathrm{th}\\,\\big), \\qquad \\Delta\\theta[k] = 0 \\;\\text{且}\\; \\theta^{+}[k] = \\operatorname{wrapRadians}(\\theta^{-}[k]) \\;\\text{當不 fire}'
+          }
+        </MathBlock>
+        <p>
+          gate 判準用的是 <strong>deterministic</strong> 的 <M>{'e_{ZC,hw}'}</M>(scheduler
+          可以在 pulse 之前就算出來),而不是含 noise 的 <M>{'e_{inj}'}</M>;非 fire 的拍{' '}
+          <M>{'\\theta'}</M> 照常累積 detuning 與 noise,PRNG 消耗也與 gating 無關。
+          <M>{'\\mathrm{inj\\_fired}'}</M> convention:inj_model=none 恆 0;gate off 恆 1。
+          <EpistemicTag kind="EXACT" />
+        </p>
+        <p>
+          <strong>為什麼 gating 是生存策略。</strong>full actuator 下 |e_ZC_hw| ≤ half-LSB
+          量級,每拍 kick 都落在 stable fixed point 附近的近線性區,gate 沒有必要。但{' '}
+          <a href={chapterHref('rounding-vs-phase-dsm')}>第 11 章</a>的 dsm_only 情境
+          (classic divider-modulating DSM,無 PMUX/DTC/tap actuator)把 quantization 放在
+          <strong>整數 VCO cycle</strong> granularity:
+        </p>
+        <MathBlock>
+          {'e_{ZC,hw}[k] = \\operatorname{wrapCycles}(x_{ideal}[k] - z_0) \\in (-0.5, 0.5]\\ \\text{cycle} \\;\\Rightarrow\\; \\varepsilon_{hw} = 2\\pi\\,e_{ZC,hw} \\in (-\\pi, \\pi]\\ \\text{rad}'
+          }
+        </MathBlock>
+        <p>
+          scheduling error 掃過整個 wrap 範圍,超出 sin map 的 lock-in basin(basin 邊界即
+          unstable fixed point <M>{'\\pi-\\theta_{ss}'}</M>):kick 抵達時的{' '}
+          <M>{'e_{inj}'}</M> 可以落在拉力反向或近零的區域 — 這正是
+          <a href={chapterHref('injection-tap-mapping')}>第 7 章</a>的 mod-1 ambiguity:phase
+          目標只定義到 mod 1 cycle,誤差接近半個 cycle 時「最近的 zero crossing」會換到另一個
+          edge,kick 等效指向錯誤方向。每拍一個 full-range 的 <M>{'\\varepsilon_{hw}'}</M>{' '}
+          等同持續的大擾動,實測直接失鎖(exp21b:tail rms 1.81 rad)。
+          <EpistemicTag kind="EXPERIMENT" />
+        </p>
+        <p>
+          <strong>Effective correction rate 與 trade-off。</strong>dsm_only 的{' '}
+          <M>{'e_{ZC,hw}'}</M> 近似均勻分布在 ±0.5 cycle,所以 fire 機率{' '}
+          <M>{'\\rho(\\mathrm{th}) \\approx 2\\,\\mathrm{th}'}</M>
+          <EpistemicTag kind="APPROX" />(實測 th=0.0625 → 67/512 = 13.1%,th=0.25 → 51.0%)。
+          兩個競爭項:fire 的拍 placement error 上限 <M>{'2\\pi\\,\\mathrm{th}'}</M>
+          (th 越小 kick 越準),但 fire 間隔約 <M>{'1/\\rho'}</M> 拍內 detuning 漂移{' '}
+          <M>{'a/\\rho'}</M>(th 越小 kick 越稀疏、漂移越大)。把 lock condition 用平均修正量
+          改寫,得 gated 的有效條件 <M>{'|a| \\lesssim \\rho\\,K_{inj}'}</M>
+          <EpistemicTag kind="INFERENCE" />。兩項拉鋸 → 存在最佳 threshold(圖 #22c)。
+        </p>
+        <p>
+          <strong>PLL loop 與 injection 的互動(qualitative)。</strong>真實系統裡 PLL loop
+          與 injection 同時作用在同一個 VCO 上,分工是:<strong>frequency correction 留給
+          loop</strong>(loop integrator 把平均 frequency error 積分到零,等效把本章的{' '}
+          <M>{'\\Delta f \\to 0'}</M>、<M>{'\\theta_{ss}\\to 0'}</M>);
+          <strong>cycle-to-cycle jitter 留給 injection</strong>(loop bandwidth 外的快速
+          phase error 只有每拍一次的 kick 追得上)。loop 的 phase detector 取樣到的是
+          injection <strong>修正後</strong>的 phase(<M>{'\\theta^{+}'}</M> 一側)— injection
+          已移除的 jitter,loop 看不到。<EpistemicTag kind="INFERENCE" />
+        </p>
+        <p>
+          風險:injection 若留下 <strong>static phase offset</strong>(ε_hw 的固定分量、route
+          skew、tap offset,或 <M>{'\\theta_{ss}'}</M> 本身),loop integrator 會把它當成
+          phase error 持續積分,推動 VCO 頻率去抵銷 — 但 injection 每拍又把 phase 拉回原處。
+          兩個 actuator 對同一節點角力,平衡點落在「loop 看到的平均 error 為零、卻帶著非零
+          detuning」的狀態:此時每個 injection kick 都非零,pulse 擾動能量與 spur 隨之變大,
+          loop bandwidth 太高時甚至可能出現慢速 limit cycle。設計上要嘛把 injection 的
+          static offset 校正到零(第 15 章 calibrated mapping),要嘛讓 loop 對 injection
+          residual 的可見度降低(gated integrator / 降 BW)。<EpistemicTag kind="INFERENCE" />
+        </p>
+        <Callout type="warn" title="ASSUMPTION — 本模型不 co-simulate PLL loop">
+          <p>
+            本章的 θ 遞迴只有固定 detuning <M>{'\\Delta f'}</M> 與 noise,<strong>沒有</strong>{' '}
+            loop filter / integrator 狀態(<M>{'\\Delta f'}</M> 不隨 θ 回授更新)。上兩段的
+            loop–injection 互動是定性推論,本 model 無法給數字。co-simulation 需要加入:PFD
+            對 <M>{'\\theta^{+}'}</M> 的取樣、loop filter 狀態(<M>{'K_p, K_i'}</M>)、每拍更新
+            的 <M>{'\\Delta f[k]'}</M> 與 loop 延遲,才能量化 contention 的平衡 detuning、
+            kick 振幅分布、spur level 對 loop BW 的關係與雙 actuator 的穩定裕度。
+            <EpistemicTag kind="ASSUMPTION" />
+          </p>
+        </Callout>
       </SectionMath>
 
       <SectionExample>
@@ -534,11 +769,74 @@ export default function Chapter13() {
         <EChart option={convOption} height={320} />
       </SectionFigure>
 
+      <SectionFigure
+        title="圖 #22b — Gated injection:dsm_only gate off vs on(exp21b vs exp21c)"
+        caption={
+          <span>
+            exp21 config:N=3.13、ef1、dsm_only actuator、sin K_inj=0.4、Δf=1 MHz、σ_vco_w=0.02
+            rad、seed 12345。紅線 = gate off:ε_hw 全範圍掃動,θ⁺ 失鎖(tail rms 1.81 rad);
+            藍線 = threshold gating:只在 |e_ZC_hw| ≤ th 時 fire,鎖回有界 residual(th=0.0625
+            時 tail rms 0.102 rad、fire 67/512 = 13.1%);綠虛線 = full actuator 對照(exp21a,
+            tail rms 0.015 rad)。底部黃色 raster = gated config 的 inj_fired=1 拍(gate off 時
+            恆為 1,不畫)。<EpistemicTag kind="EXPERIMENT" />
+          </span>
+        }
+      >
+        <EChart option={gateConvOption} height={340} />
+        <div style={{ maxWidth: 420, marginTop: 8 }}>
+          <Slider
+            label="inj_gate_threshold"
+            value={gateTh}
+            min={0.005}
+            max={0.5}
+            step={0.005}
+            unit="cycle"
+            onChange={setGateTh}
+          />
+        </div>
+        <p style={{ marginTop: 6 }}>
+          目前 th = {trimNumber(gateTh, 4)} cycle(= {trimNumber(gateTh * 360, 4)}°):fire{' '}
+          {firedCount}/512({trimNumber((firedCount / 512) * 100, 3)}%,ρ≈2·th 預測{' '}
+          {trimNumber(2 * gateTh * 100, 3)}%);tail rms θ⁺(後 256 拍)gated ={' '}
+          {trimNumber(tailRmsGated, 4)} rad vs ungated = {trimNumber(tailRmsUngated, 4)} rad。
+          <EpistemicTag kind="EXPERIMENT" />
+        </p>
+      </SectionFigure>
+
+      <SectionFigure
+        title="圖 #22c — Effective correction rate vs threshold(exp21c 掃描)"
+        caption={
+          <span>
+            橫軸 inj_gate_threshold(cycles),實線 = tail rms θ⁺(後 256 拍,rad),虛線 =
+            fired fraction ρ。兩端都變差:th 太小 → kick 準但太稀疏,fire 間隔內的 detuning
+            漂移主導(th=0.005:ρ=1.2%、rms 0.149 rad);th 太大 → kick 常見但 placement error
+            上限 2π·th 變大,直到 th=0.5(≡ gate off)完全失鎖(rms 1.81 rad)。本 config
+            最佳區間約 th ≈ 0.02–0.03(rms 0.068–0.081 rad @ ρ = 4.7–7.0%);預設 0.0625 =
+            1/16 cycle 是偏保守的整數冪次選擇(rms 0.102 rad)。單次 seed 12345 量測,非統計
+            平均。<EpistemicTag kind="EXPERIMENT" />
+          </span>
+        }
+      >
+        <EChart option={gateSweepOption} height={300} />
+      </SectionFigure>
+
       <SectionCode
         language="typescript"
         title="web/src/model/injectionDynamics.ts — response models 與 fixed point(節錄)"
         code={DYNAMICS_CODE}
       />
+
+      <SectionCode
+        language="typescript"
+        title="web/src/model/simulate.ts + injectionDynamics.ts — injection gating(節錄)"
+        code={GATING_CODE}
+      >
+        <p>
+          gate mask 由 deterministic 的 <code>e_ZC_hw</code> 計算(§14 convention),dynamics
+          迴圈在非 fire 拍直接令 <code>dth = 0</code> — θ 照常累積 detuning 與 noise,
+          <code>e_inj</code> 仍照常記錄(「若 fire 會看到的誤差」)。
+        </p>
+      </SectionCode>
 
       <SectionLineByLine
         items={[
@@ -679,6 +977,18 @@ export default function Chapter13() {
             驗證流程分層:exact scheduler(open-loop, bit-exact)→ APPROX dynamics(趨勢)→
             transistor-level PDR LUT(替換 sin map)。介面已就緒:CSV 兩欄即可。
           </li>
+          <li>
+            scheduling error 可能超出 lock-in basin 時(dsm_only:±0.5 cycle),threshold
+            gating 是生存策略:實測 tail rms 1.81 rad(ungated)→ 0.102 rad(th=0.0625)。
+            threshold 是 placement error(∝ th)與 correction rate(ρ ≈ 2·th)的 trade-off,
+            存在最佳值(本 config 約 0.02–0.03 cycle);有效 lock 條件近似{' '}
+            <M>{'|a| \\lesssim \\rho K_{inj}'}</M>。<EpistemicTag kind="EXPERIMENT" />
+          </li>
+          <li>
+            loop / injection 分工:frequency correction 屬 loop、cycle-to-cycle jitter 屬
+            injection;injection 的 static offset 會被 loop integrator 誤讀並積分 — 要嘛校正到
+            零,要嘛降低 loop 對它的可見度。<EpistemicTag kind="INFERENCE" />
+          </li>
         </ul>
       </SectionTakeaway>
 
@@ -695,6 +1005,17 @@ export default function Chapter13() {
               點的 tank loading 都需電晶體級萃取。
             </li>
             <li>LUT 模式也只是 static map:假設 phase response 不隨 amplitude/溫度/corner 變化。</li>
+            <li>
+              本模型<strong>不</strong> co-simulate PLL loop:θ 遞迴含固定 detuning,無 loop
+              filter/integrator(Δf 不隨 θ 回授)。loop–injection 互動(integrator 對 injection
+              static offset 的積分、contention 平衡點、spur vs loop BW)僅為定性推論;量化需要
+              加入 PFD 取樣、LF 狀態與 per-cycle Δf 更新的 co-simulation。
+              <EpistemicTag kind="ASSUMPTION" />
+            </li>
+            <li>
+              gate 是理想數位決策:非 fire 拍完全無 kick(Δθ=0),不含真實電路 gate-off 時的
+              殘餘 pulse 能量或 partial suppression。<EpistemicTag kind="ASSUMPTION" />
+            </li>
             <li>本專案未執行 Spectre;behavioral result 不等同 silicon result(MODEL_SPEC §20)。</li>
           </ul>
         </Callout>

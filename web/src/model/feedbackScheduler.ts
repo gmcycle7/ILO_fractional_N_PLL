@@ -38,8 +38,17 @@ export interface FeedbackResult {
 /**
  * Quantize the ideal fine-code trajectory and decode divider commands.
  *
- * Optional triangular dither (spec section 6 item 6):
- *     u' = u + d_amp * (U1 + U2 - 1),  U from the 'dither_fb' stream.
+ * Optional triangular dither (spec section 6 item 7):
+ *     u' = u + d_amp * (U1 + U2 - 1),  U from the 'dither_fb' stream
+ * (d_amp is in quantizer-LSB units: 1 fine LSB in 'full' actuator mode,
+ * 1 VCO cycle in 'dsm_only').
+ *
+ * Actuator modes (spec section 7.1):
+ *     full     : A_FB = Q(A_ideal)          (fine 1/G-cycle quantization)
+ *     dsm_only : A_FB = Q(A_ideal / G) * G  (classic divider-modulating DSM;
+ *                quantizer operates at INTEGER-CYCLE granularity, so
+ *                R_FB = m_FB = c_FB = 0 always; dsm_out is the integer
+ *                cycle count Q(A_ideal / G))
  *
  * Returns computed-domain (pre-latency) arrays; assertions per section 4.
  */
@@ -53,6 +62,7 @@ export function runFeedback(
   const nDtc = 1 << cfg.b_dtc;
   const n = aIdealArr.length;
   const q = makeQuantizer(cfg.quantizer);
+  const dsmOnly = cfg.actuator_mode === 'dsm_only';
 
   const aFb = new Float64Array(n);
   const dsmState = new Float64Array(n);
@@ -60,12 +70,12 @@ export function runFeedback(
 
   const useDither = cfg.dither_amp_lsb > 0.0 && ditherStream !== null;
   for (let k = 0; k < n; k++) {
-    let u = aIdealArr[k];
+    let u = dsmOnly ? aIdealArr[k] / g : aIdealArr[k];
     if (useDither && ditherStream !== null) {
       u += cfg.dither_amp_lsb * (ditherStream.next() + ditherStream.next() - 1.0);
     }
     const y = q.quantize(u);
-    aFb[k] = y;
+    aFb[k] = dsmOnly ? y * g : y;
     dsmOut[k] = y;
     dsmState[k] = q.state;
   }

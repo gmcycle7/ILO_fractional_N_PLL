@@ -7,6 +7,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useChapterAlpha } from '../lib/globalParams';
 import type { CSSProperties } from 'react';
 import {
   ChapterShell,
@@ -130,7 +131,7 @@ const BLOCKS: BlockDef[] = [
   {
     id: 'DIV', x: 740, y: 470, w: 120, h: 56, title: '/3-/4 divider', sub: 'n_int ∈ {3, 4}',
     paint: 'fb', vis: ['fb'],
-    desc: 'multi-modulus divider,由 n_int[k] = I_FB[k+1] − I_FB[k] 控制本拍吞掉 3 或 4 個 VCO cycles,長期平均 = N。nearest/floor quantizer 下 n_int ∈ {3,4};DSM quantizer 允許暫態 {2..5}。',
+    desc: 'multi-modulus divider,由 n_int[k] = I_FB[k+1] − I_FB[k] 控制本拍吞掉 3 或 4 個 VCO cycles,長期平均 = N。nearest/floor quantizer 下 n_int ∈ {3,4};DSM quantizer(ef1/mash11)可達集合為 {2,3,4} — 2 只在 α < 3/256 ≈ 0.012 時偶現,5 在 N ≤ 3.25 下不可能。',
     ref: 'MODEL_SPEC §4 · EXACT',
   },
   {
@@ -235,7 +236,7 @@ export default function Chapter01() {
   const [highlight, setHighlight] = useState<HighlightMode>('all');
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [pinId, setPinId] = useState<string | null>(null);
-  const [alpha, setAlpha] = useState(0.125);
+  const [alpha, setAlpha] = useChapterAlpha();
   const { unit } = useUnit();
   const ct = useChartTheme();
   const { setStatus } = useSimStatus();

@@ -9,6 +9,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useGlobalNDiv } from '../lib/globalParams';
 import {
   ChapterShell,
   SectionQuestion,
@@ -198,12 +199,29 @@ export function tapActual(
 type NDivStr = '3.125' | '3.13' | '3.1375';
 type SignalName = 'e_ZC_hw' | 'e_ZC_total';
 
+/** global N -> Ch15 的受限選單值(本章僅支援這三個 N;其他值不改變本章狀態) */
+function toNDivStr(n: number): NDivStr | null {
+  if (n === 3.125) return '3.125';
+  if (n === 3.13) return '3.13';
+  if (n === 3.1375) return '3.1375';
+  return null;
+}
+
 export default function Chapter15() {
   const { unit } = useUnit();
   const ct = useChartTheme();
   const { setStatus } = useSimStatus();
 
-  const [nDivStr, setNDivStr] = useState<NDivStr>('3.13');
+  const { nDiv: globalNDiv, setNDiv: setGlobalNDiv } = useGlobalNDiv();
+  const [nDivStr, setNDivStrState] = useState<NDivStr>(() => toNDivStr(globalNDiv) ?? '3.13');
+  useEffect(() => {
+    const s = toNDivStr(globalNDiv);
+    if (s !== null) setNDivStrState((prev) => (prev === s ? prev : s));
+  }, [globalNDiv]);
+  const setNDivStr = (v: NDivStr) => {
+    setNDivStrState(v);
+    setGlobalNDiv(Number(v));
+  };
   const [tapDeg, setTapDeg] = useState(1.0);
   const [tapPattern, setTapPattern] = useState<'uniform' | 'alt'>('uniform');
   const [gainPct, setGainPct] = useState(1.0);
@@ -271,7 +289,7 @@ export default function Chapter15() {
     );
     contrib.push(null, null);
     const totals: (number | null)[] = TERM_LABELS.map(() => null);
-    totals.push(decomp.sum_of_contributions_rms, decomp.joint_total_rms_cycles);
+    totals.push(decomp.rss_reference_rms, decomp.joint_total_rms_cycles);
     const opt = makeLineOption({
       xLabel: 'error term(MODEL_SPEC §16)',
       yLabel: phaseAxisLabel(`rms Δ${signal}`, unit, tVco),
@@ -576,9 +594,10 @@ export default function Chapter15() {
           <span>
             每根藍色 bar = 只開啟該項、其餘全 ideal 時,{signal} 相對 baseline 之
             per-cycle delta 的 rms<EpistemicTag kind="EXPERIMENT" />;黃色 bar = RSS
-            (各項平方和開根號)與 jointly-simulated total。additivity gap ={' '}
-            {formatPhase(decomp.additivity_gap_cycles, unit, tVco)}
-            (joint − RSS;linear regime 下應接近 0<EpistemicTag kind="APPROX" />)。
+            (各項平方和開根號,僅作 uncorrelated 參考)與 jointly-simulated total。
+            additivity gap = {formatPhase(decomp.additivity_gap_cycles, unit, tVco)}
+            (逐 cycle 線性和殘差 rms[(joint−base) − Σ(term−base)],§16;
+            linear regime 下應接近 0<EpistemicTag kind="APPROX" />)。
             紅虛線 = half-LSB。下表 16 個 knob 可逐項 enable/disable(§10 完整清單);
             多個 knob 映射到同一分解項時(如 3+4 → gain)會合併模擬。
           </span>
@@ -806,7 +825,8 @@ export default function Chapter15() {
             </li>
             <li>
               decomposition 的可加性是 <strong>linear regime 近似</strong>
-              <EpistemicTag kind="APPROX" />;joint 與 RSS 的差距已如實顯示。
+              <EpistemicTag kind="APPROX" />;additivity gap(逐 cycle 線性和殘差,§16)
+              已如實顯示,RSS 僅作 uncorrelated 合成的參考值。
             </li>
             <li>本專案未執行 Spectre;行為級模型 ≠ silicon(MODEL_SPEC §20)。</li>
           </ul>

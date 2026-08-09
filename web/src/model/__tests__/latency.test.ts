@@ -11,8 +11,9 @@ import { simulate } from '../simulate';
 const HALF_LSB_DEG = 0.703125;
 
 describe('latency and look-ahead (Test 5)', () => {
-  it('canonical formula: wrapCycles(L*alpha) = 0.13 cycle = 46.8 deg', () => {
-    expect(Math.abs(cyclesToDegrees(wrapCycles(1 * 0.13)) - 46.8)).toBeLessThan(1e-9);
+  it('canonical formula: bug-mode error = wrapCycles(-L*alpha), |error| = 0.13 cycle = 46.8 deg', () => {
+    expect(Math.abs(wrapCycles(-1 * 0.13) - -0.13)).toBeLessThan(1e-12);
+    expect(Math.abs(cyclesToDegrees(Math.abs(wrapCycles(-1 * 0.13))) - 46.8)).toBeLessThan(1e-9);
   });
 
   it('latency bug (L=1, no look-ahead) leaves ~46.8 deg error', () => {
@@ -66,10 +67,18 @@ describe('latency and look-ahead (Test 5)', () => {
     }
     expect(ok.metadata.length).toBe(n);
     expect(Object.keys(ok.metadata[3]).sort()).toEqual([
+      'P_state',
+      'R_FB',
+      'R_INJ',
       'k_applied',
       'k_computed',
       'k_intended',
       'seq_id',
     ]);
+    // spec section 13: P_state/R_FB/R_INJ come from the command's state index
+    const m3 = ok.metadata[3];
+    expect(m3.P_state).toBe(ok.data.A_ideal[3]);
+    expect(m3.R_FB).toBe(ok.data.R_FB[3]);
+    expect(m3.R_INJ).toBe(ok.data.R_INJ[3]);
   });
 });

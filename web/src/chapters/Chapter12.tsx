@@ -5,6 +5,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useChapterAlpha } from '../lib/globalParams';
 import {
   ChapterShell,
   SectionQuestion,
@@ -170,7 +171,7 @@ function LatencyDiagram({
 }
 
 export default function Chapter12() {
-  const [alpha, setAlpha] = useState(0.13);
+  const [alpha, setAlpha] = useChapterAlpha();
   const [latL, setLatL] = useState(1);
   const [diagLookahead, setDiagLookahead] = useState(false);
   const { unit } = useUnit();

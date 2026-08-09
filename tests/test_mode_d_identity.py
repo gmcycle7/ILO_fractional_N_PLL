@@ -8,7 +8,7 @@ from model.python.config import SimConfig
 from model.python.phase_math import q_nearest, wrap01, wrap_cycles
 from model.python.simulate import simulate
 
-ALL_QUANTIZERS = ["floor", "nearest", "truncate", "ef1", "mash11"]
+ALL_QUANTIZERS = ["floor", "nearest", "truncate", "ef1", "mash11", "mash111"]
 
 
 @pytest.mark.parametrize("quant", ALL_QUANTIZERS)
@@ -25,10 +25,16 @@ def test_mode_d_identity_all_quantizers(quant):
 
 
 def test_mode_b_pair_error_nonzero():
-    """Test 13 (independent half): independent DSMs break the cycle-by-cycle
-    reverse relation."""
+    """Test 13 (independent half): independent DSMs with DISTINCT initial
+    state (seeded from the 'dsm_inj' stream, spec section 7) break the
+    cycle-by-cycle reverse relation on a SUSTAINED fraction of cycles
+    (measured 326/512 ~ 64% for ef1 at N=3.13, seed 12345)."""
     res = simulate(SimConfig(n_div=3.13, quantizer="ef1", arch_mode="B"))
-    assert np.max(np.abs(res.data["e_pair_digital"])) > 0.0
+    ep = res.data["e_pair_digital"]
+    assert np.max(np.abs(ep)) > 0.0
+    frac = float(np.mean(ep != 0.0))
+    assert frac >= 0.05, \
+        f"pair error nonzero on only {frac:.2%} of cycles (need >= 5%)"
 
 
 def test_u0337_canonical_example_standalone():

@@ -1,18 +1,39 @@
 /**
- * ECharts wrapper. Handles: init/dispose lifecycle, resize (ResizeObserver),
- * light/dark theme switching (re-init with a registered echarts theme on
- * data-theme change), group sync via echarts.connect, event binding.
+ * ECharts wrapper. Handles: lazy loading of the echarts library (dynamic
+ * import on first mount, module-level cached promise, placeholder box of the
+ * reserved height while loading), init/dispose lifecycle, resize
+ * (ResizeObserver), light/dark theme switching (re-init with a registered
+ * echarts theme on data-theme change), group sync via echarts.connect, event
+ * binding.
  *
  * Build `option` with makeLineOption() from lib/chartOptions.ts and rebuild
  * it on theme change with useChartTheme() so explicit colors track the theme.
+ *
+ * The `echarts` package is intentionally NOT imported statically anywhere —
+ * only via import() here — so the (large) echarts chunk stays async and the
+ * first paint of chapter text never waits for it.
  */
 
-import { useEffect, useRef } from 'react';
-import * as echarts from 'echarts';
+import { useEffect, useRef, useState } from 'react';
 import { CHART_THEMES, getThemeMode, subscribeTheme, type ChartTheme } from '../lib/theme';
 import type { EChartsOption } from 'echarts';
 
-type EChartsInstance = ReturnType<typeof echarts.init>;
+type EChartsModule = typeof import('echarts');
+type EChartsInstance = ReturnType<EChartsModule['init']>;
+
+/** Module-level cache: one dynamic import for the whole app. */
+let echartsPromise: Promise<EChartsModule> | null = null;
+let echartsModule: EChartsModule | null = null;
+
+function loadECharts(): Promise<EChartsModule> {
+  if (echartsPromise === null) {
+    echartsPromise = import('echarts').then((m) => {
+      echartsModule = m;
+      return m;
+    });
+  }
+  return echartsPromise;
+}
 
 export interface EChartProps {
   option: EChartsOption;
@@ -36,7 +57,7 @@ function toEChartsThemeSpec(t: ChartTheme): Record<string, unknown> {
 }
 
 let themesRegistered = false;
-function ensureThemesRegistered(): void {
+function ensureThemesRegistered(echarts: EChartsModule): void {
   if (themesRegistered) return;
   echarts.registerTheme('ilo-light', toEChartsThemeSpec(CHART_THEMES.light));
   echarts.registerTheme('ilo-dark', toEChartsThemeSpec(CHART_THEMES.dark));
@@ -53,11 +74,26 @@ export default function EChart({ option, height = 320, group, onEvents, classNam
   eventsRef.current = onEvents;
   groupRef.current = group;
 
-  // Mount: init chart; re-init on theme change; resize observer; dispose on unmount.
+  // Lazy-load the library (cached after the first chart anywhere on the site).
+  const [lib, setLib] = useState<EChartsModule | null>(echartsModule);
+  useEffect(() => {
+    if (lib !== null) return;
+    let alive = true;
+    void loadECharts().then((m) => {
+      if (alive) setLib(m);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [lib]);
+
+  // Init chart once the library is here; re-init on theme change; resize
+  // observer; dispose on unmount.
   useEffect(() => {
     const el = holderRef.current;
-    if (!el) return;
-    ensureThemesRegistered();
+    if (!el || lib === null) return;
+    const echarts = lib;
+    ensureThemesRegistered(echarts);
 
     const bindEvents = (chart: EChartsInstance) => {
       const events = eventsRef.current;
@@ -99,7 +135,7 @@ export default function EChart({ option, height = 320, group, onEvents, classNam
       chartRef.current?.dispose();
       chartRef.current = null;
     };
-  }, []);
+  }, [lib]);
 
   // Option updates (notMerge so removed series disappear deterministically).
   useEffect(() => {
@@ -110,12 +146,13 @@ export default function EChart({ option, height = 320, group, onEvents, classNam
   // Group updates.
   useEffect(() => {
     const chart = chartRef.current;
-    if (!chart || chart.isDisposed()) return;
+    if (!chart || chart.isDisposed() || lib === null) return;
     chart.group = group ?? '';
-    if (group) echarts.connect(group);
-  }, [group]);
+    if (group) lib.connect(group);
+  }, [group, lib]);
 
-  // Event binding (also covers initial mount; theme re-init rebinds itself).
+  // Event binding (covers the mount after the chart exists — `lib` is a dep
+  // so the async-load path rebinds; theme re-init rebinds itself).
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart || chart.isDisposed() || !onEvents) return;
@@ -127,13 +164,15 @@ export default function EChart({ option, height = 320, group, onEvents, classNam
       if (!current || current.isDisposed()) return;
       for (const name of Object.keys(onEvents)) current.off(name);
     };
-  }, [onEvents]);
+  }, [onEvents, lib]);
 
   return (
     <div
       ref={holderRef}
       className={className ?? 'echart'}
       style={{ width: '100%', height }}
-    />
+    >
+      {lib === null && <div className="echart-loading">載入圖表庫…</div>}
+    </div>
   );
 }

@@ -7,17 +7,21 @@
  * configs (MODEL_SPEC section 18) round-trip without translation.
  */
 
-export type Quantizer = 'floor' | 'nearest' | 'truncate' | 'ef1' | 'mash11';
+export type Quantizer = 'floor' | 'nearest' | 'truncate' | 'ef1' | 'mash11' | 'mash111';
 export type ArchMode = 'A' | 'B' | 'C' | 'D';
 export type InjMapping = 'naive' | 'nearest' | 'calibrated';
 export type DtcModeName = 'normalized' | 'fixed_time';
 export type InjModel = 'none' | 'reset' | 'linear' | 'sin' | 'lut';
+export type ActuatorMode = 'full' | 'dsm_only';
+export type InjGateMode = 'off' | 'threshold';
 
-const QUANTIZERS: readonly string[] = ['floor', 'nearest', 'truncate', 'ef1', 'mash11'];
+const QUANTIZERS: readonly string[] = ['floor', 'nearest', 'truncate', 'ef1', 'mash11', 'mash111'];
 const ARCH_MODES: readonly string[] = ['A', 'B', 'C', 'D'];
 const INJ_MAPPINGS: readonly string[] = ['naive', 'nearest', 'calibrated'];
 const DTC_MODES: readonly string[] = ['normalized', 'fixed_time'];
 const INJ_MODELS: readonly string[] = ['none', 'reset', 'linear', 'sin', 'lut'];
+const ACTUATOR_MODES: readonly string[] = ['full', 'dsm_only'];
+const INJ_GATE_MODES: readonly string[] = ['off', 'threshold'];
 
 export interface SimConfig {
   // --- core system (MODEL_SPEC section 1) ---
@@ -32,9 +36,10 @@ export interface SimConfig {
   r_zero: number; // modular-reverse digital zero offset [A6]
 
   // --- digital scheduler ---
-  quantizer: Quantizer; // floor|nearest|truncate|ef1|mash11 [B5]
-  dither_amp_lsb: number; // triangular dither amplitude (LSB), pre-quantize
+  quantizer: Quantizer; // floor|nearest|truncate|ef1|mash11|mash111 [B5]
+  dither_amp_lsb: number; // triangular dither amplitude (quantizer LSB), pre-quantize
   arch_mode: ArchMode; // A|B|C|D (section 7; D = quantize once + modular reverse)
+  actuator_mode: ActuatorMode; // full|dsm_only (section 7.1)
   inj_mapping: InjMapping; // naive|nearest|calibrated (section 8)
   dtc_mode: DtcModeName; // normalized|fixed_time (section 11)
   dtc_lsb_fs: number; // fixed_time DTC LSB in fs [B2]
@@ -66,6 +71,8 @@ export interface SimConfig {
   k_inj: number; // lumped injection strength, [0, 1]
   delta_f_hz: number; // VCO free-running detuning vs N*f_ref
   pdr_lut: number[][] | null; // [[e_rad, dtheta_rad], ...]
+  inj_gate_mode: InjGateMode; // off|threshold (section 14 gating)
+  inj_gate_threshold_cycles: number; // fire iff |e_ZC_hw| <= threshold
 }
 
 /** Spec defaults (identical to the Python dataclass defaults). */
@@ -83,6 +90,7 @@ export function defaultConfig(): SimConfig {
     quantizer: 'nearest',
     dither_amp_lsb: 0.0,
     arch_mode: 'D',
+    actuator_mode: 'full',
     inj_mapping: 'naive',
     dtc_mode: 'normalized',
     dtc_lsb_fs: 312.5,
@@ -110,6 +118,8 @@ export function defaultConfig(): SimConfig {
     k_inj: 0.3,
     delta_f_hz: 0.0,
     pdr_lut: null,
+    inj_gate_mode: 'off',
+    inj_gate_threshold_cycles: 0.0625,
   };
 }
 
@@ -129,6 +139,12 @@ export function validateConfig(cfg: SimConfig): SimConfig {
   }
   if (!INJ_MODELS.includes(cfg.inj_model)) {
     throw new Error(`inj_model must be one of ${INJ_MODELS.join(', ')}`);
+  }
+  if (!ACTUATOR_MODES.includes(cfg.actuator_mode)) {
+    throw new Error(`actuator_mode must be one of ${ACTUATOR_MODES.join(', ')}`);
+  }
+  if (!INJ_GATE_MODES.includes(cfg.inj_gate_mode)) {
+    throw new Error(`inj_gate_mode must be one of ${INJ_GATE_MODES.join(', ')}`);
   }
   if (cfg.tap_mismatch_cycles.length !== cfg.n_tap) {
     throw new Error('tap_mismatch_cycles must have n_tap entries');

@@ -10,6 +10,8 @@ EXPECTED_NAMES = {
     "n3p130_ef1_shared", "n3p130_ef1_independent", "n3p130_mash11",
     "n3p130_latency_bug", "n3p130_lookahead", "n3p125_tap_mismatch_1deg",
     "n3p125_dtc_gain_1pct", "n3p130_dynamics_sin",
+    # schema-v2 vectors (carry the extra 'inj_fired' column)
+    "n3p130_mash111", "n3p130_dsm_only_gated",
 }
 
 
@@ -25,7 +27,7 @@ def test_emit_vectors_reproducible(tmp_path):
     d2 = tmp_path / "run2"
     p1 = emit_vectors(str(d1))
     p2 = emit_vectors(str(d2))
-    assert len(p1) == len(p2) == 24  # 12 JSON + 12 CSV
+    assert len(p1) == len(p2) == 28  # 14 JSON + 14 CSV
 
     for name in EXPECTED_NAMES:
         j1 = d1 / f"{name}.json"
@@ -57,3 +59,27 @@ def test_vector_schema(tmp_path):
     with open(tmp_path / "csv" / "n3p130_nearest.csv") as f:
         header = f.readline().strip()
     assert header == "k,t_ref_ns,n_int,m_FB,c_FB,j_INJ,c_INJ,R_FB,R_INJ,seq_id"
+
+
+def test_vector_schema_v2(tmp_path):
+    """Schema-v2 vectors carry the trailing 'inj_fired' column and the
+    non-default schema-v2 config keys; schema-v1 vectors carry neither
+    (byte-stability, MODEL_SPEC section 18)."""
+    import json
+    emit_vectors(str(tmp_path))
+    with open(tmp_path / "n3p130_dsm_only_gated.json") as f:
+        v2 = json.load(f)
+    assert v2["columns"][-1] == "inj_fired"
+    assert v2["config"]["actuator_mode"] == "dsm_only"
+    assert v2["config"]["inj_gate_mode"] == "threshold"
+    with open(tmp_path / "n3p130_mash111.json") as f:
+        v2m = json.load(f)
+    assert v2m["columns"][-1] == "inj_fired"
+    assert v2m["config"]["quantizer"] == "mash111"
+    # defaults omitted for schema stability
+    assert "actuator_mode" not in v2m["config"]
+    with open(tmp_path / "n3p130_nearest.json") as f:
+        v1 = json.load(f)
+    assert "inj_fired" not in v1["columns"]
+    assert "actuator_mode" not in v1["config"]
+    assert "inj_gate_mode" not in v1["config"]

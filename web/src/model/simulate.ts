@@ -58,6 +58,7 @@ export const COLUMNS = [
   'e_pair_digital',
   'e_pair_analog',
   'e_ZC_hw',
+  'inj_fired',
   'theta_minus',
   'e_inj',
   'delta_theta',
@@ -82,6 +83,7 @@ export const INT_COLUMNS: ReadonlySet<string> = new Set([
   'R_INJ',
   'j_INJ',
   'c_INJ',
+  'inj_fired',
   'seq_id',
   'k_computed',
   'k_applied',
@@ -200,11 +202,20 @@ export function simulate(cfg: SimConfig): SimResult {
 
   // --- computed-domain command streams ---
   const fb = runFeedback(cfg, aId, sId, streams.dither_fb);
-  const inj = runInjection(cfg, xId, fb.R_FB, dtcInj, tapTbl, streams.dither_inj);
+  const inj = runInjection(cfg, xId, fb.R_FB, dtcInj, tapTbl, streams.dither_inj, streams.dsm_inj);
 
   // --- latency pipeline (section 13) ---
   const lat = applyLatency(cfg, n, streams.lat);
   const idx = lat.idx;
+
+  // per-command metadata (spec section 13): every command carries the state
+  // it was computed from and the command words derived from it.
+  for (let k = 0; k < n; k++) {
+    const i = idx[k];
+    lat.metadata[k].P_state = aId[i];
+    lat.metadata[k].R_FB = fb.R_FB[i];
+    lat.metadata[k].R_INJ = inj.R_INJ[i];
+  }
 
   // --- applied-domain quantities (errors vs the CURRENT ideal state) ---
   const sFbAct = gather(fb.s_FB_actual, idx);
@@ -245,8 +256,24 @@ export function simulate(cfg: SimConfig): SimResult {
     nInt[n - 1] = nInt[n - 2];
   }
 
+  // --- injection gating (section 14): inj_fired convention:
+  // inj_model == 'none'      -> all 0 (no pulses exist to gate)
+  // gate 'off'               -> all 1
+  // gate 'threshold'         -> 1 iff |e_ZC_hw| <= inj_gate_threshold_cycles
+  const injFired = new Float64Array(n);
+  if (cfg.inj_model !== 'none') {
+    for (let k = 0; k < n; k++) {
+      injFired[k] =
+        cfg.inj_gate_mode === 'threshold'
+          ? Math.abs(eZcHw[k]) <= cfg.inj_gate_threshold_cycles
+            ? 1
+            : 0
+          : 1;
+    }
+  }
+
   // --- injection dynamics (section 14) ---
-  const dyn = runDynamics(cfg, eZcHw, streams);
+  const dyn = runDynamics(cfg, eZcHw, streams, injFired);
 
   const toF64 = (a: ArrayLike<number>): Float64Array => Float64Array.from(a as ArrayLike<number>);
 
@@ -277,6 +304,7 @@ export function simulate(cfg: SimConfig): SimResult {
     e_pair_digital: ePairDig,
     e_pair_analog: ePairAn,
     e_ZC_hw: eZcHw,
+    inj_fired: injFired,
     theta_minus: dyn.theta_minus,
     e_inj: dyn.e_inj,
     delta_theta: dyn.delta_theta,

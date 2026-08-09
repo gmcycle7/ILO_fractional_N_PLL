@@ -22,6 +22,7 @@
  * it renders below the content on narrow screens.
  */
 
+import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import CodeBlock from './CodeBlock';
 
@@ -33,9 +34,78 @@ export interface ChapterShellProps {
   children: ReactNode;
 }
 
+interface SectionDef {
+  num: number;
+  zh: string;
+  en: string;
+  slug: string;
+}
+
+/**
+ * Floating mini-TOC (>=1280px viewports, hidden below via CSS) listing the
+ * chapter's sections with scrollspy highlighting. Anchor ids `sec-<slug>`
+ * are stamped on the FIRST occurrence of each section kind after mount
+ * (kinds may repeat, e.g. several figures). SSR-safe: all DOM work is in
+ * effects.
+ */
 export function ChapterShell({ chapter, titleZh, titleEn, children }: ChapterShellProps) {
+  const articleRef = useRef<HTMLElement | null>(null);
+  const [tocItems, setTocItems] = useState<SectionDef[]>([]);
+  const [activeSlug, setActiveSlug] = useState<string | null>(null);
+  const [collapsed, setCollapsed] = useState<boolean>(() =>
+    typeof window === 'undefined' ? true : !window.matchMedia('(min-width: 1600px)').matches,
+  );
+
+  useEffect(() => {
+    const root = articleRef.current;
+    if (!root) return;
+
+    // Stamp anchor ids and collect which of the 11 kinds are present.
+    const present: SectionDef[] = [];
+    for (const def of TOC_ORDER) {
+      const el = root.querySelector<HTMLElement>(`.section-${def.slug}`);
+      if (el) {
+        if (!el.id) el.id = `sec-${def.slug}`;
+        present.push(def);
+      }
+    }
+    setTocItems(present);
+
+    // Scrollspy: the first (document order) section intersecting the upper
+    // viewport band is the active one.
+    if (typeof IntersectionObserver === 'undefined') return;
+    const sections = Array.from(root.querySelectorAll<HTMLElement>('.chapter-section'));
+    if (sections.length === 0) return;
+    const slugOf = (el: Element): string | null => {
+      for (const def of TOC_ORDER) {
+        if (el.classList.contains(`section-${def.slug}`)) return def.slug;
+      }
+      return null;
+    };
+    const visible = new Map<Element, boolean>();
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) visible.set(entry.target, entry.isIntersecting);
+        for (const el of sections) {
+          if (visible.get(el) === true) {
+            const slug = slugOf(el);
+            if (slug !== null) setActiveSlug(slug);
+            return;
+          }
+        }
+      },
+      { rootMargin: '-10% 0px -55% 0px', threshold: 0 },
+    );
+    for (const el of sections) observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  const scrollToSection = (slug: string) => {
+    document.getElementById(`sec-${slug}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
   return (
-    <article className="chapter">
+    <article className="chapter" ref={articleRef}>
       {(titleZh !== undefined || titleEn !== undefined) && (
         <header className="chapter-header">
           {chapter !== undefined && <p className="chapter-kicker">Chapter {chapter}</p>}
@@ -44,18 +114,58 @@ export function ChapterShell({ chapter, titleZh, titleEn, children }: ChapterShe
         </header>
       )}
       <div className="chapter-grid">{children}</div>
+      {tocItems.length > 0 && (
+        <nav
+          className={`section-toc${collapsed ? ' section-toc-collapsed' : ''}`}
+          aria-label="本章節導覽"
+        >
+          {collapsed ? (
+            <button
+              type="button"
+              className="section-toc-toggle"
+              onClick={() => setCollapsed(false)}
+              aria-expanded="false"
+              title="展開本章導覽"
+            >
+              §
+            </button>
+          ) : (
+            <>
+              <div className="section-toc-header">
+                <span className="section-toc-title">本章導覽</span>
+                <button
+                  type="button"
+                  className="section-toc-toggle"
+                  onClick={() => setCollapsed(true)}
+                  aria-expanded="true"
+                  title="收合本章導覽"
+                >
+                  −
+                </button>
+              </div>
+              <ol className="section-toc-list">
+                {tocItems.map((def) => (
+                  <li key={def.slug}>
+                    <button
+                      type="button"
+                      className={`section-toc-item${activeSlug === def.slug ? ' section-toc-active' : ''}`}
+                      onClick={() => scrollToSection(def.slug)}
+                    >
+                      <span className="section-toc-num">{def.num}</span>
+                      <span className="section-toc-zh">{def.zh}</span>
+                    </button>
+                  </li>
+                ))}
+              </ol>
+            </>
+          )}
+        </nav>
+      )}
     </article>
   );
 }
 
 /* ------------------------------------------------------------------ */
-
-interface SectionDef {
-  num: number;
-  zh: string;
-  en: string;
-  slug: string;
-}
 
 const DEFS = {
   question: { num: 1, zh: '本章要回答的問題', en: 'Questions this chapter answers', slug: 'question' },
@@ -70,6 +180,9 @@ const DEFS = {
   takeaway: { num: 10, zh: '設計要點', en: 'Design takeaway', slug: 'takeaway' },
   limitation: { num: 11, zh: '模型限制', en: 'Model limitation', slug: 'limitation' },
 } satisfies Record<string, SectionDef>;
+
+/** The 11 section kinds in canonical order (drives the mini-TOC). */
+const TOC_ORDER: SectionDef[] = Object.values(DEFS);
 
 function Section({
   def,
