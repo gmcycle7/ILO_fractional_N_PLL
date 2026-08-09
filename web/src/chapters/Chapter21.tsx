@@ -305,7 +305,8 @@ function fitSlopeRatio(rawErr: Float64Array, order: number): { slope: number; r2
 /**
  * tone-bin 集中度:DC/Nyquist 鄰域 + (spur ±1 bins) 的功率占比。
  * detectSpurs 只掃內點,P = 2 之類「tone 恰在 Nyquist」的情況由固定納入的
- * 末兩 bin 涵蓋(python 驗證:無 dither 0.987–1.000、dither 0.5 → 0.003–0.090)。
+ * 末兩 bin 涵蓋(python 驗證:無 dither、P ≤ 128 時 preset 0.987–1.000、
+ * slider 掃描 ≥ 0.94;PMUX/DTC 級 dither 0.5 → 0.003–0.090)。
  */
 function combConcentration(freqs: Float64Array, psd: Float64Array): number {
   let tot = 0;
@@ -391,7 +392,7 @@ export default function Chapter21() {
   const stage = STAGE_DEFS.find((s) => s.key === stageKey)!;
   const tVco = 1 / (F_REF * nDiv); // display only
   const alpha = nDiv - 3;
-  /** 診斷 N*:微擾成長週期 rational(超出 3.25 邊界時改為減)。 */
+  /** 診斷 N*:微擾成長週期 rational(N > 3.2 改為減,避免逼近 3.25 上界)。 */
   const nDiag = nDiv <= 3.2 ? nDiv + DIAG_DELTA : nDiv - DIAG_DELTA;
 
   /* -------------------------------------------------- Layer 1: 公式表 */
@@ -542,6 +543,8 @@ export default function Chapter21() {
     const checks: CheckRow[] = [];
     const df = F_REF / NC_PSD;
     const fr = ratApprox(alpha);
+    /** nearest 誤差的週期 P = q/gcd(q,G);null = 非短週期 rational。 */
+    const pShort = fr === null ? null : fr.q / gcd(fr.q, stage.s);
     const totalNearest = meanSquare(runNearestClean.err);
 
     // (1) spur spacing = f_ref / P
@@ -572,20 +575,32 @@ export default function Chapter21() {
           detail: `P = 2 → tone 在 f_ref/2 = 2 GHz(Nyquist bin);最大非 DC bin ${atNyq ? '就在' : '不在'} Nyquist`,
           tolerance: 'argmax(非 DC bin) = Nyquist bin',
         });
+      } else if (p > NC_PSD / 2) {
+        checks.push({
+          name: '1. spur 間距 = f_ref/P',
+          status: 'na',
+          detail: `P = ${p} → comb 間距 f_ref/P = ${trimNumber(F_REF / p / 1e6, 4)} MHz < 2 bins,${NC_PSD} 點頻譜解析不出格點`,
+          tolerance: '需 f_ref/P ≥ 2 bins = 7.81 MHz',
+        });
       } else {
         const spAll = detectSpurs(pNc.freqsHz, pNc.psd, 10);
         const top = spAll.length > 0 ? spAll[0].psdDb : -Infinity;
         const strong = spAll.filter((s0) => s0.psdDb >= top - 30);
-        const fDet = strong.length > 0 ? Math.min(...strong.map((s0) => s0.freqHz)) : NaN;
         const fPred = F_REF / p;
-        const ok = Number.isFinite(fDet) && Math.abs(fDet - fPred) <= df + 1e-6;
+        const offGrid = strong.filter((s0) => {
+          const mHarm = Math.round(s0.freqHz / fPred);
+          return mHarm < 1 || Math.abs(s0.freqHz - mHarm * fPred) > df + 1e-6;
+        });
+        const ok = strong.length > 0 && offGrid.length === 0;
         checks.push({
           name: '1. spur 間距 = f_ref/P',
           status: ok ? 'pass' : 'fail',
-          detail: `預測 f_ref/${p} = ${trimNumber(fPred / 1e6, 5)} MHz;偵測(nearest、30 dB 窗)= ${
-            Number.isFinite(fDet) ? trimNumber(fDet / 1e6, 5) : '—'
-          } MHz`,
-          tolerance: '|Δf| ≤ 1 bin = 3.906 MHz',
+          detail: `預測 comb 間距 f_ref/${p} = ${trimNumber(fPred / 1e6, 5)} MHz;偵測(nearest、30 dB 窗)${strong.length} 根 strong spur、off-grid ${offGrid.length} 根${
+            strong.length > 0
+              ? `;最低 ${trimNumber(Math.min(...strong.map((s0) => s0.freqHz)) / 1e6, 5)} MHz`
+              : ''
+          }`,
+          tolerance: '每根 strong spur 距 m·f_ref/P ≤ 1 bin = 3.906 MHz',
         });
       }
     }
@@ -611,13 +626,24 @@ export default function Chapter21() {
       });
     }
 
-    // (3) Parseval:Σ S·df ≈ mean(e²)
+    // (3) Parseval:Σ S·df ≈ mean(e²)。只對「窗內成立週期性」(P ≤ 128)或
+    // 有效 dither(G > 1)的序列檢查;窗內非週期的慢 tonal 序列(P > 128 無
+    // dither)窗-tone 交互可把比值推到 1.9(python 掃 slider N 實測)。
     const msSel = meanSquare(runSel.err);
+    const parsevalApplicable =
+      (dither > 0 && stage.s > 1) || (pShort !== null && pShort <= 128);
     if (msSel < 1e-22) {
       checks.push({
         name: '3. Parseval:Σ S·df ≈ mean(e²)',
         status: 'pass',
         detail: '誤差 ≡ 0(exact)→ 兩側皆 0',
+        tolerance: 'ratio ∈ [0.8, 1.2]',
+      });
+    } else if (!parsevalApplicable) {
+      checks.push({
+        name: '3. Parseval:Σ S·df ≈ mean(e²)',
+        status: 'na',
+        detail: `α ${pShort === null ? '非短週期 rational' : `週期 P = ${pShort} > 128`} 且無有效 dither → 窗內非週期的慢 tonal 序列,Hann 窗-tone 交互使比值失準(python 實測可達 1.9)`,
         tolerance: 'ratio ∈ [0.8, 1.2]',
       });
     } else {
@@ -628,39 +654,74 @@ export default function Chapter21() {
         name: '3. Parseval:Σ S·df ≈ mean(e²)',
         status: ratio >= 0.8 && ratio <= 1.2 ? 'pass' : 'fail',
         detail: `Σ S·df = ${trimNumber(sum * df, 4)},mean(e²) = ${trimNumber(msSel, 4)},ratio = ${trimNumber(ratio, 4)}(U = mean(w²) 歸一化保證白噪積分回 variance;tonal 訊號與窗的交互造成偏差)`,
-        tolerance: 'ratio ∈ [0.8, 1.2](python 掃 67 組實測 0.865–1.101)',
+        tolerance: 'ratio ∈ [0.8, 1.2](python:preset 67 組 0.865–1.101;slider 掃 P ≤ 128 為 0.967–1.021、dither 組 0.814–1.151)',
       });
     }
 
-    // (4) DC bin ↔ 時域 mean(static offset)
+    // (4) DC bin ↔ 時域 mean(static offset)。DC bin 精確等於「Hann 加權平均」;
+    // 它與樣本平均對帳需要序列在窗內近似週期(P ≤ 128)且無 dither(dither 的
+    // 隨機成分使兩種平均統計性分離,~rms/√N 位階)。
     const muT = Math.abs(mean(runSel.err));
-    const muPsd = 2 * Math.sqrt((pSel.psd[0] * F_REF * HANN_U) / NC_PSD);
-    const tolMu = Math.max(2e-4, 0.1 * muT);
-    checks.push({
-      name: '4. DC bin ↔ 時域 mean',
-      status: Math.abs(muPsd - muT) <= tolMu ? 'pass' : 'fail',
-      detail: `|mean| 時域 = ${trimNumber(muT, 4)} cyc;由 DC bin 反推 2·√(S₀·f_ref·U/N) = ${trimNumber(muPsd, 4)} cyc`,
-      tolerance: '|Δ| ≤ max(2×10⁻⁴, 10%)(Hann 窗抑制部分週期殘量 → 微小 mean 不完全對帳)',
-    });
+    if (dither > 0 || pShort === null || pShort > 128) {
+      checks.push({
+        name: '4. DC bin ↔ 時域 mean',
+        status: 'na',
+        detail:
+          dither > 0
+            ? 'dither 的隨機成分使窗權重平均與樣本平均統計性分離(~rms/√N 位階)→ 不適用'
+            : `α ${pShort === null ? '非短週期 rational' : `週期 P = ${pShort} > 128`} → 最低 tone 洩漏進 DC bin → 不適用`,
+        tolerance: '|Δ| ≤ max(2×10⁻⁴, 10%, peak·P/N)',
+      });
+    } else {
+      const muPsd = 2 * Math.sqrt((pSel.psd[0] * F_REF * HANN_U) / NC_PSD);
+      const tolMu = Math.max(2e-4, 0.1 * muT, (maxAbs(runSel.err) * pShort) / NC_PSD);
+      checks.push({
+        name: '4. DC bin ↔ 時域 mean',
+        status: Math.abs(muPsd - muT) <= tolMu ? 'pass' : 'fail',
+        detail: `|mean| 時域 = ${trimNumber(muT, 4)} cyc;由 DC bin 反推 2·√(S₀·f_ref·U/N) = ${trimNumber(muPsd, 4)} cyc`,
+        tolerance: '|Δ| ≤ max(2×10⁻⁴, 10%, peak·P/N)(P 不整除窗長 → 部分週期殘量)',
+      });
+    }
 
-    // (5) nearest = pure tone comb;dither → floor
+    // (5) nearest = pure tone comb;dither ≥ 0.5(G > 1)→ floor。
+    // divider 級(G = 1)y±1 經 wrap 後不可見 → dither 無效,仍期望 comb;
+    // 0 < dither < 0.5 是轉換區(python 實測集中度 0.27–0.99)→ 無二元預測;
+    // comb 預測需要短週期 rational α(P ≤ 128),否則 tone 結構無預測。
     if (meanSquare(runNearestDith.err) < 1e-22) {
       checks.push({
         name: '5. nearest comb ↔ dither floor',
         status: 'na',
         detail: '誤差 ≡ 0(exact)→ 無頻譜內容',
-        tolerance: 'comb ≥ 0.95;floor ≤ 0.5',
+        tolerance: 'comb ≥ 0.9;floor ≤ 0.5',
       });
-    } else {
-      const conc = combConcentration(pNd.freqsHz, pNd.psd);
-      const expectComb = dither === 0;
-      const ok = expectComb ? conc >= 0.95 : conc <= 0.5;
+    } else if (dither > 0 && dither < 0.5 && stage.s > 1) {
       checks.push({
         name: '5. nearest comb ↔ dither floor',
-        status: ok ? 'pass' : 'fail',
-        detail: `tone-bin 集中度 = ${trimNumber(conc, 4)}(nearest${dither > 0 ? ` + dither ${trimNumber(dither, 3)} LSB` : ''});${expectComb ? '無 dither → 期望純 comb(≥ 0.95)' : 'dither 開啟 → 期望 tone 攤成 floor(≤ 0.5)'}`,
-        tolerance: 'comb ≥ 0.95(實測 0.987–1.000);floor ≤ 0.5(dither 0.5 實測 0.003–0.090)',
+        status: 'na',
+        detail: `dither ${trimNumber(dither, 3)} LSB ∈ (0, 0.5):comb 未完全攤平的轉換區(python 實測集中度 0.27–0.99)→ 無二元預測`,
+        tolerance: 'comb ≥ 0.9;floor ≤ 0.5',
       });
+    } else {
+      const expectComb = dither === 0 || stage.s === 1;
+      if (expectComb && (pShort === null || pShort > 128)) {
+        checks.push({
+          name: '5. nearest comb ↔ dither floor',
+          status: 'na',
+          detail: `α ${pShort === null ? '非短週期 rational' : `週期 P = ${pShort} > 128`} → comb 結構無預測`,
+          tolerance: 'comb ≥ 0.9;floor ≤ 0.5',
+        });
+      } else {
+        const conc = combConcentration(pNd.freqsHz, pNd.psd);
+        const ok = expectComb ? conc >= 0.9 : conc <= 0.5;
+        checks.push({
+          name: '5. nearest comb ↔ dither floor',
+          status: ok ? 'pass' : 'fail',
+          detail: `tone-bin 集中度 = ${trimNumber(conc, 4)}(nearest${dither > 0 ? ` + dither ${trimNumber(dither, 3)} LSB` : ''})${
+            stage.s === 1 && dither > 0 ? ';divider 級 y±1 wrap 後不可見 → dither 無效' : ''
+          };${expectComb ? '期望純 comb(≥ 0.9)' : 'dither ≥ 0.5 → 期望 tone 攤成 floor(≤ 0.5)'}`,
+          tolerance: 'comb ≥ 0.9(preset 實測 0.987–1.000;slider P ≤ 128 掃描 ≥ 0.94);floor ≤ 0.5(dither 0.5 實測 0.003–0.090)',
+        });
+      }
     }
 
     return { pts: { sel: mk(pSel), nearest: mk(pNc) }, spurs, checks, folds: runSel.folds };
@@ -902,8 +963,8 @@ export default function Chapter21() {
           <EpistemicTag kind="EXACT" />
         </p>
         <p>
-          直覺畫面:一把只有公分刻度的尺,量 3.13 cm 的東西每次都差幾 mm;換上 mm 刻度、
-          再換上 4 µm 游標,<b>殘差永遠存在,只是縮小</b>。而 DSM 是另一件事:它不改變刻度,
+          直覺畫面:一把只有公分刻度的尺,量 3.13 cm 的東西每次都差幾 mm;換上 2.5 mm
+          刻度(÷4)、再換上 39 µm 游標(再 ÷64),<b>殘差永遠存在,只是縮小</b>。而 DSM 是另一件事:它不改變刻度,
           只是「這拍多讀一格、下拍少讀一格」,讓<b>平均</b>讀數變準 —— 這正是 Layer 3 要
           量化的 trade-off。
         </p>
@@ -919,7 +980,7 @@ export default function Chapter21() {
         </MathBlock>
         <p>
           當 chain 完整(divider+PMUX+DTC、S = 256)時,這<b>就是</b> MODEL_SPEC §4 的{' '}
-          <M>{'e_{FB,abs}'}</M> —— 本章對三種 quantizer 逐拍驗證 stage-256 誤差與{' '}
+          <M>{'e_{FB,abs}'}</M> —— 本章對四種 quantizer 逐拍驗證 stage-256 誤差與{' '}
           <code>simulate()</code> 的 e_FB_abs 最大差 = 0(python3,512 cycles)。
           <EpistemicTag kind="EXACT" />
         </p>
@@ -1024,8 +1085,11 @@ export default function Chapter21() {
           週期 25 的穩態 —— <b>ef1 沒有額外 startup transient</b>;mash11 / mash111 的
           差分項(c₂ − c₂_prev 等)則在前 1–2 拍有 transient(圖三切換 quantizer 可見)。
           <EpistemicTag kind="EXACT" /> (ii) 表中 k=24 的 e_out 顯示 1:實際值是
-          0.9999…(float64 累積捨入,e ∈ [0,1) 嚴格成立)—— 這也是量測週期需用容差
-          比較的原因。<EpistemicTag kind="EXPERIMENT" />
+          0.9999…(float64 累積捨入,e ∈ [0,1) 嚴格成立)。精確算術下這一拍 v + e =
+          301 恰為整數(y = 301、err = +0.13);float64 落在 300.9999… → y = 300、err
+          = −0.12 —— DSM 序列在這類 floor 邊界拍與精確算術分歧、輸出翻轉一整個
+          stage-LSB,因此<b>只對 nearest</b> 做週期量測(圖一),且比較用明示容差。
+          <EpistemicTag kind="EXPERIMENT" />
         </p>
       </SectionExample>
 
@@ -1077,7 +1141,7 @@ export default function Chapter21() {
         </div>
         <p style={{ fontSize: 13, opacity: 0.85 }}>
           對照鏈:divider→PMUX 縮 4×、PMUX→DTC 再縮 64×,但 N=3.13 的 P 在 PMUX 與 DTC{' '}
-          <b>同為 25</b>(gcd(100,4) = gcd(100,256)/64… 皆給 25)→ spur <b>位置不變、
+          <b>同為 25</b>(gcd(100,4) = gcd(100,256) = 4 → P = 100/4 = 25)→ spur <b>位置不變、
           只有幅度縮小</b>。<EpistemicTag kind="EXACT" />
         </p>
       </SectionFigure>
@@ -1214,8 +1278,8 @@ export default function Chapter21() {
       >
         <p>
           <b>先講誠實的部分:</b>對 N = 3.13(P = 25),<b>全部</b>量化功率都在 m×160 MHz
-          的 tone 上 —— f {'<'} 62.5 MHz 之內<b>本來就沒有誤差功率</b>(量測值 ~10⁻⁹ cycle,
-          純為 Hann leakage 位階)。此時 nearest 在 band 內已經「乾淨」,DSM 沒有東西可買。
+          的 tone 上 —— f {'<'} 62.5 MHz 之內<b>本來就沒有誤差功率</b>(量測值 DTC 級
+          ~10⁻⁹、PMUX 級 ~10⁻⁷ cycle,純為 Hann leakage 位階)。此時 nearest 在 band 內已經「乾淨」,DSM 沒有東西可買。
           <EpistemicTag kind="EXPERIMENT" /> DSM 的 in-band 收益出現在<b>誤差 pattern 週期夠長、
           基頻掉進 band 內</b>的 N:表中用診斷 N* = N + 2⁻¹³ + 2⁻²⁵(dyadic 微擾把有效
           rational 週期推到 ≫ 觀察窗)呈現。這正是實務中「α 不是漂亮分數」的一般情況。
@@ -1259,7 +1323,7 @@ export default function Chapter21() {
           2.97×10⁻⁵ cyc(2.37 fs)、ef1 1.42×10⁻⁵(+6.4 dB ≈ <b>+1.1 bit</b>)、mash11
           7.2×10⁻⁷(+32.3 dB ≈ <b>+5.4 bits</b>)、mash111 7.7×10⁻⁸(+51.8 dB ≈{' '}
           <b>+8.6 bits</b>)。等效地說:mash111 在 f {'<'} f_ref/64 內的表現相當於把 1/256
-          cycle 的實體 grid 換成 Δ_eff ≈ Δ/2^8.6 ≈ 1/97000 cycle 的 nearest —— 但<b>只在
+          cycle 的實體 grid 換成 Δ_eff ≈ Δ/2^8.6 ≈ 1/99000 cycle 的 nearest —— 但<b>只在
           in-band 平均意義下</b>。同表 total rms 與 peak 欄位顯示代價:mash111 的 peak 是
           nearest 的 6.5 倍。PMUX grid 的 mash111 更慘:shaped 擺幅 ±0.92 cycle 超過 wrap
           範圍,132 拍摺疊,in-band 反而<b>劣化 22 dB</b>(表中紅字)—— shaping 收益被
@@ -1271,8 +1335,8 @@ export default function Chapter21() {
           zero-crossing 這種逐拍直接作用、沒有 loop 低通可依賴的用途,DSM 買的「平均 /
           in-band 解析度」用不上(Ch14 的 shorting energy 看的是瞬時誤差)。另外 dither
           在 error-feedback 結構中<b>不被 shaping</b>(誤差 = dither + shaped 殘量):
-          dither 0.5 LSB 會把 DTC 級 in-band floor 墊到 ~1.7×10⁻⁴ cycle,nearest 與 ef1
-          幾乎同高 —— dither 買 spur 平滑、賣 in-band floor。<EpistemicTag kind="EXPERIMENT" />
+          dither 0.5 LSB 會把 DTC 級 in-band floor 墊到 ~1.2–2.4×10⁻⁴ cycle,nearest 與
+          ef1 落在同一量級 —— dither 買 spur 平滑、賣 in-band floor。<EpistemicTag kind="EXPERIMENT" />
         </p>
       </SectionFigure>
 
@@ -1347,16 +1411,19 @@ export default function Chapter21() {
           </div>
         </div>
         <p style={{ fontSize: 13, opacity: 0.85 }}>
-          五項檢查的依據:(1) 週期序列功率只在 f_ref/P 諧波 [EXACT];(2) DSM 誤差 ≡
+          五項檢查的依據:(1) 週期序列功率只在 f_ref/P 諧波 [EXACT] —— 檢查每根
+          strong spur 都落在 m·f_ref/P 格點 ±1 bin;(2) DSM 誤差 ≡
           (1−z⁻¹)ⁿ × 有界序列 → 對 n 重積分的 PSD 比值斜率 +20n dB/dec [EXACT],python3
           掃 5 preset × 3 stage 實測 fit:order 1 = 19.5–19.8、order 2 = 39.0–39.5、order 3
           = 59.6–61.7 dB/dec [EXPERIMENT];(3) periodogramPsd 的 U = mean(w²) 歸一化
           (measurements.ts docstring:「white noise integrates to its variance」)保證
-          寬頻訊號 Parseval 成立,tonal 情況 python 實測 ratio 0.865–1.101 [EXPERIMENT];
-          (4) 靜態 offset 只出現在 DC bin:N=3.125@PMUX nearest 的 mean = +1/16 cycle 由
-          DC bin 反推分毫不差 [EXACT];(5) deterministic → comb(集中度 0.987–1.000
-          實測;P = 2 的 Nyquist tone 由固定納入的末兩 bin 涵蓋)、dither → floor
-          (0.003–0.090)[EXPERIMENT]。
+          寬頻訊號 Parseval 成立,短週期 tonal(P ≤ 128)python 實測 ratio:preset
+          0.865–1.101、slider 掃描 0.967–1.021;慢 tonal(P {'>'} 128 無 dither)可偏到
+          1.9 → N/A [EXPERIMENT];(4) 靜態 offset 只出現在 DC bin:N=3.125@PMUX nearest
+          的 mean = +1/16 cycle 由 DC bin 反推分毫不差 [EXACT](dither / P {'>'} 128 時
+          對帳失效 → N/A);(5) deterministic 短週期 → comb(preset 實測 0.987–1.000、
+          slider P ≤ 128 掃描 ≥ 0.94;P = 2 的 Nyquist tone 由固定納入的末兩 bin 涵蓋)、
+          dither ≥ 0.5(PMUX/DTC)→ floor(0.003–0.090)[EXPERIMENT]。
         </p>
       </SectionFigure>
 
@@ -1485,15 +1552,18 @@ export default function Chapter21() {
             「活著」。
           </li>
           <li>
-            圖六表:N 欄(exact)全部 ~10⁻⁹ —— <b>對 P=25 的 N,in-band 本來就空</b>;
+            圖六表:N 欄(exact)只剩 leakage 位階(DTC ~10⁻⁹、PMUX ~10⁻⁷)——{' '}
+            <b>對 P=25 的 N,in-band 本來就空</b>;
             N* 欄才看得到 DSM 的 in-band 收益隨階數增加(+1.1 / +5.4 / +8.6 bits @ DTC),
             以及 mash111@PMUX 的摺疊災難(紅字)。
           </li>
           <li>
             圖七:切 quantizer / dither / stage,五個 badge 即時重算 —— 特別試:(a) N=3.125
             + PMUX:check 1 走 Nyquist 特例、check 4 的 mean = 1/16 cycle 被 DC bin 精確
-            回收;(b) dither 從 0 拉到 0.5:check 5 從 comb 翻成 floor;(c) mash111 +
-            divider:摺疊警告出現,check 2 仍 pass(它用未 wrap 診斷序列)。
+            回收;(b) dither 從 0 拉到 0.5:check 5 從 comb 翻成 floor(PMUX/DTC 級;
+            divider 級 y±1 經 wrap 後不可見,維持 comb;0 {'<'} dither {'<'} 0.5 是轉換區
+            → N/A);(c) mash111 + divider:摺疊警告出現,check 2 仍 pass(它用未 wrap
+            診斷序列)。
           </li>
         </ul>
       </SectionObserve>
@@ -1536,7 +1606,7 @@ export default function Chapter21() {
               <tr>
                 <td>加細 grid(divider → +PMUX → +DTC)</td>
                 <td>÷4、再 ÷64(bound Δ/2)[EXACT]</td>
-                <td>等比例縮小(nearest:PMUX→DTC 實測 ~×1/86)</td>
+                <td>等比例縮小(nearest:PMUX→DTC 實測 ~×1/90)</td>
                 <td>不動(P 只依 gcd(q,G))</td>
                 <td>硬體:相位路由 + DTC 面積/校正(Ch15)</td>
               </tr>
@@ -1578,8 +1648,10 @@ export default function Chapter21() {
             DTC gain/INL、route skew,Ch15)與 injection dynamics(Ch13)全部關閉。頻譜為
             單一 realization(seed 12345)的 Hann periodogram,無 ensemble 平均;N* 診斷
             微擾是人為構造的長週期 rational,用來代表「α 非漂亮分數」的一般情況。float64
-            的累積捨入使 DSM 誤差序列僅為<b>準週期</b>(~10⁻⁹ 漂移),故週期量測與
-            檢查皆用明示容差。
+            的累積捨入使 DSM 內部 state 僅為<b>準週期</b>(wrap 後漂移 ~10⁻¹⁰);state
+            落在 floor 邊界的拍上,量化輸出會整個翻轉 1 stage-LSB(SectionExample 的
+            k=24),故圖一的週期量測只對 nearest 進行、比較皆用明示容差(nearest 實測
+            週期殘差 {'<'} 10⁻¹²)。
           </p>
         </Callout>
       </SectionLimitation>

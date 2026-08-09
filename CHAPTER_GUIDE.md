@@ -199,14 +199,18 @@ shaped 擺幅 ±0.92 cyc → wrap 摺疊 132 拍 → in-band 反劣化 22 dB(摺
 擺幅 × Δ ≥ 0.5 cycle 即毀)。dither 在 error-feedback 結構不被 shaping → 墊高
 in-band floor。
 (4) 每級頻譜 + sanity checklist(1024 cycles、Hann、sample rate=f_ref,y 軸 dB re
-cycle²/Hz,不標 dBc):5 項即時 pass/fail 檢查與容差:①spur 間距=f_ref/P(nearest、
-30 dB 窗、|Δf|≤1 bin;P=2 走 Nyquist-bin 特例;非短週期 rational → N/A)②shaping
+cycle²/Hz,不標 dBc):5 項即時 pass/fail 檢查與容差:①spur 間距=f_ref/P:每根
+strong spur(nearest、30 dB 窗)落在 m·f_ref/P 格點 ±1 bin;P=2 走 Nyquist-bin
+特例;非短週期 rational 或 P>512 → N/A ②shaping
 斜率:誤差對其 n 重(去 mean)累加的 PSD 比值 =|2sin(πf/f_ref)|^{2n} [EXACT],
 [f_ref/64, f_ref/6.4] fit ≈ +20n dB/dec(python 實測 19.5–19.8/39.0–39.5/59.6–61.7,
-容差 ±4;恆用 N* 未 wrap 診斷序列)③Parseval:ΣS·df/mean(e²)∈[0.8,1.2](實測
-0.865–1.101)④DC bin ↔ 時域 mean:μ=2√(S₀·f_ref·U/N),U=3/8(N=3.125@PMUX 的
-1/16 cycle 精確回收)⑤nearest comb(集中度 ≥0.95,實測 0.987–0.996)↔ dither
-floor(≤0.5,實測 0.037–0.078)。dither toggle 展示 tone→floor。
+容差 ±4;恆用 N* 未 wrap 診斷序列)③Parseval:ΣS·df/mean(e²)∈[0.8,1.2](preset
+67 組實測 0.865–1.101;僅 P≤128 或有效 dither 時檢查,慢 tonal 可偏到 1.9 → N/A)
+④DC bin ↔ 時域 mean:μ=2√(S₀·f_ref·U/N),U=3/8(N=3.125@PMUX 的 1/16 cycle 精確
+回收;容差 max(2e-4, 10%, peak·P/N);dither 或 P>128 → N/A)⑤nearest comb(集中度
+≥0.9,preset 實測 0.987–1.000、slider P≤128 掃描 ≥0.94)↔ dither≥0.5 floor(≤0.5,
+實測 0.003–0.090;0<dither<0.5 轉換區 → N/A;divider 級 dither 經 wrap 不可見 → 仍
+comb)。dither toggle 展示 tone→floor。
 misconception:「DSM 提高 DTC 解析度所以每個 edge 更準」(錯:峰值變大);「grid
 越細 spur 越高頻」(錯:P 只依 gcd(q,G),N=3.13 PMUX/DTC 同為 160 MHz)。takeaway:
 grid 優先、DSM 其次(摺疊條件限階數)、dither 是頻譜工具的 trade-off 表。limitation:
