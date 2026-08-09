@@ -33,6 +33,7 @@ import { makeLineOption } from '../lib/chartOptions';
 import { useChartTheme } from '../lib/useChartTheme';
 import { phaseAxisLabel, makePhaseTickFormatter, trimNumber } from '../lib/format';
 import { useSimStatus } from '../SimStatusContext';
+import { chapterHref } from '../lib/router';
 import { chapterById } from './index';
 import { simulate, fromPartial, configTVcoS } from '../model';
 import type { Quantizer } from '../model';
@@ -487,6 +488,11 @@ export default function Chapter04() {
           <li>
             ideal vs actual 圖:N = 3.125 時兩線重合(on-grid exact);N = 3.130 時虛線在實線上下
             ±half-LSB 內跳動。
+          </li>
+          <li>
+            想看「divider 單獨 → +PMUX → +DTC」逐級把 PD 輸入端誤差從 ±0.5 cycle 縮到
+            ±half-LSB 的完整解剖(公式、暫態、頻譜與 sanity 檢查),見{' '}
+            <a href={chapterHref('pd-input-error-anatomy')}>Ch21 PD 輸入端誤差逐級解析</a>。
           </li>
         </ul>
       </SectionObserve>
