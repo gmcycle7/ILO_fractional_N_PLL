@@ -94,10 +94,11 @@ npm run build    # production build(輸出 web/dist/)
 npm run preview  # 預覽 production build
 ```
 
-網站 21 章(0–20):從 timing/sign convention、ideal fractional trajectory、
+網站 23 章(0–22):從 timing/sign convention、ideal fractional trajectory、
 feedback decode、reverse injection 幾何、tap/DTC redundancy、shared phase state、
 DSM state 議題、sub-LSB、latency look-ahead、injection dynamics、mismatch、
-spur/PN 分析,到 22 個一鍵 comparison experiments 與 design conclusions。
+spur/PN 分析、22 個一鍵 comparison experiments 與 design conclusions,到
+PD-input 誤差逐級解析與 DSM 殘餘誤差的失鎖邊界分析。
 所有模擬直接在 browser 端執行(TypeScript mirror model),不依賴任何 server。
 
 ## 輸出檔案

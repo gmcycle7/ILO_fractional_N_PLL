@@ -35,6 +35,7 @@ import {
   formatSiTime,
   trimNumber,
 } from '../lib/format';
+import { chapterHref } from '../lib/router';
 import { useSimStatus } from '../SimStatusContext';
 import { chapterById } from './index';
 import {
@@ -1054,7 +1055,10 @@ export function triangularDither(ditherAmpLsb: number, stream: Mulberry32): numb
           threshold gating 只是部分補救(exp21:1.81 → 0.10 rad,fire rate 13%);
           DTC-assisted QNC 與本架構的 full actuator 是同一個 accumulated state 的
           兩種用法;phase-domain DSM 只在 mode D 的 quantize-once 前提下安全。
-          <EpistemicTag kind="EXPERIMENT" />
+          <EpistemicTag kind="EXPERIMENT" /> per-edge 峰值放大(0.48 → 1.76 LSB)是否
+          會威脅 injection lock 本身,見{' '}
+          <a href={chapterHref('dsm-residual-injection-lock')}>Ch22 的失鎖邊界量測</a>
+          (full actuator 下 margin 73–267×,不脫鎖)。
         </p>
       </SectionTakeaway>
 

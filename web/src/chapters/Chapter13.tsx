@@ -985,6 +985,11 @@ export default function Chapter13() {
             <M>{'|a| \\lesssim \\rho K_{inj}'}</M>。<EpistemicTag kind="EXPERIMENT" />
           </li>
           <li>
+            sub-LSB 的 DSM 殘餘誤差(full actuator)則遠在 basin 之內:margin 幾何、
+            high-pass transfer 與 (K, ω₀/K) 失鎖地圖的完整量測見{' '}
+            <a href={chapterHref('dsm-residual-injection-lock')}>第 22 章</a>。
+          </li>
+          <li>
             loop / injection 分工:frequency correction 屬 loop、cycle-to-cycle jitter 屬
             injection;injection 的 static offset 會被 loop integrator 誤讀並積分 — 要嘛校正到
             零,要嘛降低 loop 對它的可見度。<EpistemicTag kind="INFERENCE" />

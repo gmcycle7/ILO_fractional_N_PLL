@@ -48,6 +48,7 @@ import {
   trimNumber,
 } from '../lib/format';
 import { useChapterNDiv, N_DIV_PRESETS } from '../lib/globalParams';
+import { chapterHref } from '../lib/router';
 import { useSimStatus } from '../SimStatusContext';
 import { chapterById } from './index';
 import {
@@ -1633,7 +1634,9 @@ export default function Chapter21() {
           tone 掉進 loop band 內、且頻譜規格吃緊」時加,階數上限由「shaped 擺幅 × Δ{' '}
           {'<'} 0.5 cycle」的摺疊條件與逐拍 injection 精度(Ch11/Ch14)共同決定 ——
           mash111 配粗 grid(PMUX 級)是實測會翻車的組合。dither 是頻譜整形工具,
-          不是精度工具。<EpistemicTag kind="INFERENCE" />
+          不是精度工具。<EpistemicTag kind="INFERENCE" /> 這些 per-edge 峰值進入
+          injection dynamics 後會不會失鎖,見{' '}
+          <a href={chapterHref('dsm-residual-injection-lock')}>Ch22 的 lock margin 分析</a>。
         </p>
       </SectionTakeaway>
 

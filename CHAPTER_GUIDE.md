@@ -218,6 +218,57 @@ PD 線性度/loop dynamics 未建模、divider/PMUX 截斷級為思想實驗、�
 seed 12345、N* 為人為構造。ParamPanel:stage/quantizer/N(useChapterNDiv)/dither/
 n_cycles≤512/log-x toggle。
 
+**Ch22 DSM 殘餘誤差與失鎖邊界 DSM Residuals and Injection Lock Margin**
+主題:當用 DSM 把除數解析度做到小於 1 LSB 時,殘餘的 per-edge phase error 會不會讓
+injection-locked VCO 脫鎖?(§14 sin map + §4/6 量化 + §7.1 dsm_only。)
+四段分析鏈(全部數字 python3 交叉驗證,N=3.13 錨點、seed 12345):
+(a) 單位橋:1 LSB = 2π/256 = 0.024544 rad = 1.40625°;exp22 峰值 0.48/0.76/1.36/1.76
+LSB(nearest/ef1/mash11/mash111,e_FB_abs 與 e_ZC_hw 同值)→ 0.0118/0.0187/0.0334/
+0.0432 rad → 對 basin 半寬 π 的 margin ratio 266.7/168.4/94.1/72.7×(73–267×)[EXACT
+換算 + EXPERIMENT 峰值]。
+(b) 小訊號 transfer:線性化 θ⁻[k+1]=θ⁻[k]−K(θ⁻[k]+ε[k])+ω₀ → e_inj/ε = H(z) =
+(z−1)/(z−(1−K)) 一階 high-pass [APPROX]:DC 零點(固定 offset 被 loop 吸收)、高頻
+增益 → 2/(2−K)(K=0.3 → 1.176,+1.4 dB)。量測驗證(0.01 rad tone 餵非線性 sin map,
+K=0.3):15.625 MHz → 0.08162、250 MHz → 0.88006、1.75 GHz → 1.17574,與公式 <0.001%。
+punchline:DSM 把能量搬到 HF,正是 injection loop 不擋的頻段 —— shaping 幫 PLL
+in-band 頻譜(Ch21 L3),不幫 ZC 對準;mash111 的 e_inj 穩態峰值 0.0509 rad 比 ε 峰值
+0.0432 大 18%(|H| 峰化);e_inj PSD 與 |H|²·S_ε 逐 bin 重合(12 根 160 MHz 諧波偏差
+≤0.02 dB)。
+(c) margin 幾何:θ_ss=asin(r)(r=ω₀/K)、unstable π−θ_ss、M(r)=π−2·asin(r);
+M(0.9)=0.902、M(0.99)=0.283 rad。修正安全條件(INFERENCE,判準偏樂觀):
+peak|ε_hw|+noise tail ≪ M(r)。數值例 K=0.3、r=0.9:mash111 e_inj=1.1630<2.0218,
+kick −0.27540,淨 −0.00540(拉回);ef1@PMUX ε=0.9425 → e_inj=2.0623 跨過 unstable,
+淨 +0.00551(slip 方向);margin/peak 20.9× vs ~1×。
+(d) grid 階梯:PMUX-grid 峰值 0.754/0.943/1.508/2.513 rad(π/peak 4.2/3.3/2.1/1.25×),
+slip onset 預測 r*=sin((π−peak)/2)=0.93/0.89/0.73/0.31 vs 實測 0.9/0.9/0.6/0.2(Δr=0.1
+格;Δr=0.01 細掃 onset 0.90/0.89/0.59/0.13,全部 ≤ 預測,mash11/mash111 早
+0.14/0.18);dsm_only ε 掃滿 ±π → margin 0,ungated 失鎖(exp21:tail rms 1.81
+rad vs gated 0.102、full 0.015)。dsm_only + mash11/mash111 觸發 model 的 A_FB 單調性
+assert(倒退 edge,硬體不可實作)→ UI 只允許 nearest/ef1。
+互動圖:圖一 lock map heatmap(K_inj 12 步 0.02–1 × r=ω₀/K 12 步 0–1.1,144 × 256
+cycles,post-paint + SimVeil;色/數字 = slip 次數(unwrap θ⁺ 的 wrap-aware 差分累加,
+範圍每跨 2π 記一次);r=1 虛線 = 靜態邊界;點擊載入圖二;quantizer/actuator(full/
+PMUX 思想實驗/dsm_only)/σ_vco_w 可調)。錨點:full+mash111+σ=0.01 → r≤1.0 全 0、
+r=1.1 起 1/2/3/4/7/10/13/16/19 slips(K=0.08→1.0);fine 掃描(K=0.4)首 slip r=1.01
+(nearest 與 mash111 同格、σ=0.02 不變);dsm_only+ef1 → K≥0.27 連 r=0 都 slip
+(K=1.0 達 33)。
+圖二 trajectory explorer(wrapped θ⁺/e_inj/ε_hw + unwrapped drift + slip 事件標記;
+canonical K=0.4:r=0.1/0.9/1.1 → 0/0/7 slips)。圖三 margin bar chart(log-y:各
+quantizer×grid 峰值 vs M(0)/M(0.5)/M(0.9) markLines)。圖四 e_inj 頻譜(mash111 ε_hw
+vs e_inj vs |H|²·S_ε 預測 vs nearest;K=0.3、Δf=0、1024 拍穩態)。圖五 transfer 驗證
+(|H| 曲線 + 12 個量測 tone 點,K slider)。圖六 DebugTable(k/ε_hw/θ⁻/e_inj/Δθ/θ⁺/
+drift/slip flag,CSV)。
+PMUX-grid actuator 經 stageErrCycles(Ch21 stage 量化,S=4)→ runDynamics 餵 ε;full/
+dsm_only 走完整 simulate();共用 vco_w stream、seed 12345,python3 逐點同值。
+misconception:「DSM shaping 掉量化誤差所以 injection 也變準」(錯:峰值變大 + HF
+passthrough);「|ω₀|≤K 就與量化誤差無關」(錯:M(r) 塌陷 + 粗 grid onset 內縮)。
+takeaway 三 regime:(1) full DTC:73–267× margin,不脫鎖(代價是 spur/jitter);
+(2) 邊緣 r→1:margin ∝ 2√(2(1−r)) 塌,sub-LSB 峰值內縮 <0.01 r,粗 grid 才是主因;
+(3) dsm_only:必失鎖,要 gating。設計規則:peak|ε_hw|(rad)+noise ≪ π−2·asin(ω₀/K)。
+limitation:sin map APPROX(真實 PDR basin 可能更窄/不對稱)、無 AM-PM、無 loop
+pullback、slip 為行為 proxy(256 拍窗低估慢 slip)、PMUX 級為思想實驗、單 seed。
+ParamPanel:quantizer/actuator/N(useChapterNDiv)/σ_vco_w/K_inj/r slider + canonical
+presets;map 固定 256 cycles、頻譜與峰值固定 K=0.3。
 
 ## 3. 互動圖總表(30 圖 → 章)
 

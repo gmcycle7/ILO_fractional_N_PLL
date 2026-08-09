@@ -13,7 +13,7 @@ import { describe, expect, it } from 'vitest';
 import { CHAPTERS } from '../index';
 
 describe('chapter render smoke (SSR, node environment)', () => {
-  expect(CHAPTERS.length).toBe(22);
+  expect(CHAPTERS.length).toBe(23);
 
   for (const meta of CHAPTERS) {
     it(`Chapter ${String(meta.id).padStart(2, '0')} (${meta.slug}) renders without throwing`, async () => {
