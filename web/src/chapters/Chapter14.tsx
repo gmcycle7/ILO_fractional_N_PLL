@@ -24,6 +24,7 @@ import EChart from '../components/EChart';
 import EpistemicTag from '../components/EpistemicTag';
 import Callout from '../components/Callout';
 import { M, MathBlock } from '../components/Math';
+import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { ParamPanel, Slider, PresetButtons } from '../components/controls';
 import UnitSwitch, { useUnit } from '../components/UnitSwitch';
 import { makeLineOption, makeMarkLine } from '../lib/chartOptions';
@@ -44,6 +45,16 @@ import {
   dtcLsbS,
   tVcoS,
   configTVcoS,
+  configG,
+  fromPartial,
+  wrap01,
+  wrapCycles,
+  uInjIdeal,
+  qNearest,
+  pymod,
+  cyclesToTime,
+  cyclesToRadians,
+  timeToCycles,
 } from '../model';
 import type { SimResult } from '../model';
 
@@ -132,6 +143,306 @@ function ZcWaveform({ epsCycles, accent, bad }: { epsCycles: number; accent: str
 interface CaseRow {
   label: string;
   res: SimResult;
+}
+
+/* ---------------------------------------------------------------------------
+ * 數值例子(SectionExample):三個互動 worked example。
+ * compute 皆為 pure function,時間/相位換算與 scheduler 鏈全部走 ../model
+ * (tVcoS / dtcLsbS / timeToCycles / cyclesToTime / cyclesToRadians / wrap01 /
+ * uInjIdeal / qNearest / pymod / wrapCycles);§15 的 sin / sin² 是 display 層
+ * 的 proxy 公式,依章節慣例在此就地評估,沒有寫死的答案常數。
+ * ------------------------------------------------------------------------- */
+
+/** §15 proxy:v_d/V_p = sin(2π ε_t / T_vco)(ε_t 以 cycles 表示)。 */
+function vdRatio(epsCycles: number): number {
+  return Math.sin(cyclesToRadians(epsCycles));
+}
+
+const EX_VD_INPUTS = [
+  {
+    key: 'epsFs',
+    label: <M>{'\\varepsilon_t'}</M>,
+    def: 156.25,
+    min: -20000,
+    max: 20000,
+    step: 1,
+    unit: 'fs',
+  },
+  { key: 'nDiv', label: <M>{'N'}</M>, def: 3.125, min: 2, max: 8, step: 0.001 },
+  { key: 'frefGHz', label: <M>{'f_{ref}'}</M>, def: 4, min: 0.1, max: 20, step: 0.1, unit: 'GHz' },
+];
+
+function exVdCompute(v: Record<string, number>) {
+  const fRefHz = v.frefGHz * 1e9;
+  const tVco = tVcoS(v.nDiv, fRefHz);
+  const lsbS = dtcLsbS(v.nDiv, fRefHz);
+  const epsS = v.epsFs * 1e-15;
+  const epsCyc = timeToCycles(epsS, tVco);
+  const ratio = vdRatio(epsCyc);
+  const energy = ratio * ratio;
+  return {
+    steps: [
+      {
+        label: (
+          <>
+            <M>{'T_{vco} = 1/(N f_{ref})'}</M>
+          </>
+        ),
+        value: fmt(tVco * 1e12, 6, 'ps'),
+      },
+      {
+        label: <>1 LSB = T_vco/256 / half-LSB</>,
+        value: `${fmt(lsbS * 1e15, 6, 'fs')} / ${fmt(lsbS * 0.5e15, 6, 'fs')}`,
+      },
+      {
+        label: (
+          <>
+            <M>{'\\varepsilon_t'}</M> 換算成 LSB
+          </>
+        ),
+        value: fmt(epsS / lsbS, 6, 'LSB'),
+      },
+      {
+        label: (
+          <>
+            <M>{'\\varepsilon_t/T_{vco}'}</M>
+          </>
+        ),
+        value: fmt(epsCyc, 8, 'cyc'),
+      },
+      {
+        label: (
+          <>
+            <M>{'2\\pi\\varepsilon_t/T_{vco}'}</M>
+          </>
+        ),
+        value: fmt(cyclesToRadians(epsCyc), 8, 'rad'),
+      },
+      {
+        label: (
+          <>
+            <M>{'v_d/V_p = \\sin(2\\pi\\varepsilon_t/T_{vco})'}</M>
+          </>
+        ),
+        value: fmt(ratio * 100, 6, '%'),
+      },
+      {
+        label: (
+          <>
+            <M>{'E_{short,norm} = \\sin^2(\\cdot)'}</M>
+          </>
+        ),
+        value: fmt(energy, 6),
+      },
+    ],
+    answer: (
+      <>
+        <M>{'|v_d|/V_p'}</M> = {fmt(Math.abs(ratio) * 100, 6, '%')},
+        <M>{'E_{short,norm}'}</M> = {fmt(energy, 6)}
+      </>
+    ),
+    warn:
+      Math.abs(epsCyc) > 0.25
+        ? `|ε_t| 已超過 T_vco/4(pulse 打在波峰附近),E 從最大值 1 折返,proxy 在此區間只有定性意義`
+        : undefined,
+  };
+}
+
+const EX_SCHED_INPUTS = [
+  { key: 'nDiv', label: <M>{'N'}</M>, def: 3.13, min: 3, max: 3.25, step: 0.001 },
+  { key: 'k', label: <M>{'k'}</M>, def: 5, min: 0, max: 1023, step: 1 },
+  {
+    key: 'z0',
+    label: <M>{'z_0'}</M>,
+    def: 0,
+    min: -1,
+    max: 1,
+    step: 0.01,
+    unit: 'cyc',
+  },
+  { key: 'frefGHz', label: <M>{'f_{ref}'}</M>, def: 4, min: 0.1, max: 20, step: 0.1, unit: 'GHz' },
+];
+
+function exSchedCompute(v: Record<string, number>) {
+  const cfg = fromPartial({
+    n_div: v.nDiv,
+    f_ref_hz: v.frefGHz * 1e9,
+    z0_cycles: v.z0,
+  });
+  const g = configG(cfg);
+  const tVco = configTVcoS(cfg);
+  const x = wrap01(v.k * cfg.n_div); // x_ideal[k] (MODEL_SPEC §3)
+  const uIdeal = uInjIdeal([x], cfg.z0_cycles)[0]; // §5:wrap01(z0 - x)
+  const rInj = pymod(qNearest(g * uIdeal), g); // §6 half-up 量化
+  const uDigital = rInj / g;
+  const eZc = wrapCycles(x + uDigital - cfg.z0_cycles); // §5.1
+  const epsS = cyclesToTime(eZc, tVco);
+  const ratio = vdRatio(eZc);
+  return {
+    steps: [
+      {
+        label: (
+          <>
+            <M>{'x_{ideal}[k] = \\operatorname{wrap01}(kN)'}</M>
+          </>
+        ),
+        value: fmt(x, 8, 'cyc'),
+      },
+      {
+        label: (
+          <>
+            <M>{'u_{INJ,ideal} = \\operatorname{wrap01}(z_0 - x)'}</M>
+          </>
+        ),
+        value: fmt(uIdeal, 8, 'cyc'),
+      },
+      {
+        label: (
+          <>
+            量化前的實數 <M>{'G\\,u_{INJ,ideal}'}</M>
+          </>
+        ),
+        value: fmt(g * uIdeal, 8),
+      },
+      {
+        label: (
+          <>
+            <M>{'R_{INJ} = \\operatorname{qNearest}(G u) \\bmod G'}</M>
+          </>
+        ),
+        value: `${rInj} / ${g} LSB`,
+      },
+      {
+        label: (
+          <>
+            <M>{'e_{ZC} = \\operatorname{wrapCycles}(x + R_{INJ}/G - z_0)'}</M>
+          </>
+        ),
+        value: `${fmt(eZc, 8, 'cyc')} = ${fmt(eZc * g, 6, 'LSB')}`,
+      },
+      {
+        label: (
+          <>
+            <M>{'\\varepsilon_t = e_{ZC}\\,T_{vco}'}</M>(<M>{'T_{vco}'}</M> ={' '}
+            {fmt(tVco * 1e12, 6)} ps)
+          </>
+        ),
+        value: fmt(epsS * 1e15, 6, 'fs'),
+      },
+      {
+        label: (
+          <>
+            <M>{'v_d/V_p'}</M> 與 <M>{'E'}</M>(§15 proxy,[APPROX])
+          </>
+        ),
+        value: `${fmt(ratio * 100, 6, '%')} / ${fmt(ratio * ratio, 6)}`,
+      },
+    ],
+    answer: (
+      <>
+        <M>{'e_{ZC}'}</M> = {fmt(eZc * g, 6, 'LSB')},<M>{'\\varepsilon_t'}</M> ={' '}
+        {fmt(epsS * 1e15, 6, 'fs')}
+      </>
+    ),
+    warn:
+      Math.abs(eZc * g) > 0.5
+        ? `|e_ZC| = ${fmt(Math.abs(eZc) * g, 4)} LSB 超過 half-LSB — 純量化不該做到這麼差,請檢查 z_0 是否落在非 LSB 的格點上`
+        : undefined,
+  };
+}
+
+const EX_BUDGET_INPUTS = [
+  {
+    key: 'tapDeg',
+    label: <>tap mismatch</>,
+    def: 1,
+    min: -45,
+    max: 45,
+    step: 0.05,
+    unit: '°',
+  },
+  { key: 'routeLsb', label: <>route skew</>, def: 0.5, min: -32, max: 32, step: 0.05, unit: 'LSB' },
+  {
+    key: 'jitterFs',
+    label: <>ref jitter(rms)</>,
+    def: 100,
+    min: 0,
+    max: 5000,
+    step: 5,
+    unit: 'fs',
+  },
+  { key: 'nDiv', label: <M>{'N'}</M>, def: 3.125, min: 2, max: 8, step: 0.001 },
+];
+
+function exBudgetCompute(v: Record<string, number>) {
+  const tVco = tVcoS(v.nDiv, F_REF);
+  const lsbS = dtcLsbS(v.nDiv, F_REF);
+  const tapS = cyclesToTime(v.tapDeg / 360, tVco); // 1 cycle = 360°
+  const routeS = v.routeLsb * lsbS;
+  const jitS = v.jitterFs * 1e-15;
+  const worstS = Math.abs(tapS) + Math.abs(routeS) + Math.abs(jitS);
+  const rssS = Math.sqrt(tapS * tapS + routeS * routeS + jitS * jitS);
+  const eRss = vdRatio(timeToCycles(rssS, tVco)) ** 2;
+  const eHalf = vdRatio(timeToCycles(0.5 * lsbS, tVco)) ** 2;
+  const eTerms =
+    vdRatio(timeToCycles(tapS, tVco)) ** 2 +
+    vdRatio(timeToCycles(routeS, tVco)) ** 2 +
+    vdRatio(timeToCycles(jitS, tVco)) ** 2;
+  return {
+    steps: [
+      {
+        label: <>1 LSB / half-LSB(預算基準)</>,
+        value: `${fmt(lsbS * 1e15, 6, 'fs')} / ${fmt(lsbS * 0.5e15, 6, 'fs')}`,
+      },
+      {
+        label: (
+          <>
+            tap 項 <M>{'\\theta\\,T_{vco}/360'}</M>
+          </>
+        ),
+        value: `${fmt(tapS * 1e15, 6, 'fs')} = ${fmt(tapS / lsbS, 6, 'LSB')}`,
+      },
+      {
+        label: <>route 項</>,
+        value: `${fmt(routeS * 1e15, 6, 'fs')} = ${fmt(v.routeLsb, 6, 'LSB')}`,
+      },
+      { label: <>jitter 項(1σ)</>, value: `${fmt(jitS * 1e15, 6, 'fs')} = ${fmt(jitS / lsbS, 6, 'LSB')}` },
+      {
+        label: <>worst-case(絕對值直接相加)</>,
+        value: `${fmt(worstS * 1e15, 6, 'fs')} = ${fmt(worstS / lsbS, 6, 'LSB')}`,
+      },
+      {
+        label: <>RSS(平方和開根號)</>,
+        value: `${fmt(rssS * 1e15, 6, 'fs')} = ${fmt(rssS / lsbS, 6, 'LSB')}`,
+      },
+      {
+        label: (
+          <>
+            <M>{'E'}</M>(RSS 點)vs <M>{'E'}</M>(half-LSB 預算)
+          </>
+        ),
+        value: `${fmt(eRss, 6)} / ${fmt(eHalf, 6)} = ${fmt(eRss / eHalf, 6)}×`,
+      },
+      {
+        label: (
+          <>
+            逐項 <M>{'E'}</M> 之和(對照:<M>{'\\sin^2'}</M> 非線性,不可加)
+          </>
+        ),
+        value: fmt(eTerms, 6),
+      },
+    ],
+    answer: (
+      <>
+        RSS <M>{'\\varepsilon_t'}</M> = {fmt(rssS * 1e15, 6, 'fs')} = {fmt(rssS / lsbS, 6, 'LSB')},
+        <M>{'E_{short,norm}'}</M> = {fmt(eRss, 6)}(half-LSB 預算的 {fmt(eRss / eHalf, 6)} 倍)
+      </>
+    ),
+    warn:
+      rssS > 0.5 * lsbS
+        ? `RSS 已超出 half-LSB 預算(${fmt(rssS / (0.5 * lsbS), 4)}×):單靠量化解析度救不回來,需要第 15 章的 calibrated mapping`
+        : undefined,
+  };
 }
 
 export default function Chapter14() {
@@ -428,6 +739,58 @@ export default function Chapter14() {
           <M>{'v_d/V_p'}</M> = {trimNumber(ratio * 100, 4)}%,E = {trimNumber(energy, 4)}。
           <EpistemicTag kind="APPROX" />
         </p>
+
+        <ExampleProblem
+          index={1}
+          tag="APPROX"
+          title="一個 timing miss 對應多少被短路的電壓與能量"
+          prompt={
+            <>
+              injection pulse 偏離 zero crossing <M>{'\\varepsilon_t'}</M>。用{' '}
+              <M>{'v_d/V_p=\\sin(2\\pi\\varepsilon_t/T_{vco})'}</M> 與{' '}
+              <M>{'E_{short,norm}=\\sin^2(\\cdot)'}</M> 算出這一拍被短路的 normalized 電壓與能量
+              proxy,並把 <M>{'\\varepsilon_t'}</M> 換算成 LSB 以便和 half-LSB 預算比較(
+              <M>{'T_{vco}=1/(N f_{ref})'}</M>,1 LSB <M>{'=T_{vco}/256'}</M>)。
+            </>
+          }
+          inputs={EX_VD_INPUTS}
+          compute={exVdCompute}
+        />
+
+        <ExampleProblem
+          index={2}
+          tag="EXACT"
+          title="從 x_ideal[k] 到 ε_t:量化殘差怎麼變成被短路的電壓"
+          prompt={
+            <>
+              第 k 拍的 <M>{'x_{ideal}[k]=\\operatorname{wrap01}(kN)'}</M> 決定 injection
+              命令 <M>{'u_{INJ,ideal}=\\operatorname{wrap01}(z_0-x)'}</M>;它被量化成 fine code{' '}
+              <M>{'R_{INJ}=\\operatorname{qNearest}(G u)\\bmod G'}</M>。請算出殘留的{' '}
+              <M>{'e_{ZC}=\\operatorname{wrapCycles}(x+R_{INJ}/G-z_0)'}</M>,再用{' '}
+              <M>{'\\varepsilon_t=e_{ZC}\\,T_{vco}'}</M> 換成時間,並回報對應的 §15 proxy。
+            </>
+          }
+          inputs={EX_SCHED_INPUTS}
+          compute={exSchedCompute}
+        />
+
+        <ExampleProblem
+          index={3}
+          tag="APPROX"
+          title="Error budget roll-up:三項 miss 合起來吃掉多少預算"
+          prompt={
+            <>
+              三個獨立誤差同時存在:tap mismatch(以角度給定,
+              <M>{'\\theta\\,T_{vco}/360'}</M>)、route skew(以 LSB 給定)、reference jitter
+              (rms,fs)。請分別換成時間,做 worst-case 相加與 RSS,再把 RSS 的{' '}
+              <M>{'\\varepsilon_t'}</M> 代入 <M>{'E_{short,norm}'}</M>,與 half-LSB 預算對應的{' '}
+              <M>{'E'}</M> 相除得到超標倍數。順便對照「逐項 <M>{'E'}</M> 之和」— 因為{' '}
+              <M>{'\\sin^2'}</M> 非線性,兩者不相等。
+            </>
+          }
+          inputs={EX_BUDGET_INPUTS}
+          compute={exBudgetCompute}
+        />
       </SectionExample>
 
       <SectionFigure

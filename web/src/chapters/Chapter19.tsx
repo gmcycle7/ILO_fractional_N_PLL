@@ -15,6 +15,7 @@ import {
 import EChart from '../components/EChart';
 import EpistemicTag from '../components/EpistemicTag';
 import Callout from '../components/Callout';
+import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { M, MathBlock } from '../components/Math';
 import { ParamPanel, SelectControl, Slider, Toggle, PresetButtons } from '../components/controls';
 import DebugTable from '../components/DebugTable';
@@ -23,7 +24,17 @@ import { useChartTheme } from '../lib/useChartTheme';
 import { trimNumber } from '../lib/format';
 import { useSimStatus } from '../SimStatusContext';
 import { chapterById } from './index';
-import { simulate, fromPartial } from '../model';
+import {
+  simulate,
+  fromPartial,
+  configG,
+  configTVcoS,
+  pymod,
+  DTCModel,
+  lockCondition,
+  sinFixedPointRad,
+  rms,
+} from '../model';
 import type { Quantizer } from '../model';
 
 const meta = chapterById(19)!;
@@ -457,6 +468,163 @@ export default function Chapter19() {
             即參數 <code>tap0..tap7 = 222.22e-15</code>。<EpistemicTag kind="EXACT" />
           </li>
         </ul>
+
+        <ExampleProblem
+          index={1}
+          tag="EXACT"
+          title="dtc_nonideal_model:gain error → 延遲誤差(parameter-to-delay)"
+          prompt={
+            <>
+              <code>dtc_nonideal_model.va</code> 的總延遲
+              <M>{'t_d(c)=\\text{offset}+g\\,c\\,t_{LSB}+\\dots'}</M>(§11)。給定 <M>{'N'}</M>、
+              gain 誤差百分比與 code <M>{'c'}</M>,用 <code>DTCModel</code> 算出實際延遲、理想延遲
+              與兩者之差,換算成 fs 並對照 1 LSB(正是 bring-up 的 Test 7 gain check)。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.125, min: 3, max: 3.25, step: 0.0001 },
+            { key: 'gainPct', label: 'gain 誤差', def: 1, min: -10, max: 10, step: 0.1, unit: '%' },
+            { key: 'c', label: <M>{'c'}</M>, def: 63, min: 0, max: 63, step: 1 },
+          ]}
+          compute={(v) => {
+            const cfg = fromPartial({ n_div: v.N });
+            const g = configG(cfg);
+            const tVcoPs = configTVcoS(cfg) * 1e12;
+            const lsbCycles = 1 / g;
+            const gain = 1 + v.gainPct / 100;
+            const c = Math.max(0, Math.min(63, Math.round(v.c)));
+            const dtc = new DTCModel({ nCodes: 64, lsbCycles, gain });
+            const delayCycles = dtc.delayCycles(c);
+            const idealCycles = dtc.idealDelayCycles(c);
+            const errCycles = delayCycles - idealCycles;
+            const delayPs = delayCycles * tVcoPs;
+            const errFs = errCycles * tVcoPs * 1000;
+            const lsbFs = (tVcoPs * 1000) / g;
+            const ratio = errFs / lsbFs;
+            return {
+              steps: [
+                { label: <>DTC LSB(normalized)<M>{'=T_{vco}/G'}</M></>, value: fmt(lsbCycles * tVcoPs * 1000, 6, 'fs') },
+                { label: <><M>{'t_d(c)=\\text{gain}\\cdot c\\cdot\\text{LSB}'}</M>(實際延遲)</>, value: fmt(delayPs, 6, 'ps') },
+                { label: <>理想延遲 <M>{'c\\cdot\\text{LSB}'}</M></>, value: fmt(idealCycles * tVcoPs, 6, 'ps') },
+                { label: <>誤差(實際 − 理想)</>, value: fmt(errFs, 6, 'fs') },
+                { label: <>對照 1 LSB</>, value: `${fmt(ratio, 4)} LSB` },
+              ],
+              answer: (
+                <>
+                  誤差 = {fmt(errFs, 5, 'fs')} ≈ {fmt(ratio, 3)} LSB(1 LSB = {fmt(lsbFs, 4, 'fs')})
+                </>
+              ),
+              warn: Math.abs(ratio) > 0.5 ? '誤差已超過 half-LSB,單一 gain error 就吃掉整個量化預算' : undefined,
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={2}
+          tag="EXACT"
+          title="reverse_injection_scheduler:naive tap/DTC decode"
+          prompt={
+            <>
+              <code>reverse_injection_scheduler.va</code> 的 naive mapping:
+              <M>{'j=\\lfloor R_{INJ}/32\\rfloor'}</M>、<M>{'c=R_{INJ}\\bmod 32'}</M>。給定
+              <M>{'N, k, R_{zero}'}</M>,先用完整鏈算出 <M>{'R_{INJ}[k]'}</M>,再手動 decode 出
+              tap <M>{'j'}</M> 與 DTC code <M>{'c'}</M>,對照模型自己算出的 <code>j_INJ/c_INJ</code>{' '}
+              是否一致。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.125, min: 3, max: 3.25, step: 0.0001 },
+            { key: 'k', label: <M>{'k'}</M>, def: 5, min: 0, max: 500, step: 1 },
+            { key: 'rZero', label: <M>{'R_{zero}'}</M>, def: 0, min: 0, max: 255, step: 1 },
+          ]}
+          compute={(v) => {
+            const k = Math.max(0, Math.round(v.k));
+            const rZero = Math.round(v.rZero);
+            const cfg = fromPartial({ n_div: v.N, r_zero: rZero, n_cycles: k + 1 });
+            const res = simulate(cfg);
+            const g = configG(cfg);
+            const tapStep = Math.floor(g / 8);
+            const rInj = res.data.R_INJ[k];
+            const jDecoded = Math.floor(rInj / tapStep);
+            const cDecoded = pymod(rInj, tapStep);
+            const jModel = res.data.j_INJ[k];
+            const cModel = res.data.c_INJ[k];
+            const tVcoPs = configTVcoS(cfg) * 1e12;
+            const delayPs = (rInj / g) * tVcoPs;
+            const match = jDecoded === jModel && cDecoded === cModel;
+            return {
+              steps: [
+                { label: <><M>{'R_{INJ}[k]'}</M>(完整鏈算出)</>, value: `${rInj} / ${g} LSB` },
+                { label: <><M>{'j=\\lfloor R_{INJ}/32\\rfloor'}</M></>, value: fmt(jDecoded, 4) },
+                { label: <><M>{'c=R_{INJ}\\bmod 32'}</M></>, value: fmt(cDecoded, 4) },
+                { label: <>模型自算 <code>j_INJ / c_INJ</code></>, value: `${jModel} / ${cModel}` },
+                { label: <>injection 延遲 <M>{'=(32j+c)/G\\cdot T_{vco}'}</M></>, value: fmt(delayPs, 5, 'ps') },
+              ],
+              answer: (
+                <>
+                  j = {jDecoded}, c = {cDecoded}(與模型 {match ? '一致' : '不一致'}),延遲 ={' '}
+                  {fmt(delayPs, 5, 'ps')}
+                </>
+              ),
+              warn: match ? undefined : 'decode 與模型不一致 — 檢查 inj_mapping 是否仍為 naive',
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={3}
+          tag="APPROX"
+          title="pulsed_injection_phase_model:sin injection kick 的 lock 與 residual"
+          prompt={
+            <>
+              injection kick <M>{'\\Delta\\theta=-K_{inj}\\sin(e_{inj})'}</M>(§14)。給定{' '}
+              <M>{'K_{inj}'}</M> 與 detuning <M>{'\\Delta f'}</M>,先用
+              <M>{'|2\\pi\\Delta f\\,T_{ref}|\\le K_{inj}'}</M> 判斷是否在 lock range 內、算出
+              理論穩態 <M>{'\\theta_{ss}=\\arcsin(2\\pi\\Delta f\\,T_{ref}/K_{inj})'}</M>,再用{' '}
+              <code>simulate()</code> 跑 <M>{'n'}</M> 拍,量測 <code>theta_plus</code> 後半段的
+              RMS 與理論值比較。
+            </>
+          }
+          inputs={[
+            { key: 'kInj', label: <M>{'K_{inj}'}</M>, def: 0.3, min: 0.01, max: 1, step: 0.01 },
+            { key: 'deltaFMHz', label: <M>{'\\Delta f'}</M>, def: 1, min: -50, max: 50, step: 0.1, unit: 'MHz' },
+            { key: 'n', label: <M>{'n'}</M>, def: 64, min: 8, max: 128, step: 8, unit: 'cyc' },
+          ]}
+          compute={(v) => {
+            const fRef = 4e9;
+            const deltaFHz = v.deltaFMHz * 1e6;
+            const locked = lockCondition(v.kInj, deltaFHz, fRef);
+            const thetaSs = sinFixedPointRad(v.kInj, deltaFHz, fRef);
+            const n = Math.max(8, Math.round(v.n));
+            const res = simulate(
+              fromPartial({ n_div: 3.13, inj_model: 'sin', k_inj: v.kInj, delta_f_hz: deltaFHz, n_cycles: n }),
+            );
+            const tail = res.data.theta_plus.slice(Math.floor(n / 2));
+            const tailRms = rms(tail);
+            const a = (2 * Math.PI * deltaFHz) / fRef;
+            return {
+              steps: [
+                { label: <><M>{'a=2\\pi\\Delta f\\,T_{ref}'}</M></>, value: fmt(a, 6, 'rad') },
+                { label: <>lock 條件 <M>{'|a|\\le K_{inj}'}</M></>, value: locked ? '成立(locked)' : '不成立(unlocked)' },
+                {
+                  label: <>理論穩態 <M>{'\\theta_{ss}=\\arcsin(a/K_{inj})'}</M></>,
+                  value: thetaSs === null ? 'N/A(unlocked)' : fmt(thetaSs, 6, 'rad'),
+                },
+                { label: <><code>simulate()</code> {n} 拍,後半段 <code>theta_plus</code> RMS</>, value: fmt(tailRms, 6, 'rad') },
+              ],
+              answer: (
+                <>
+                  {locked ? 'locked' : 'unlocked'};理論穩態{' '}
+                  {thetaSs === null ? 'N/A' : fmt(thetaSs, 5, 'rad')},實測後半段 RMS ={' '}
+                  {fmt(tailRms, 5, 'rad')}
+                </>
+              ),
+              warn: locked
+                ? undefined
+                : `|a|=${fmt(Math.abs(a), 4)} > K_inj=${fmt(v.kInj, 4)},超出 lock range,theta_plus 不會收斂`,
+            };
+          }}
+        />
       </SectionExample>
 
       <SectionFigure

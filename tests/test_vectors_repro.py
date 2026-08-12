@@ -12,6 +12,8 @@ EXPECTED_NAMES = {
     "n3p125_dtc_gain_1pct", "n3p130_dynamics_sin",
     # schema-v2 vectors (carry the extra 'inj_fired' column)
     "n3p130_mash111", "n3p130_dsm_only_gated",
+    # schema-v4 vector (additionally carries 'u_loop' and 'pd_e')
+    "n3p130_loop_both",
 }
 
 
@@ -27,7 +29,7 @@ def test_emit_vectors_reproducible(tmp_path):
     d2 = tmp_path / "run2"
     p1 = emit_vectors(str(d1))
     p2 = emit_vectors(str(d2))
-    assert len(p1) == len(p2) == 28  # 14 JSON + 14 CSV
+    assert len(p1) == len(p2) == 30  # 15 JSON + 15 CSV
 
     for name in EXPECTED_NAMES:
         j1 = d1 / f"{name}.json"
@@ -83,3 +85,23 @@ def test_vector_schema_v2(tmp_path):
     assert "inj_fired" not in v1["columns"]
     assert "actuator_mode" not in v1["config"]
     assert "inj_gate_mode" not in v1["config"]
+
+
+def test_vector_schema_v4(tmp_path):
+    """The schema-v4 vector carries the trailing 'u_loop'/'pd_e' columns and
+    the non-default loop_mode config key; earlier vectors carry neither
+    (byte-stability, MODEL_SPEC sections 14.1, 18)."""
+    import json
+    emit_vectors(str(tmp_path))
+    with open(tmp_path / "n3p130_loop_both.json") as f:
+        v4 = json.load(f)
+    assert v4["columns"][-2:] == ["u_loop", "pd_e"]
+    assert v4["config"]["loop_mode"] == "pi"
+    # loop gains at defaults are omitted (from_dict restores them)
+    assert "loop_kp" not in v4["config"]
+    assert "loop_ki" not in v4["config"]
+    with open(tmp_path / "n3p130_dsm_only_gated.json") as f:
+        v2 = json.load(f)
+    assert "u_loop" not in v2["columns"]
+    assert "pd_e" not in v2["columns"]
+    assert "loop_mode" not in v2["config"]

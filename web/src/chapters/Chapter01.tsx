@@ -25,6 +25,7 @@ import {
 } from '../components/ChapterShell';
 import EpistemicTag from '../components/EpistemicTag';
 import Callout from '../components/Callout';
+import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { M, MathBlock } from '../components/Math';
 import { ParamPanel, PresetButtons, SelectControl, Slider } from '../components/controls';
 import UnitSwitch, { useUnit } from '../components/UnitSwitch';
@@ -33,7 +34,7 @@ import { useChartTheme } from '../lib/useChartTheme';
 import { formatPhase, trimNumber } from '../lib/format';
 import { useSimStatus } from '../SimStatusContext';
 import { chapterById } from './index';
-import { simulate, fromPartial } from '../model';
+import { simulate, fromPartial, gFine, qNearest, qFloor, pymod, ePair } from '../model';
 
 const meta = chapterById(1)!;
 
@@ -363,6 +364,148 @@ export default function Chapter01() {
             <EpistemicTag kind="EXACT" />
           </li>
         </ul>
+
+        <ExampleProblem
+          index={1}
+          tag="EXACT"
+          title="第 k 拍的 feedback fine code 量化與 decode"
+          prompt={
+            <>
+              給定 <M>{'N, s_0, k'}</M>,先算高解析理想 fine code{' '}
+              <M>{'A_{ideal}[k]=G\\,(s_0+kN)'}</M>,用預設 half-up nearest quantizer 量化成{' '}
+              <M>{'A_{FB}[k]=\\operatorname{qNearest}(A_{ideal}[k])'}</M>,最後純位元切割出{' '}
+              <M>{'I_{FB}, R_{FB}, m_{FB}, c_{FB}'}</M>。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 3, max: 3.25, step: 0.001 },
+            { key: 's0', label: <M>{'s_0'}</M>, def: 0, min: -50, max: 50, step: 0.01, unit: 'cyc' },
+            { key: 'k', label: <M>{'k'}</M>, def: 5, min: 0, max: 1023, step: 1 },
+          ]}
+          compute={(v) => {
+            const g = gFine();
+            const s = v.s0 + v.k * v.N;
+            const aIdeal = g * s;
+            const aFb = qNearest(aIdeal);
+            const iFb = qFloor(aFb / g);
+            const rFb = pymod(aFb, g);
+            const mFb = qFloor(rFb / 64);
+            const cFb = pymod(rFb, 64);
+            return {
+              steps: [
+                { label: <M>{'s_{ideal}=s_0+kN'}</M>, value: fmt(s, 8, 'cyc') },
+                { label: <M>{'A_{ideal}=G\\,s_{ideal}'}</M>, value: fmt(aIdeal, 8, 'LSB') },
+                { label: <M>{'A_{FB}=\\operatorname{qNearest}(A_{ideal})'}</M>, value: fmt(aFb, 8, 'LSB') },
+                { label: <M>{'I_{FB}=\\lfloor A_{FB}/G\\rfloor'}</M>, value: fmt(iFb, 6, 'cycle') },
+                { label: <M>{'R_{FB}=A_{FB}\\bmod G'}</M>, value: fmt(rFb, 6, 'LSB') },
+                { label: <M>{'m_{FB}=\\lfloor R_{FB}/64\\rfloor'}</M>, value: fmt(mFb, 3) },
+                { label: <M>{'c_{FB}=R_{FB}\\bmod 64'}</M>, value: fmt(cFb, 3) },
+              ],
+              answer: (
+                <>
+                  <M>{'(I_{FB}, m_{FB}, c_{FB})'}</M> = ({fmt(iFb, 6)}, {fmt(mFb, 3)}, {fmt(cFb, 3)}),
+                  <M>{'R_{FB}'}</M> = {fmt(rFb, 6)} LSB
+                </>
+              ),
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={2}
+          tag="EXACT"
+          title="Injection modular reverse:由 R_FB 到 tap/DTC code"
+          prompt={
+            <>
+              已知某拍的 feedback final code <M>{'R_{FB}'}</M> 與校正後的 digital zero offset{' '}
+              <M>{'R_{zero}'}</M>,Mode D 對 final code 做一次 modular reverse{' '}
+              <M>{'R_{INJ}=(R_{zero}-R_{FB})\\bmod 256'}</M>,再用 naive mapping 解出 tap{' '}
+              <M>{'j=\\lfloor R_{INJ}/32\\rfloor'}</M> 與 injection DTC code{' '}
+              <M>{'c=R_{INJ}\\bmod 32'}</M>,並驗證成對誤差{' '}
+              <M>{'e_{pair}=\\operatorname{wrapCycles}(u_{FB}+u_{INJ}-R_{zero}/G)'}</M> 是否恆為 0。
+            </>
+          }
+          inputs={[
+            { key: 'RFB', label: <M>{'R_{FB}'}</M>, def: 100, min: 0, max: 255, step: 1, unit: 'LSB' },
+            { key: 'Rzero', label: <M>{'R_{zero}'}</M>, def: 5, min: 0, max: 255, step: 1, unit: 'LSB' },
+          ]}
+          compute={(v) => {
+            const g = gFine();
+            const rInj = pymod(v.Rzero - v.RFB, g);
+            const j = qFloor(rInj / 32);
+            const c = pymod(rInj, 32);
+            const uInj = rInj / g;
+            const uFb = v.RFB / g;
+            const e = ePair([uFb], [uInj], v.Rzero, g)[0];
+            return {
+              steps: [
+                { label: <M>{'R_{INJ}=(R_{zero}-R_{FB})\\bmod 256'}</M>, value: fmt(rInj, 6, 'LSB') },
+                { label: <M>{'j=\\lfloor R_{INJ}/32\\rfloor'}</M>, value: fmt(j, 3) },
+                { label: <M>{'c=R_{INJ}\\bmod 32'}</M>, value: fmt(c, 3) },
+                { label: <M>{'u_{INJ,digital}=R_{INJ}/G'}</M>, value: fmt(uInj, 6, 'cyc') },
+                { label: <M>{'e_{pair}=\\operatorname{wrapCycles}(u_{FB}+u_{INJ}-R_{zero}/G)'}</M>, value: fmt(e, 6, 'cyc') },
+              ],
+              answer: (
+                <>
+                  <M>{'(j, c)'}</M> = ({fmt(j, 3)}, {fmt(c, 3)}),
+                  <M>{'e_{pair}'}</M> = {fmt(e, 6, 'cyc')}(Mode D 恆為 0)
+                </>
+              ),
+              warn: Math.abs(e) > 1e-9 ? 'e_pair 非零(不應發生於 Mode D,檢查輸入)' : undefined,
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={3}
+          tag="EXACT"
+          title="N cycles 平均 divider 動作:n_int 的長期平均"
+          prompt={
+            <>
+              <M>{'n_{int}[k]=I_{FB}[k+1]-I_{FB}[k]'}</M> 決定 /3-/4 divider 每拍吞 3 或 4 個
+              VCO cycles;長期平均理論上要收斂到 <M>{'N'}</M>。用 <code>simulate()</code> 跑{' '}
+              <M>{'n'}</M> 拍(≤128),從頭尾的 <M>{'I_{FB}'}</M> 算平均{' '}
+              <M>{'n_{int}'}</M>,並統計 4 出現的次數。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 3, max: 3.25, step: 0.001 },
+            { key: 'n', label: <M>{'n'}</M>, def: 64, min: 2, max: 128, step: 1, unit: 'cyc' },
+          ]}
+          compute={(v) => {
+            const nCyc = Math.max(2, Math.min(128, Math.round(v.n)));
+            const res = simulate(fromPartial({ n_div: v.N, n_cycles: nCyc, s0: 0 }));
+            const iFb = res.data.I_FB;
+            const first = iFb[0];
+            const last = iFb[nCyc - 1];
+            const avgNint = (last - first) / (nCyc - 1);
+            const err = avgNint - v.N;
+            let count4 = 0;
+            for (let k = 0; k < nCyc - 1; k++) {
+              if (iFb[k + 1] - iFb[k] === 4) count4++;
+            }
+            const count3 = nCyc - 1 - count4;
+            return {
+              steps: [
+                { label: <M>{'I_{FB}[0]'}</M>, value: fmt(first, 6, 'cycle') },
+                { label: <M>{'I_{FB}[n-1]'}</M>, value: fmt(last, 6, 'cycle') },
+                {
+                  label: <M>{'\\overline{n_{int}}=(I_{FB}[n-1]-I_{FB}[0])/(n-1)'}</M>,
+                  value: fmt(avgNint, 8),
+                },
+                { label: <>誤差 <M>{'\\overline{n_{int}}-N'}</M></>, value: fmt(err, 4) },
+                { label: <>n_int = 3 的拍數</>, value: fmt(count3, 5) },
+                { label: <>n_int = 4 的拍數</>, value: fmt(count4, 5) },
+              ],
+              answer: (
+                <>
+                  平均 <M>{'n_{int}'}</M> = {fmt(avgNint, 6)}(<M>{'N'}</M> = {fmt(v.N, 6)}),
+                  誤差 {fmt(err, 4)};{count3} 次 3、{count4} 次 4(共 {nCyc - 1} 拍)
+                </>
+              ),
+            };
+          }}
+        />
       </SectionExample>
 
       <SectionFigure

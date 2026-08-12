@@ -19,7 +19,7 @@ COMMITTED_DIR = os.path.join(REPO_ROOT, "test_vectors")
 def test_committed_vectors_match_fresh_emission(tmp_path):
     fresh_dir = tmp_path / "fresh"
     paths = emit_vectors(str(fresh_dir))
-    assert len(paths) == 28  # 14 JSON + 14 CSV
+    assert len(paths) == 30  # 15 JSON + 15 CSV
 
     mismatches = []
     for p in paths:

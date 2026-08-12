@@ -23,6 +23,7 @@ import {
 import EChart from '../components/EChart';
 import EpistemicTag from '../components/EpistemicTag';
 import Callout from '../components/Callout';
+import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { M, MathBlock } from '../components/Math';
 import { ParamPanel, Slider, Toggle, PresetButtons } from '../components/controls';
 import UnitSwitch, { useUnit } from '../components/UnitSwitch';
@@ -414,6 +415,157 @@ export default function Chapter12() {
           {formatPhase(Math.abs(eLat), unit, tVco)} = {trimNumber(eLatDeg, 4)}° ={' '}
           {trimNumber(ratio, 4)}× half-LSB。
         </p>
+
+        <ExampleProblem
+          index={1}
+          tag="EXACT"
+          title="Bug-mode latency 誤差量值(任意 α、L)"
+          prompt={
+            <>
+              固定 latency <M>{'L'}</M>(reference cycles)搭配 off-grid <M>{'\\alpha'}</M> 時,
+              bug mode 的絕對誤差量值為 <M>{'|e_{latency}|=|\\operatorname{wrapCycles}(L\\alpha)|'}</M>
+              。算出此值(cycle 與度數),並與 half-LSB(1/512 cycle)比較倍數。
+            </>
+          }
+          inputs={[
+            { key: 'alpha', label: <M>{'\\alpha'}</M>, def: 0.13, min: -0.5, max: 0.5, step: 0.001, unit: 'cyc' },
+            { key: 'L', label: <M>{'L'}</M>, def: 1, min: 0, max: 64, step: 1, unit: 'cyc' },
+          ]}
+          compute={(v) => {
+            const alphaIn = v.alpha;
+            const lIn = Math.round(v.L);
+            const eLatVal = wrapCycles(lIn * alphaIn);
+            const eLatAbs = Math.abs(eLatVal);
+            const eLatDegVal = cyclesToDegrees(eLatAbs);
+            const halfLsbCycVal = 1 / 512;
+            const halfLsbDegVal = cyclesToDegrees(halfLsbCycVal);
+            const ratioVal = eLatDegVal / halfLsbDegVal;
+            return {
+              steps: [
+                { label: <><M>{'L\\alpha'}</M></>, value: fmt(lIn * alphaIn, 8, 'cyc') },
+                { label: <><M>{'\\operatorname{wrapCycles}(L\\alpha)'}</M></>, value: fmt(eLatVal, 6, 'cyc') },
+                { label: <><M>{'|e_{latency}|'}</M>(度)</>, value: fmt(eLatDegVal, 5, '°') },
+                { label: <>half-LSB(度)</>, value: fmt(halfLsbDegVal, 6, '°') },
+                { label: <>比例</>, value: fmt(ratioVal, 5) },
+              ],
+              answer: (
+                <>
+                  <M>{'|e_{latency}|'}</M> = {fmt(eLatAbs, 5, 'cyc')} cyc = {fmt(eLatDegVal, 4, '°')} ={' '}
+                  {fmt(ratioVal, 4)}× half-LSB
+                </>
+              ),
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={2}
+          tag="EXACT"
+          title="look-ahead 恆等式:wrap01(x[k]+Lα) 是否等於直接算的 x[k+L]"
+          prompt={
+            <>
+              任取拍 <M>{'k'}</M>,比較「look-ahead 公式」預測值{' '}
+              <M>{'\\operatorname{wrap01}(x[k]+L\\alpha)'}</M> 與直接計算{' '}
+              <M>{'x[k+L]=\\operatorname{wrap01}((k+L)\\alpha)'}</M>。兩者的差{' '}
+              <M>{'\\operatorname{wrapCycles}(\\cdot)'}</M> 理論上恆為 0 — 這正是「固定 latency
+              可用一行 look-ahead 完全補償」的數學來源。
+            </>
+          }
+          inputs={[
+            { key: 'alpha', label: <M>{'\\alpha'}</M>, def: 0.13, min: -0.5, max: 0.5, step: 0.001, unit: 'cyc' },
+            { key: 'L', label: <M>{'L'}</M>, def: 1, min: 0, max: 64, step: 1, unit: 'cyc' },
+            { key: 'k', label: <M>{'k'}</M>, def: 3, min: 0, max: 1000, step: 1 },
+          ]}
+          compute={(v) => {
+            const alphaIn = v.alpha;
+            const lIn = Math.round(v.L);
+            const kIn = Math.round(v.k);
+            const xkVal = wrap01(kIn * alphaIn);
+            const xTargetVal = wrap01((kIn + lIn) * alphaIn);
+            const xLookaheadVal = wrap01(xkVal + lIn * alphaIn);
+            const diffCyc = wrapCycles(xLookaheadVal - xTargetVal);
+            const closeEnough = Math.abs(diffCyc) < 1e-9;
+            return {
+              steps: [
+                { label: <><M>{'x[k]=\\operatorname{wrap01}(k\\alpha)'}</M></>, value: fmt(xkVal, 8, 'cyc') },
+                { label: <><M>{'L\\alpha'}</M></>, value: fmt(lIn * alphaIn, 8, 'cyc') },
+                { label: <>look-ahead 預測 <M>{'\\operatorname{wrap01}(x[k]+L\\alpha)'}</M></>, value: fmt(xLookaheadVal, 8, 'cyc') },
+                { label: <>直接計算 <M>{'x[k+L]=\\operatorname{wrap01}((k+L)\\alpha)'}</M></>, value: fmt(xTargetVal, 8, 'cyc') },
+                { label: <><M>{'\\operatorname{wrapCycles}(\\text{差})'}</M></>, value: fmt(diffCyc, 8, 'cyc') },
+              ],
+              answer: (
+                <>
+                  look-ahead 預測 = {fmt(xLookaheadVal, 6, 'cyc')},直接算 = {fmt(xTargetVal, 6, 'cyc')},
+                  差 = {fmt(diffCyc, 6, 'cyc')}({closeEnough ? '恆等式成立' : '偏離(浮點誤差?)'})
+                </>
+              ),
+              warn: closeEnough ? undefined : `差值 ${fmt(diffCyc, 4, 'cyc')} 超出浮點誤差範圍`,
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={3}
+          tag="EXPERIMENT"
+          title="Metadata round-trip:seq_id / staleness / e_FB_abs 與理論值對照(多步驟)"
+          prompt={
+            <>
+              跑一段短模擬(latency <M>{'L'}</M>、bug 或 look-ahead 模式,最多 128 拍),讀出第{' '}
+              <M>{'k'}</M> 拍的 <code>seq_id</code>、<code>k_computed</code>、
+              staleness(= k_applied − seq_id)與 <M>{'e_{FB,abs}[k]'}</M>,與理論值{' '}
+              <M>{'|\\operatorname{wrapCycles}(L\\alpha)|'}</M> 對照,並確認{' '}
+              <M>{'e_{pair,digital}[k]'}</M> 是否仍恆為 0(即使 latency 有 bug)。
+            </>
+          }
+          inputs={[
+            { key: 'alpha', label: <M>{'\\alpha'}</M>, def: 0.13, min: 0, max: 0.25, step: 0.001, unit: 'cyc' },
+            { key: 'L', label: <M>{'L'}</M>, def: 1, min: 0, max: 8, step: 1, unit: 'cyc' },
+            { key: 'k', label: <M>{'k'}</M>, def: 5, min: 0, max: 120, step: 1 },
+            { key: 'lookahead', label: 'look-ahead(0=bug,1=正確)', def: 0, min: 0, max: 1, step: 1 },
+          ]}
+          compute={(v) => {
+            const alphaIn = v.alpha;
+            const lIn = Math.round(v.L);
+            const kIn = Math.round(v.k);
+            const isLookahead = v.lookahead >= 0.5;
+            const nCycles = Math.min(128, Math.max(kIn + 2, 2));
+            const cfg = fromPartial({
+              n_div: 3 + alphaIn,
+              n_cycles: nCycles,
+              latency_cycles: lIn,
+              lookahead: isLookahead,
+              s0: 0,
+            });
+            const sim = simulate(cfg);
+            const d = sim.data;
+            const seqIdK = d.seq_id[kIn];
+            const kAppliedK = d.k_applied[kIn];
+            const kComputedK = d.k_computed[kIn];
+            const staleness = kAppliedK - seqIdK;
+            const eFbAbsK = d.e_FB_abs[kIn];
+            const eFbDegK = cyclesToDegrees(eFbAbsK);
+            const ePairK = d.e_pair_digital[kIn];
+            const theoryDeg = cyclesToDegrees(Math.abs(wrapCycles(lIn * alphaIn)));
+            return {
+              steps: [
+                { label: <>seq_id[k]</>, value: `${seqIdK}` },
+                { label: <>k_computed[k]</>, value: `${kComputedK}` },
+                { label: <>staleness = k_applied − seq_id</>, value: `${staleness}` },
+                { label: <><M>{'e_{FB,abs}[k]'}</M>(度)</>, value: fmt(eFbDegK, 5, '°') },
+                { label: <>理論 <M>{'|\\operatorname{wrapCycles}(L\\alpha)|'}</M>(度)</>, value: fmt(theoryDeg, 5, '°') },
+                { label: <><M>{'e_{pair,digital}[k]'}</M></>, value: fmt(ePairK, 6, 'cyc') },
+              ],
+              answer: (
+                <>
+                  {isLookahead ? 'look-ahead 模式' : 'bug 模式'} 下 k={kIn}:staleness = {staleness},
+                  <M>{'e_{FB,abs}'}</M> = {fmt(eFbDegK, 4, '°')}(理論量值 {fmt(theoryDeg, 4, '°')}),
+                  <M>{'e_{pair,digital}'}</M> = {fmt(ePairK, 4, 'cyc')}
+                  {isLookahead ? '' : '(即使 latency 有 bug,pair check 仍抓不到)'}
+                </>
+              ),
+            };
+          }}
+        />
       </SectionExample>
 
       <SectionFigure

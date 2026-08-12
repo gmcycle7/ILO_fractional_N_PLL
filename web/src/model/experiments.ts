@@ -1,5 +1,5 @@
 /**
- * The 22 canonical numerical experiments.
+ * The 23 canonical numerical experiments.
  * Mirror of model/python/experiments.py — SAME ids and configs.
  *
  * Each entry: id, name_zh, name_en, description, config (single SimConfig)
@@ -408,6 +408,64 @@ export const EXPERIMENTS: Experiment[] = [
       'reachable set over N in [3,3.25] is {2,3,4} for mash11 AND mash111 ' +
       '(measured — not wider for mash111; 2 only at small alpha). ' +
       'e_pair_digital == 0 for all (mode D).',
+  },
+  {
+    id: 'exp23',
+    name_zh: 'PLL loop 與 injection 共跑',
+    name_en: 'PLL loop and injection co-simulation',
+    description:
+      'Behavioral type-II PI loop (kp=0.05, ki=0.005) at N=3.13, ' +
+      'sigma_vco_w=0.02 rad, Delta_f=250 MHz — chosen so ' +
+      '2*pi*Delta_f*T_ref = 0.3927 rad > K_inj=0.3, i.e. injection ALONE ' +
+      'is outside its sin lock range (limit ~191 MHz): (a) loop only (inj ' +
+      'none), (b) injection only (sin K=0.3), (c) both, (d) both + ' +
+      'route_inj 0.01-cycle static offset.',
+    configs: [
+      mk({
+        n_div: 3.13,
+        sigma_vco_w_rad: 0.02,
+        delta_f_hz: 250e6,
+        inj_model: 'none',
+        loop_mode: 'pi',
+      }),
+      mk({
+        n_div: 3.13,
+        sigma_vco_w_rad: 0.02,
+        delta_f_hz: 250e6,
+        inj_model: 'sin',
+        k_inj: 0.3,
+      }),
+      mk({
+        n_div: 3.13,
+        sigma_vco_w_rad: 0.02,
+        delta_f_hz: 250e6,
+        inj_model: 'sin',
+        k_inj: 0.3,
+        loop_mode: 'pi',
+      }),
+      mk({
+        n_div: 3.13,
+        sigma_vco_w_rad: 0.02,
+        delta_f_hz: 250e6,
+        inj_model: 'sin',
+        k_inj: 0.3,
+        loop_mode: 'pi',
+        route_inj_cycles: 0.01,
+      }),
+    ],
+    expected_result:
+      'All measured, tail = last 256 cycles, seed 12345. (a) loop only ' +
+      'locks despite the out-of-range detuning: mean pd_e 0.0013 rad -> 0, ' +
+      'u_loop mean -0.392 ~ -2*pi*Delta_f*T_ref = -0.3927, theta_plus rms ' +
+      '0.060 rad. (b) injection only slips (out of lock range): e_inj rms ' +
+      '1.82 rad. (c) both: loop extends the effective range (u_loop end ' +
+      '-0.3927, mean pd_e 0.0088 -> 0) and injection kills the per-cycle ' +
+      'jitter: theta_plus rms 0.019 rad, e_inj rms 0.030 rad (vs 0.063 ' +
+      'loop-only, 1.82 inj-only). (d) both + 0.01-cycle route offset: the ' +
+      'loop integrates the injection static offset into a VCO phase shift: ' +
+      'mean theta_plus -0.0134 rad ~ -K_inj*sin(2*pi*0.01) = -0.0188, mean ' +
+      'e_inj 0.071 ~ 2*pi*0.01 = 0.0628, u_loop end -0.3739 = ' +
+      '-2*pi*Delta_f*T_ref + K_inj*sin(2*pi*0.01).',
   },
 ];
 

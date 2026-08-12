@@ -26,6 +26,7 @@ import {
 import EChart from '../components/EChart';
 import EpistemicTag from '../components/EpistemicTag';
 import Callout from '../components/Callout';
+import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { M, MathBlock } from '../components/Math';
 import { ParamPanel, Slider, PresetButtons, SelectControl } from '../components/controls';
 import UnitSwitch, { useUnit } from '../components/UnitSwitch';
@@ -40,9 +41,14 @@ import {
   simulate,
   fromPartial,
   configTVcoS,
+  configG,
   wrapCycles,
   dtcLsbS,
   phaseLsbDeg,
+  qNearest,
+  qFloor,
+  pymod,
+  FS,
 } from '../model';
 import type { Quantizer, DtcModeName } from '../model';
 
@@ -476,6 +482,203 @@ export default function Chapter05() {
           做不到更好。injection 半邊(R_INJ = 170、+85 fs、pair = 0)見 Ch10。目前顯示單位下:
           e_FB_abs = {formatPhase(-0.0010625, unit, 80e-12)}。<EpistemicTag kind="EXACT" />
         </p>
+
+        <ExampleProblem
+          index={1}
+          tag="EXACT"
+          title="normalized vs fixed-time DTC 的 LSB 換算"
+          prompt={
+            <>
+              給定 <M>{'N'}</M>、<M>{'f_{ref}'}</M> 與 DTC 模式,算出 time LSB{' '}
+              <M>{'\\Delta t'}</M> 與 phase LSB。normalized 模式下{' '}
+              <M>{'\\Delta t = T_{vco}/256'}</M> 隨 <M>{'f_{vco}'}</M> 縮放,phase LSB 恆為
+              1.40625°;fixed-time 模式下 <M>{'\\Delta t'}</M> 固定,phase LSB 隨{' '}
+              <M>{'f_{vco}'}</M> 變。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.0, min: 2, max: 8, step: 0.001 },
+            {
+              key: 'fref',
+              label: <M>{'f_{ref}'}</M>,
+              def: 4,
+              min: 0.1,
+              max: 20,
+              step: 0.1,
+              unit: 'GHz',
+            },
+            {
+              key: 'mode',
+              label: <>模式(0=normalized, 1=fixed-time)</>,
+              def: 0,
+              min: 0,
+              max: 1,
+              step: 1,
+            },
+          ]}
+          compute={(v) => {
+            const dtcMode: DtcModeName = v.mode >= 0.5 ? 'fixed_time' : 'normalized';
+            const cfg = fromPartial({ n_div: v.N, f_ref_hz: v.fref * 1e9, dtc_mode: dtcMode });
+            const tVcoPs = configTVcoS(cfg) * 1e12;
+            const lsbFs = dtcLsbS(v.N, v.fref * 1e9, dtcMode) / FS;
+            const lsbDeg = phaseLsbDeg(256, v.N, v.fref * 1e9, dtcMode);
+            return {
+              steps: [
+                { label: <M>{'T_{vco} = 1/(Nf_{ref})'}</M>, value: fmt(tVcoPs, 6, 'ps') },
+                { label: <>DTC 模式</>, value: dtcMode },
+                { label: <>time LSB <M>{'\\Delta t'}</M></>, value: fmt(lsbFs, 6, 'fs') },
+                { label: <>phase LSB</>, value: fmt(lsbDeg, 6, '°') },
+              ],
+              answer: (
+                <>
+                  {dtcMode === 'normalized' ? 'normalized' : 'fixed-time'} 模式:1 LSB ={' '}
+                  {fmt(lsbFs, 6, 'fs')} = {fmt(lsbDeg, 6, '°')}
+                </>
+              ),
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={2}
+          tag="EXACT"
+          title="任意目標相位的 nearest 量化與 sub-LSB 誤差(MODEL_SPEC §9 通式)"
+          prompt={
+            <>
+              給定目標 fractional 相位 <M>{'u_{FB,ideal}'}</M>,量化成{' '}
+              <M>{'R_{FB} = \\operatorname{qNearest}(256\\,u_{FB,ideal})'}</M>,decode 出{' '}
+              <M>{'m_{FB}'}</M>、<M>{'c_{FB}'}</M>,再算實際相位{' '}
+              <M>{'u_{FB,actual} = R_{FB}/256'}</M> 與誤差{' '}
+              <M>{'e_{FB,abs} = \\operatorname{wrapCycles}(u_{actual} - u_{ideal})'}</M>。
+            </>
+          }
+          inputs={[
+            {
+              key: 'u',
+              label: <M>{'u_{FB,ideal}'}</M>,
+              def: 0.337,
+              min: 0,
+              max: 0.999,
+              step: 0.001,
+              unit: 'cyc',
+            },
+            { key: 'N', label: <M>{'N'}</M>, def: 3.125, min: 2, max: 8, step: 0.001 },
+            {
+              key: 'fref',
+              label: <M>{'f_{ref}'}</M>,
+              def: 4,
+              min: 0.1,
+              max: 20,
+              step: 0.1,
+              unit: 'GHz',
+            },
+          ]}
+          compute={(v) => {
+            const cfg = fromPartial({ n_div: v.N, f_ref_hz: v.fref * 1e9 });
+            const R = qNearest(v.u * 256);
+            const m = qFloor(R / 64);
+            const c = pymod(R, 64);
+            const uActual = R / 256;
+            const eAbs = wrapCycles(uActual - v.u);
+            const tVcoPs = configTVcoS(cfg) * 1e12;
+            const eFs = eAbs * tVcoPs * 1000;
+            const eDeg = eAbs * 360;
+            return {
+              steps: [
+                { label: <M>{'256\\,u_{FB,ideal}'}</M>, value: fmt(v.u * 256, 8) },
+                { label: <M>{'R_{FB} = \\operatorname{qNearest}(256\\,u_{FB,ideal})'}</M>, value: `${R} LSB` },
+                { label: <M>{'m_{FB} = \\lfloor R_{FB}/64 \\rfloor'}</M>, value: `${m}` },
+                { label: <M>{'c_{FB} = R_{FB} \\bmod 64'}</M>, value: `${c}` },
+                { label: <M>{'u_{FB,actual} = R_{FB}/256'}</M>, value: fmt(uActual, 8, 'cyc') },
+                {
+                  label: <M>{'e_{FB,abs} = \\operatorname{wrapCycles}(u_{actual} - u_{ideal})'}</M>,
+                  value: fmt(eAbs, 6, 'cyc'),
+                },
+              ],
+              answer: (
+                <>
+                  c_FB = {c}(PMUX {m}),誤差 = {fmt(eFs, 5, 'fs')} = {fmt(eDeg, 5, '°')}
+                </>
+              ),
+              warn:
+                Math.abs(eAbs) > 1 / 512 + 1e-12
+                  ? '超出 half-LSB(1/512 cyc)界線,請確認 quantizer 假設'
+                  : undefined,
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={3}
+          tag="EXACT"
+          title="fixed-time DTC 的 systematic scale error e_scale(c)"
+          prompt={
+            <>
+              fixed-time 模式下 <M>{'\\Delta t'}</M> 不隨 <M>{'T_{vco}'}</M> 縮放,於是每個 code
+              累積出 systematic scale error{' '}
+              <M>{'e_{scale}(c) = c\\left(\\dfrac{\\Delta t}{T_{vco}} - \\dfrac{1}{G}\\right)'}</M>
+              ,只有 <M>{'\\Delta t = T_{vco}/G'}</M> 那個頻率點才為零。
+            </>
+          }
+          inputs={[
+            { key: 'c', label: <M>{'c_{FB}'}</M>, def: 63, min: 0, max: 63, step: 1 },
+            { key: 'N', label: <M>{'N'}</M>, def: 3.01, min: 2, max: 8, step: 0.001 },
+            {
+              key: 'fref',
+              label: <M>{'f_{ref}'}</M>,
+              def: 4,
+              min: 0.1,
+              max: 20,
+              step: 0.1,
+              unit: 'GHz',
+            },
+            {
+              key: 'dt',
+              label: <M>{'\\Delta t'}</M>,
+              def: 312.5,
+              min: 100,
+              max: 600,
+              step: 0.1,
+              unit: 'fs',
+            },
+          ]}
+          compute={(v) => {
+            const cfg = fromPartial({
+              n_div: v.N,
+              f_ref_hz: v.fref * 1e9,
+              dtc_mode: 'fixed_time',
+              dtc_lsb_fs: v.dt,
+            });
+            const tVcoS = configTVcoS(cfg);
+            const G = configG(cfg);
+            const dtS = v.dt * FS;
+            const ratio = dtS / tVcoS;
+            const normLsb = 1 / G;
+            const eScaleCyc = v.c * (ratio - normLsb);
+            const eScaleFs = (eScaleCyc * tVcoS) / FS;
+            const tVcoPs = tVcoS * 1e12;
+            return {
+              steps: [
+                { label: <M>{'T_{vco}'}</M>, value: fmt(tVcoPs, 6, 'ps') },
+                { label: <M>{'\\Delta t / T_{vco}'}</M>, value: fmt(ratio, 8) },
+                { label: <>normalized LSB <M>{'1/G'}</M></>, value: fmt(normLsb, 8, 'cyc') },
+                {
+                  label: <M>{'e_{scale}(c) = c(\\Delta t/T_{vco} - 1/G)'}</M>,
+                  value: fmt(eScaleCyc, 8, 'cyc'),
+                },
+              ],
+              answer: (
+                <>
+                  <M>{'e_{scale}'}</M> = {fmt(eScaleFs, 6, 'fs')}(c = {v.c})
+                </>
+              ),
+              warn:
+                Math.abs(eScaleCyc) > 1 / 512
+                  ? 'e_scale 已超出 half-LSB 量化界線——這是 systematic 而非隨機誤差,見圖 #13'
+                  : undefined,
+            };
+          }}
+        />
       </SectionExample>
 
       <SectionFigure

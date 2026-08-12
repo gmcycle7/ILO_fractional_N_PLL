@@ -141,6 +141,24 @@ global value, re-initialized when the TopBar changes N, and written back on
 local change. Chapters without an N control ignore it. SSR-safe (render
 smoke tests run without a provider and fall back to the default value).
 
+The full preset catalogue is the **grouped** export (flat `N_DIV_PRESETS`
+stays unchanged for existing consumers — Chapter21/Chapter22 preset rows):
+
+```ts
+interface NDivPreset      { n: number; label: string; hint: string }
+interface NDivPresetGroup { label: string; values: NDivPreset[] }
+N_DIV_PRESET_GROUPS: NDivPresetGroup[]   // 基本 / sub-LSB 階梯 / 特殊
+N_DIV_ALL_PRESETS:   NDivPreset[]        // flattened, 13 entries
+findNDivPreset(n):   NDivPreset | undefined   // exact float64 match
+```
+
+Group 0 (`基本`) mirrors `N_DIV_PRESETS` exactly and stays the five TopBar
+buttons; `N_DIV_PRESET_GROUPS.slice(1)` (sub-LSB 階梯 F1–F4, 特殊 F5–F8) sits
+behind one compact `<select>` with `<optgroup>`s so the bar stays uncluttered.
+`hint` is the `title` tooltip (α·G, period P, spur spacing, story). Values and
+periods are contracted in `MODEL_SPEC.md` §1.1 and re-derived numerically by
+`src/lib/globalParams.test.ts`.
+
 ## 5. Component reference (import paths relative to `src/chapters/`)
 
 ### EChart — `../components/EChart` (default export)
@@ -219,6 +237,128 @@ Fixed 11-part structure (order binding; Figure/Code may repeat):
 | 11 | `SectionLimitation` | 模型限制 |
 
 All others take `{ children }` only.
+
+### ExampleProblem — `../components/ExampleProblem` (default export, named `fmt`)
+
+The shared **interactive worked-example** widget. Every chapter puts **three**
+of them inside its `SectionExample` (數值例子): the reader edits the given
+quantities and watches the intermediate values and the final answer recompute.
+The chapter supplies the statement, the editable inputs and ONE pure `compute`;
+the component owns all state, validation, formatting and layout.
+
+```ts
+interface ExampleInput {
+  key: string;          // compute receives it as v[key]; also used in warnings
+  label: ReactNode;     // may contain <M> math
+  def: number;          // default, restored by 重設
+  min?: number;         // inclusive; below it -> out-of-range warning
+  max?: number;         // inclusive
+  step?: number;        // spinner step (typed values are NOT snapped)
+  unit?: string;        // shown after the field: 'cyc' | 'GHz' | 'ps' | …
+}
+interface ExampleStep { label: ReactNode; value: string }   // value: use fmt()
+interface ExampleResult {
+  steps: ExampleStep[];
+  answer: ReactNode;
+  warn?: string;        // caveat for THIS input point (boundary, out of validity)
+}
+interface ExampleProblemProps {
+  title: string;                     // short zh-Hant title
+  prompt: ReactNode;                 // zh-Hant statement, may contain <M> math
+  inputs: ExampleInput[];
+  compute: (v: Record<string, number>) => ExampleResult;   // PURE
+  tag?: 'EXACT' | 'APPROX' | 'EXPERIMENT';
+  index?: number;                    // badge number (1..3); omit -> 例
+  defaultOpen?: boolean;             // start with 解題步驟 expanded (default false)
+}
+
+fmt(value: number, digits = 6, unit?: string): string   // named export
+```
+
+Rendering: numbered card header (badge + title + `EpistemicTag`) → prompt →
+editable number inputs (defaults prefilled) → warning line (if any) →
+`解題步驟` toggle + `重設` → collapsible numbered step list → highlighted
+answer box.
+
+Binding rules:
+
+- `compute` must be **pure** and read every number from `v` — it runs on every
+  keystroke. It must get its math from `../model` (ARCHITECTURE §6); never
+  re-implement wrap/quantizer/DSM math inside it.
+- Validation is the component's job, not the chapter's: a blank/NaN field or a
+  value outside `[min, max]` shows `輸入無效:…`, marks the field, and
+  **suppresses** steps + answer (`compute` is not called). A `compute` that
+  throws becomes `計算失敗:…` instead of unmounting the chapter.
+- `fmt` (and `../lib/format`) are **display only** — never feed a formatted
+  string back into a computation. `digits` is *significant* digits, trailing
+  zeros stripped, non-finite renders as `NaN` / `∞` / `−∞`, and the count is
+  clamped to toPrecision's legal 1..21 so it cannot throw.
+- SSR-safe: pure render from props + state, no effects, no `window`/`document`.
+  Keep it that way — `chapters/__tests__/render.smoke.test.tsx` renders every
+  chapter with `renderToString`.
+- Styling: `.example-problem*` classes in `index.css` (theme vars only). The
+  action buttons are hidden in print; the card avoids page breaks.
+
+Full usage example (wired to the model — `wrap01`, `qNearest`, `configTVcoS`;
+with the defaults below the card shows `s = 15.65 cyc`, `x = 0.65 cyc`,
+`Gx = 166.4`, `q = 166`, `T_vco = 79.872 ps`, answer `51.792 ps`):
+
+```tsx
+import ExampleProblem, { fmt } from '../components/ExampleProblem';
+import { M } from '../components/Math';
+import { SectionExample } from '../components/ChapterShell';
+import { fromPartial, configG, configTVcoS, wrap01, qNearest } from '../model';
+
+<SectionExample>
+  <ExampleProblem
+    index={1}
+    tag="EXACT"
+    title="第 k 拍的 fractional phase 與最近的 fine code"
+    prompt={
+      <>
+        取 <M>{'N'}</M>、起始相位 <M>{'s_0'}</M> 與拍數 <M>{'k'}</M>,先算絕對相位{' '}
+        <M>{'s = s_0 + kN'}</M>,再取 <M>{'x_{ideal}[k] = \\operatorname{wrap01}(s)'}</M>,
+        最後量化成 <M>{'G'}</M> 階 fine code{' '}
+        <M>{'q = \\operatorname{qNearest}(G\\,x)'}</M> 並換算成時間。
+      </>
+    }
+    inputs={[
+      { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 2, max: 8, step: 0.001 },
+      { key: 's0', label: <M>{'s_0'}</M>, def: 0, min: -100, max: 100, step: 0.01, unit: 'cyc' },
+      { key: 'k', label: <M>{'k'}</M>, def: 5, min: 0, max: 1023, step: 1 },
+      { key: 'fref', label: <M>{'f_{ref}'}</M>, def: 4, min: 0.1, max: 20, step: 0.1, unit: 'GHz' },
+    ]}
+    compute={(v) => {
+      const cfg = fromPartial({ n_div: v.N, f_ref_hz: v.fref * 1e9 });
+      const G = configG(cfg);                       // 256 fine steps per T_vco
+      const tVcoPs = configTVcoS(cfg) * 1e12;
+      const s = v.s0 + v.k * v.N;
+      const x = wrap01(s);                          // MODEL_SPEC §2/§3
+      const q = qNearest(G * x);                    // half-up, NEVER Math.round
+      const resid = G * x - q;                      // quantization residue, LSB
+      return {
+        steps: [
+          { label: <><M>{'s = s_0 + kN'}</M></>, value: fmt(s, 8, 'cyc') },
+          { label: <><M>{'x = \\operatorname{wrap01}(s)'}</M></>, value: fmt(x, 6, 'cyc') },
+          { label: <>fine code 之前的實數 <M>{'G\\,x'}</M></>, value: fmt(G * x, 8) },
+          { label: <><M>{'q = \\operatorname{qNearest}(G x)'}</M></>, value: `${q} / ${G} LSB` },
+          { label: <><M>{'T_{vco} = 1/(N f_{ref})'}</M></>, value: fmt(tVcoPs, 5, 'ps') },
+        ],
+        answer: (
+          <>
+            <M>{'x_{ideal}[k]'}</M> = {fmt(x, 6, 'cyc')},量化後{' '}
+            <M>{'q'}</M> = {q} LSB = {fmt((q / G) * tVcoPs, 5, 'ps')}
+          </>
+        ),
+        warn:
+          Math.abs(resid) > 0.499
+            ? `落在量化邊界(殘差 ${fmt(resid, 3)} LSB),±1 LSB 都算合理`
+            : undefined,
+      };
+    }}
+  />
+</SectionExample>;
+```
 
 ### EpistemicTag — `../components/EpistemicTag` (default export)
 
@@ -479,7 +619,9 @@ Prefer existing classes; if a chapter needs custom styling, add classes to
 - Widgets: `.callout(-note|-warn|-honesty)`, `.epistemic-tag`,
   `.codeblock`, `.linebyline(-row|-code|-explain)`, `.control(-slider|…)`,
   `.param-panel`, `.unit-switch`, `.debug-table`, `.data-table`,
-  `.phase-wheel`, `.edge-timeline`, `.echart`
+  `.phase-wheel`, `.edge-timeline`, `.echart`,
+  `.example-problem(-header|-num|-title|-prompt|-inputs|-input|-warn|
+  -actions|-steps|-step-label|-step-value|-answer)`
 - States: `.nav-item-active`, `.sidebar-open`, `.sim-status-(idle|running|done)`
 
 Rules: no gradients; no new accent colors; wide content (tables/plots) must

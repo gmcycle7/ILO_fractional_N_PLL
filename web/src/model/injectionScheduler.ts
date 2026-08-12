@@ -31,6 +31,11 @@
  * actuator is absent — R_INJ = 0, tap j = 0, c_INJ = 0 on every cycle
  * (regardless of arch_mode; no 'dsm_inj' draws are consumed).
  *
+ * Actuator mode 'qnc' (spec section 7.2): the injection side is ALWAYS the
+ * modular reverse of the cancellation-DTC code,
+ * R_INJ = (R_zero - R_FB) mod G, regardless of arch_mode (no 'dsm_inj'
+ * draws are consumed); tap/DTC decode proceeds as usual.
+ *
  * Mappings (input digital code R_INJ; target u_target = R_INJ/G):
  *     naive      : j = floor(R/32), c = R mod 32   (lower half of DTC range)
  *     nearest    : argmin over j in 0..7, c in 0..63 of
@@ -131,8 +136,10 @@ export function runInjection(
   }
 
   // --- R_INJ per architecture mode ---
+  // ('qnc', spec section 7.2: always the modular reverse of the
+  // cancellation-DTC code, regardless of arch_mode)
   const rInj = new Float64Array(n);
-  if (cfg.arch_mode === 'D') {
+  if (cfg.arch_mode === 'D' || cfg.actuator_mode === 'qnc') {
     for (let k = 0; k < n; k++) {
       rInj[k] = pymod(cfg.r_zero - rFb[k], g);
     }

@@ -8,13 +8,15 @@
 (comparison presets additionally write timeseries_<i>.csv / psd_<i>.csv per
 variant; index 0 also gets the unsuffixed names).
 
---emit-vectors writes the 14 canonical JSON vectors of MODEL_SPEC section 18
+--emit-vectors writes the 15 canonical JSON vectors of MODEL_SPEC section 18
 (512 cycles each, full float precision) plus per-cycle command CSVs under
 DIR/csv/ with columns k,t_ref_ns,n_int,m_FB,c_FB,j_INJ,c_INJ,R_FB,R_INJ,seq_id.
 
 Schema stability: the 12 schema-v1 vectors keep their original column list
 (byte-identical files); the schema-v2 vectors (n3p130_mash111,
-n3p130_dsm_only_gated) additionally carry the 'inj_fired' int column.
+n3p130_dsm_only_gated) additionally carry the 'inj_fired' int column; the
+schema-v4 vector (n3p130_loop_both) additionally carries the 'u_loop' and
+'pd_e' float columns (MODEL_SPEC section 14.1).
 """
 
 import argparse
@@ -50,6 +52,10 @@ VECTOR_CONFIGS = {
         n_div=3.13, quantizer="ef1", actuator_mode="dsm_only",
         inj_gate_mode="threshold", inj_model="sin", k_inj=0.4,
         delta_f_hz=1e6, sigma_vco_w_rad=0.02),
+    # schema-v4 vector (additionally carries 'u_loop' and 'pd_e'; exp23c)
+    "n3p130_loop_both": SimConfig(
+        n_div=3.13, inj_model="sin", k_inj=0.3, delta_f_hz=250e6,
+        sigma_vco_w_rad=0.02, loop_mode="pi"),
 }
 
 #: columns exported in the JSON vectors ("e_pair" == e_pair_digital)
@@ -66,6 +72,10 @@ VECTOR_COLUMNS = [
 VECTOR_COLUMNS_V2 = VECTOR_COLUMNS + ["inj_fired"]
 _V2_VECTORS = {"n3p130_mash111", "n3p130_dsm_only_gated"}
 
+#: the schema-v4 vector additionally exports the loop columns (section 14.1)
+VECTOR_COLUMNS_V4 = VECTOR_COLUMNS_V2 + ["u_loop", "pd_e"]
+_V4_VECTORS = {"n3p130_loop_both"}
+
 _VECTOR_INT_COLS = {"k", "A_FB", "R_FB", "m_FB", "c_FB", "n_int",
                     "R_INJ", "j_INJ", "c_INJ", "inj_fired", "seq_id"}
 
@@ -75,7 +85,12 @@ CSV_COMMAND_COLUMNS = ["k", "t_ref_ns", "n_int", "m_FB", "c_FB", "j_INJ",
 
 def _vector_dict(name: str, cfg: SimConfig) -> dict:
     res = simulate(cfg)
-    columns = VECTOR_COLUMNS_V2 if name in _V2_VECTORS else VECTOR_COLUMNS
+    if name in _V4_VECTORS:
+        columns = VECTOR_COLUMNS_V4
+    elif name in _V2_VECTORS:
+        columns = VECTOR_COLUMNS_V2
+    else:
+        columns = VECTOR_COLUMNS
     data = []
     n = cfg.n_cycles
     for i in range(n):
@@ -118,7 +133,7 @@ def _write_command_csv(path: str, res) -> None:
 
 
 def emit_vectors(out_dir: str) -> list:
-    """Write the 14 canonical JSON vectors + command CSVs. Returns paths."""
+    """Write the 15 canonical JSON vectors + command CSVs. Returns paths."""
     os.makedirs(out_dir, exist_ok=True)
     csv_dir = os.path.join(out_dir, "csv")
     os.makedirs(csv_dir, exist_ok=True)
@@ -196,7 +211,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default="results",
                    help="output root for --preset (default: results)")
     p.add_argument("--emit-vectors", metavar="DIR",
-                   help="write the 14 canonical JSON test vectors + CSVs")
+                   help="write the 15 canonical JSON test vectors + CSVs")
     return p
 
 

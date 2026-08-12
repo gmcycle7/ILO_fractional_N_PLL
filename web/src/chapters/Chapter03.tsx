@@ -27,6 +27,7 @@ import {
 import EChart from '../components/EChart';
 import EpistemicTag from '../components/EpistemicTag';
 import Callout from '../components/Callout';
+import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { M, MathBlock } from '../components/Math';
 import { ParamPanel, Slider, PresetButtons } from '../components/controls';
 import UnitSwitch, { useUnit } from '../components/UnitSwitch';
@@ -37,7 +38,18 @@ import { useChartTheme } from '../lib/useChartTheme';
 import { formatPhase, phaseAxisLabel, makePhaseTickFormatter, trimNumber } from '../lib/format';
 import { useSimStatus } from '../SimStatusContext';
 import { chapterById } from './index';
-import { simulate, fromPartial, configTVcoS, configAlpha, qFloor } from '../model';
+import {
+  simulate,
+  fromPartial,
+  configTVcoS,
+  configAlpha,
+  configG,
+  qFloor,
+  wrap01,
+  wrapCycles,
+  qNearest,
+  cyclesToDegrees,
+} from '../model';
 
 const meta = chapterById(3)!;
 
@@ -397,6 +409,171 @@ export default function Chapter03() {
           {formatPhase(alphaEff, unit, tVco)}(= <M>{'\\alpha'}</M>)。
           <EpistemicTag kind="EXACT" />
         </p>
+
+        <ExampleProblem
+          index={1}
+          tag="EXACT"
+          title="第 k 拍的絕對相位與 fractional phase"
+          prompt={
+            <>
+              取 divide ratio <M>{'N'}</M>、起始相位 <M>{'s_0'}</M> 與拍數 <M>{'k'}</M>,先用
+              乘法算絕對相位 <M>{'s_{ideal}[k] = s_0 + kN'}</M>,再取{' '}
+              <M>{'x_{ideal}[k] = \\operatorname{wrap01}(s_{ideal}[k])'}</M> 得到 fractional
+              phase;整數部分 <M>{'\\lfloor s_{ideal}[k] \\rfloor'}</M> 就是到第 k 拍為止已消化的
+              完整 VCO cycle 數。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 2, max: 8, step: 0.001 },
+            {
+              key: 's0',
+              label: <M>{'s_0'}</M>,
+              def: 0,
+              min: -50,
+              max: 50,
+              step: 0.01,
+              unit: 'cyc',
+            },
+            { key: 'k', label: <M>{'k'}</M>, def: 8, min: 0, max: 1023, step: 1 },
+          ]}
+          compute={(v) => {
+            const s = v.s0 + v.k * v.N;
+            const x = wrap01(s);
+            const iFull = qFloor(s);
+            return {
+              steps: [
+                {
+                  label: <M>{'s_{ideal}[k] = s_0 + kN'}</M>,
+                  value: fmt(s, 8, 'cyc'),
+                },
+                {
+                  label: <>已消化整數 VCO cycles <M>{'\\lfloor s_{ideal}[k] \\rfloor'}</M></>,
+                  value: `${iFull} cyc`,
+                },
+                {
+                  label: <M>{'x_{ideal}[k] = \\operatorname{wrap01}(s_{ideal}[k])'}</M>,
+                  value: fmt(x, 6, 'cyc'),
+                },
+              ],
+              answer: (
+                <>
+                  <M>{'x_{ideal}[k]'}</M> = {fmt(x, 6, 'cyc')} = {fmt(cyclesToDegrees(x), 6, '°')}
+                </>
+              ),
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={2}
+          tag="EXACT"
+          title="驗證 α = p/q 的軌跡在 q 拍後回到原點"
+          prompt={
+            <>
+              若 <M>{'N = n_0 + p/q'}</M>(<M>{'p, q'}</M> 不必為最簡分數),則{' '}
+              <M>{'s_{ideal}[q] = qN = qn_0 + p'}</M> 恆為整數,所以{' '}
+              <M>{'x_{ideal}[q] = \\operatorname{wrap01}(qN)'}</M> 必回到 0——這就是 Ch3 週期性
+              論述(<M>{'0.13 = 13/100 \\Rightarrow q = 100'}</M> 等)的通式版本。
+            </>
+          }
+          inputs={[
+            { key: 'n0', label: <M>{'n_0'}</M>, def: 3, min: 2, max: 7, step: 1 },
+            { key: 'p', label: <M>{'p'}</M>, def: 13, min: 0, max: 999, step: 1 },
+            { key: 'q', label: <M>{'q'}</M>, def: 100, min: 1, max: 999, step: 1 },
+          ]}
+          compute={(v) => {
+            const N = v.n0 + v.p / v.q;
+            const sAtQ = v.q * N; // s0 = 0
+            const xAtQ = wrap01(sAtQ);
+            const residual = wrapCycles(sAtQ); // signed distance to nearest integer
+            const periodic = Math.abs(residual) < 1e-9;
+            return {
+              steps: [
+                { label: <>還原 <M>{'N = n_0 + p/q'}</M></>, value: fmt(N, 8) },
+                {
+                  label: <M>{'s_{ideal}[q] = qN'}</M>,
+                  value: fmt(sAtQ, 10, 'cyc'),
+                },
+                {
+                  label: <M>{'x_{ideal}[q] = \\operatorname{wrap01}(qN)'}</M>,
+                  value: fmt(xAtQ, 6, 'cyc'),
+                },
+              ],
+              answer: (
+                <>
+                  q = {v.q} 拍後 <M>{'x_{ideal}[q]'}</M> = {fmt(xAtQ, 6, 'cyc')}(週期性
+                  {periodic ? '成立' : '不成立'})
+                </>
+              ),
+              warn: periodic
+                ? undefined
+                : `殘差 ${fmt(residual, 3)} cyc 超出浮點誤差容忍——請檢查 p, q 是否過大`,
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={3}
+          tag="EXACT"
+          title="on-grid / off-grid 判定與最近 fine code 的時間殘差"
+          prompt={
+            <>
+              256 格 fine grid 上,一拍位移是 <M>{'\\alpha G'}</M> 個 LSB。用{' '}
+              <M>{'q = \\operatorname{qNearest}(\\alpha G)'}</M> 找到最近可表示的 code,殘差{' '}
+              <M>{'\\alpha G - q'}</M> 換算成時間就是 actuator 表示不了的那一小段——這正是
+              Ch4–Ch5 quantizer 要處理的量。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 2, max: 8, step: 0.001 },
+            {
+              key: 'fref',
+              label: <M>{'f_{ref}'}</M>,
+              def: 4,
+              min: 0.1,
+              max: 20,
+              step: 0.1,
+              unit: 'GHz',
+            },
+          ]}
+          compute={(v) => {
+            const cfg = fromPartial({ n_div: v.N, f_ref_hz: v.fref * 1e9 });
+            const alpha = configAlpha(cfg);
+            const G = configG(cfg);
+            const alphaG = alpha * G;
+            const q = qNearest(alphaG);
+            const resid = alphaG - q;
+            const onGrid = Math.abs(resid) < 1e-9;
+            const tVcoPs = configTVcoS(cfg) * 1e12;
+            const residTimeFs = (resid / G) * tVcoPs * 1000;
+            return {
+              steps: [
+                { label: <M>{'\\alpha = N - \\lfloor N \\rfloor'}</M>, value: fmt(alpha, 8, 'cyc') },
+                {
+                  label: <>fine grid 格數 <M>{'G = n_{pmux} \\cdot 2^{b_{dtc}}'}</M></>,
+                  value: `${G} LSB/cyc`,
+                },
+                { label: <M>{'\\alpha G'}</M>, value: fmt(alphaG, 8, 'LSB') },
+                {
+                  label: <>最近可表示 code <M>{'q = \\operatorname{qNearest}(\\alpha G)'}</M></>,
+                  value: `${q} LSB`,
+                },
+                { label: <M>{'\\alpha G - q'}</M>, value: fmt(resid, 6, 'LSB') },
+                { label: <M>{'T_{vco} = 1/(Nf_{ref})'}</M>, value: fmt(tVcoPs, 6, 'ps') },
+              ],
+              answer: (
+                <>
+                  {onGrid ? 'on-grid(可精確表示)' : 'off-grid'}:殘差 = {fmt(resid, 4, 'LSB')} ={' '}
+                  {fmt(residTimeFs, 5, 'fs')}
+                </>
+              ),
+              warn:
+                !onGrid && Math.abs(resid) > 0.499
+                  ? '殘差接近量化邊界(半格),四捨五入結果可能對調'
+                  : undefined,
+            };
+          }}
+        />
       </SectionExample>
 
       <SectionFigure

@@ -1,5 +1,7 @@
 # Fractional-N PLL Reverse Edge Injection Behavioral Model
 
+[![CI](https://github.com/gmcycle7/ILO_fractional_N_PLL/actions/workflows/ci.yml/badge.svg)](https://github.com/gmcycle7/ILO_fractional_N_PLL/actions/workflows/ci.yml)
+
 一個工程等級、可執行、可驗證、可互動學習的 behavioral modeling 專案,研究
 **fractional-N PLL 中 reverse edge injection 的排程、量化與注入動力學**:
 
@@ -85,6 +87,20 @@ pytest
 cd web && npm test
 ```
 
+## CI
+
+`.github/workflows/ci.yml` 在 push 到 `main` 與每個 pull request 上自動執行:
+
+- **test**:`pytest tests/`(Python golden model)、`web/` 下的
+  `npm ci` → `tsc --noEmit` → `npm test` → `npm run build`,並上傳
+  `web/dist` 為 build artifact。
+- **deploy**(僅 push 到 `main` 時,需 `test` 先通過):下載
+  `web/dist`、補上 `.nojekyll`,再用 `peaceiris/actions-gh-pages`
+  發布到 `gh-pages` branch。
+
+因此 push 到 `main` 會自動部署網站到 GitHub Pages,**不再需要手動執行
+`npx gh-pages`**。
+
 ## 啟動網站
 
 ```bash
@@ -100,6 +116,19 @@ DSM state 議題、sub-LSB、latency look-ahead、injection dynamics、mismatch�
 spur/PN 分析、22 個一鍵 comparison experiments 與 design conclusions,到
 PD-input 誤差逐級解析與 DSM 殘餘誤差的失鎖邊界分析。
 所有模擬直接在 browser 端執行(TypeScript mirror model),不依賴任何 server。
+
+TopBar 的全站 `N` 控制提供 13 個 preset,分成三組(完整表格見
+`MODEL_SPEC.md` §1.1;`P` = DTC grid 上量化誤差序列的週期,
+spur 間距 = `f_ref / P`):
+
+- **基本**(5 個按鈕):`3.0, 3.125, 3.13, 3.1375, 3.25`
+- **sub-LSB 階梯**:`3.126953125`(`alpha*G=32.5` 半 LSB tie,P=2 → 2 GHz Nyquist tone)、
+  `3.1259765625`(0.25 LSB,P=4 → 1 GHz)、`3.125390625`(0.1 LSB,P=10 → 400 MHz)、
+  `3.1250390625`(0.01 LSB,P=100 → 40 MHz close-in spur)
+- **特殊**:`3.2`(integer/PMUX/DTC 三層 grid 的 P 都是 5 → 800 MHz)、
+  `3.22265625`(12.890625 GHz = 25.78125 Gbps / 2,`alpha*G=57` on-grid)、
+  `3.001`(near-integer,DSM `n_int=2` regime,P=125 → 32 MHz)、
+  `3.1545084971874737`(`alpha = 0.25/phi`,quasi-periodic、無離散 spur)
 
 ## 輸出檔案
 

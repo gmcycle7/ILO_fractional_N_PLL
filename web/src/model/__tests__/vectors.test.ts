@@ -70,11 +70,13 @@ const files = readdirSync(VECTOR_DIR)
   .sort();
 
 describe('Python golden test vectors (Test 9)', () => {
-  it('finds the 14 canonical vectors', () => {
-    expect(files.length).toBe(14);
+  it('finds the 15 canonical vectors', () => {
+    expect(files.length).toBe(15);
     // the two schema-v2 vectors are present and carry inj_fired
     expect(files).toContain('n3p130_mash111.json');
     expect(files).toContain('n3p130_dsm_only_gated.json');
+    // the schema-v4 vector carries u_loop / pd_e (loop co-simulation)
+    expect(files).toContain('n3p130_loop_both.json');
   });
 
   for (const file of files) {

@@ -38,6 +38,7 @@ export type {
   InjModel,
   ActuatorMode,
   InjGateMode,
+  LoopMode,
 } from './config';
 export {
   defaultConfig,
@@ -74,7 +75,7 @@ export { tapActual, pmuxActual, tapTable, pmuxTable } from './tapModel';
 
 // schedulers (sections 4-8)
 export type { FeedbackResult } from './feedbackScheduler';
-export { runFeedback, uFbAnalog } from './feedbackScheduler';
+export { runFeedback, uFbAnalog, lmsQncStep } from './feedbackScheduler';
 export type { InjectionResult } from './injectionScheduler';
 export { uInjIdeal, runInjection, ePair } from './injectionScheduler';
 
@@ -108,7 +109,7 @@ export {
 export type { Decomposition } from './errorDecomposition';
 export { decompose } from './errorDecomposition';
 
-// experiments / presets (the 22 canonical numerical experiments)
+// experiments / presets (the 23 canonical numerical experiments)
 export type { Experiment } from './experiments';
 export { EXPERIMENTS, PRESETS, getPreset, presetConfigs } from './experiments';
 

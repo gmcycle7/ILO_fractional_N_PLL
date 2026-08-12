@@ -19,7 +19,7 @@ import numpy as np
 from .dsm_first_order import ErrorFeedbackFirstOrder
 from .mash11 import Mash11
 from .mash111 import Mash111
-from .phase_math import wrap_cycles_arr
+from .phase_math import q_nearest, wrap01, wrap_cycles_arr
 
 
 class _Floor:
@@ -68,14 +68,23 @@ def run_feedback(cfg, a_ideal: np.ndarray, s_ideal: np.ndarray,
     Optional triangular dither (spec section 6 item 7):
         u' = u + d_amp * (U1 + U2 - 1),  U from the 'dither_fb' stream
     (d_amp is in quantizer-LSB units: 1 fine LSB in 'full' actuator mode,
-    1 VCO cycle in 'dsm_only').
+    1 VCO cycle in 'dsm_only' and 'qnc').
 
-    Actuator modes (spec section 7.1):
+    Actuator modes (spec sections 7.1, 7.2):
         full     : A_FB = Q(A_ideal)          (fine 1/G-cycle quantization)
         dsm_only : A_FB = Q(A_ideal / G) * G  (classic divider-modulating DSM;
                    quantizer operates at INTEGER-CYCLE granularity, so
                    R_FB = m_FB = c_FB = 0 always; dsm_out is the integer
                    cycle count Q(A_ideal / G))
+        qnc      : divider quantizes at INTEGER-CYCLE granularity exactly as
+                   in dsm_only (y = Q(A_ideal / G)); a cancellation DTC is
+                   fed the accumulated sub-cycle residue
+                       r[k]    = s_ideal[k] - y[k]
+                       code[k] = clamp(qNearest(wrap01(r[k]) * G * qnc_gain),
+                                       0, G - 1)
+                       A_FB[k] = y[k] * G + code[k]
+                   so R_FB = code (decoded to m/c as usual); dsm_out is
+                   still the integer cycle count y.
 
     Returns computed-domain (pre-latency) arrays; assertions per section 4.
     """
@@ -84,6 +93,8 @@ def run_feedback(cfg, a_ideal: np.ndarray, s_ideal: np.ndarray,
     n = len(a_ideal)
     q = make_quantizer(cfg.quantizer)
     dsm_only = cfg.actuator_mode == "dsm_only"
+    qnc = cfg.actuator_mode == "qnc"
+    integer_cycle = dsm_only or qnc
 
     a_fb = np.empty(n, dtype=np.int64)
     dsm_state = np.empty(n, dtype=np.float64)
@@ -91,11 +102,20 @@ def run_feedback(cfg, a_ideal: np.ndarray, s_ideal: np.ndarray,
 
     use_dither = cfg.dither_amp_lsb > 0.0 and dither_stream is not None
     for k in range(n):
-        u = float(a_ideal[k]) / g if dsm_only else float(a_ideal[k])
+        u = float(a_ideal[k]) / g if integer_cycle else float(a_ideal[k])
         if use_dither:
             u += cfg.dither_amp_lsb * (dither_stream.next() + dither_stream.next() - 1.0)
         y = q.quantize(u)
-        a_fb[k] = y * g if dsm_only else y
+        if qnc:
+            r = float(s_ideal[k]) - y  # accumulated sub-cycle residue (cycles)
+            code = q_nearest(wrap01(r) * g * cfg.qnc_gain)
+            if code < 0:
+                code = 0
+            elif code > g - 1:
+                code = g - 1
+            a_fb[k] = y * g + code
+        else:
+            a_fb[k] = y * g if dsm_only else y
         dsm_out[k] = y
         dsm_state[k] = q.state
 
@@ -140,3 +160,16 @@ def u_fb_analog(cfg, m_fb: np.ndarray, c_fb: np.ndarray, dtc_fb, pmux_tbl) -> np
     u_FB_analog = pmux_actual(m) + dtc_fb_actual(c) + route_FB
     """
     return pmux_tbl[m_fb] + dtc_fb.delay_cycles(c_fb) + cfg.route_fb_cycles
+
+
+def lms_qnc_step(gain: float, mu: float, e: float, r: float) -> float:
+    """One LMS adaptation step for the QNC cancellation-DTC gain
+    (spec section 7.2; pure and deterministic, used by the Ch11 LMS demo):
+
+        gain' = gain - mu * e * r
+
+    e is the observed timing error (cycles), r the DTC-commanded residue.
+    Evaluation order is left-to-right ((mu * e) * r) in both languages so the
+    float64 result is bit-identical with the TS mirror ``lmsQncStep``.
+    """
+    return gain - mu * e * r

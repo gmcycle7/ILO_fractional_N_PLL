@@ -17,7 +17,7 @@
 import type { SimConfig } from './config';
 import { configG } from './config';
 import type { DTCModel } from './dtcModel';
-import { wrapCycles, pymod } from './phaseMath';
+import { qNearest, wrap01, wrapCycles, pymod } from './phaseMath';
 import { makeQuantizer } from './quantizers';
 import type { Mulberry32 } from './rng';
 
@@ -41,14 +41,23 @@ export interface FeedbackResult {
  * Optional triangular dither (spec section 6 item 7):
  *     u' = u + d_amp * (U1 + U2 - 1),  U from the 'dither_fb' stream
  * (d_amp is in quantizer-LSB units: 1 fine LSB in 'full' actuator mode,
- * 1 VCO cycle in 'dsm_only').
+ * 1 VCO cycle in 'dsm_only' and 'qnc').
  *
- * Actuator modes (spec section 7.1):
+ * Actuator modes (spec sections 7.1, 7.2):
  *     full     : A_FB = Q(A_ideal)          (fine 1/G-cycle quantization)
  *     dsm_only : A_FB = Q(A_ideal / G) * G  (classic divider-modulating DSM;
  *                quantizer operates at INTEGER-CYCLE granularity, so
  *                R_FB = m_FB = c_FB = 0 always; dsm_out is the integer
  *                cycle count Q(A_ideal / G))
+ *     qnc      : divider quantizes at INTEGER-CYCLE granularity exactly as
+ *                in dsm_only (y = Q(A_ideal / G)); a cancellation DTC is
+ *                fed the accumulated sub-cycle residue
+ *                    r[k]    = s_ideal[k] - y[k]
+ *                    code[k] = clamp(qNearest(wrap01(r[k]) * G * qnc_gain),
+ *                                    0, G - 1)
+ *                    A_FB[k] = y[k] * G + code[k]
+ *                so R_FB = code (decoded to m/c as usual); dsm_out is
+ *                still the integer cycle count y.
  *
  * Returns computed-domain (pre-latency) arrays; assertions per section 4.
  */
@@ -63,6 +72,8 @@ export function runFeedback(
   const n = aIdealArr.length;
   const q = makeQuantizer(cfg.quantizer);
   const dsmOnly = cfg.actuator_mode === 'dsm_only';
+  const qnc = cfg.actuator_mode === 'qnc';
+  const integerCycle = dsmOnly || qnc;
 
   const aFb = new Float64Array(n);
   const dsmState = new Float64Array(n);
@@ -70,12 +81,23 @@ export function runFeedback(
 
   const useDither = cfg.dither_amp_lsb > 0.0 && ditherStream !== null;
   for (let k = 0; k < n; k++) {
-    let u = dsmOnly ? aIdealArr[k] / g : aIdealArr[k];
+    let u = integerCycle ? aIdealArr[k] / g : aIdealArr[k];
     if (useDither && ditherStream !== null) {
       u += cfg.dither_amp_lsb * (ditherStream.next() + ditherStream.next() - 1.0);
     }
     const y = q.quantize(u);
-    aFb[k] = dsmOnly ? y * g : y;
+    if (qnc) {
+      const r = sIdealArr[k] - y; // accumulated sub-cycle residue (cycles)
+      let code = qNearest(wrap01(r) * g * cfg.qnc_gain);
+      if (code < 0) {
+        code = 0;
+      } else if (code > g - 1) {
+        code = g - 1;
+      }
+      aFb[k] = y * g + code;
+    } else {
+      aFb[k] = dsmOnly ? y * g : y;
+    }
     dsmOut[k] = y;
     dsmState[k] = q.state;
   }
@@ -154,4 +176,18 @@ export function uFbAnalog(
     out[k] = pmuxTbl[mFb[k]] + dtcFb.delayCycles(cFb[k]) + cfg.route_fb_cycles;
   }
   return out;
+}
+
+/**
+ * One LMS adaptation step for the QNC cancellation-DTC gain
+ * (spec section 7.2; pure and deterministic, used by the Ch11 LMS demo):
+ *
+ *     gain' = gain - mu * e * r
+ *
+ * e is the observed timing error (cycles), r the DTC-commanded residue.
+ * Evaluation order is left-to-right ((mu * e) * r) in both languages so the
+ * float64 result is bit-identical with the Python ``lms_qnc_step``.
+ */
+export function lmsQncStep(gain: number, mu: number, e: number, r: number): number {
+  return gain - mu * e * r;
 }

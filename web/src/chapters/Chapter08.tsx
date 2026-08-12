@@ -29,6 +29,7 @@ import { M, MathBlock } from '../components/Math';
 import { ParamPanel, Slider, SelectControl, Toggle, PresetButtons } from '../components/controls';
 import UnitSwitch, { useUnit } from '../components/UnitSwitch';
 import DebugTable from '../components/DebugTable';
+import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { makeLineOption, makeMarkLine } from '../lib/chartOptions';
 import { useChartTheme } from '../lib/useChartTheme';
 import { formatPhase, phaseAxisLabel, makePhaseTickFormatter, trimNumber } from '../lib/format';
@@ -39,6 +40,13 @@ import {
   fromPartial,
   summary,
   pymod,
+  configG,
+  configTVcoS,
+  aIdeal,
+  ePair,
+  qNearest,
+  wrap01,
+  wrapCycles,
   type ArchMode,
   type Quantizer,
 } from '../model';
@@ -46,6 +54,7 @@ import {
 const meta = chapterById(8)!;
 
 const N_SIM = 256;
+const N_EXAMPLE = 128; // 數值例子的短模擬長度(每次按鍵重算,故 <= 128)
 const LSB_CYC = 1 / 256;
 const HALF_LSB_CYC = 1 / 512;
 
@@ -444,6 +453,375 @@ export default function Chapter08() {
           下方 cycle 表(DebugTable)由 model 對每一拍重算同樣的驗證,sum_mod_256 欄在 Mode D
           下恆為 0。
         </p>
+
+        <ExampleProblem
+          index={1}
+          tag="EXACT"
+          title="Mode D 碼恆等式:從 A_ideal 一路算到 R_INJ"
+          prompt={
+            <>
+              Mode D 只 quantize 一次:feedback 側取{' '}
+              <M>{'A_{FB} = \\operatorname{qNearest}(A_{ideal}[k])'}</M>、{' '}
+              <M>{'R_{FB} = A_{FB} \\bmod 256'}</M>,injection 側直接用 modular 減法{' '}
+              <M>{'R_{INJ} = (R_{zero} - R_{FB}) \\bmod 256'}</M>。請對給定的 <M>{'N'}</M>、
+              <M>{'k'}</M>、<M>{'R_{zero}'}</M> 算出兩個 code,驗證{' '}
+              <M>{'(R_{FB} + R_{INJ}) \\bmod 256 = R_{zero}'}</M> 與{' '}
+              <M>{'e_{pair,digital} = 0'}</M>,並順便看看 feedback 側的 absolute 量化誤差
+              (<M>{'A_{ideal} = G\\,s_{ideal}[k]'}</M>,<M>{'G = 256'}</M>)。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 3, max: 3.25, step: 0.0005 },
+            { key: 'k', label: <M>{'k'}</M>, def: 1, min: 0, max: 255, step: 1 },
+            { key: 'rzero', label: <M>{'R_{zero}'}</M>, def: 0, min: 0, max: 255, step: 1 },
+            {
+              key: 'fref',
+              label: <M>{'f_{ref}'}</M>,
+              def: 4,
+              min: 0.1,
+              max: 20,
+              step: 0.1,
+              unit: 'GHz',
+            },
+          ]}
+          compute={(v) => {
+            const cfg = fromPartial({ n_div: v.N, f_ref_hz: v.fref * 1e9, r_zero: v.rzero });
+            const g = configG(cfg);
+            const tVcoPs = configTVcoS(cfg) * 1e12;
+            const kk = Math.max(0, Math.round(v.k));
+            const a = aIdeal(kk + 1, v.N, cfg.s0, g)[kk];
+            const aFb = qNearest(a);
+            const rFb = pymod(aFb, g);
+            const rInj = pymod(v.rzero - rFb, g);
+            const sum = rFb + rInj;
+            const pair = ePair(Float64Array.of(rFb / g), Float64Array.of(rInj / g), v.rzero, g)[0];
+            const eFbAbs = (aFb - a) / g;
+            return {
+              steps: [
+                {
+                  label: (
+                    <>
+                      <M>{'A_{ideal}[k] = G\\,(s_0 + kN)'}</M>
+                    </>
+                  ),
+                  value: fmt(a, 9, 'LSB'),
+                },
+                {
+                  label: (
+                    <>
+                      <M>{'A_{FB} = \\operatorname{qNearest}(A_{ideal})'}</M>
+                    </>
+                  ),
+                  value: `${aFb} LSB`,
+                },
+                {
+                  label: (
+                    <>
+                      <M>{'R_{FB} = A_{FB} \\bmod 256'}</M>
+                    </>
+                  ),
+                  value: `${rFb}`,
+                },
+                {
+                  label: (
+                    <>
+                      <M>{'R_{INJ} = (R_{zero} - R_{FB}) \\bmod 256'}</M>
+                    </>
+                  ),
+                  value: `${rInj}`,
+                },
+                {
+                  label: (
+                    <>
+                      identity:<M>{'R_{FB} + R_{INJ}'}</M>(應為 <M>{'R_{zero}'}</M> 或{' '}
+                      <M>{'R_{zero}+256'}</M>)
+                    </>
+                  ),
+                  value: `${sum} → mod 256 = ${pymod(sum, g)}`,
+                },
+                {
+                  label: (
+                    <>
+                      <M>{'e_{pair,digital} = \\operatorname{wrapCycles}(u_{FB} + u_{INJ} - R_{zero}/G)'}</M>
+                    </>
+                  ),
+                  value: fmt(pair, 6, 'cyc'),
+                },
+                {
+                  label: (
+                    <>
+                      對照:<M>{'e_{FB,abs} = (A_{FB} - A_{ideal})/G'}</M>
+                    </>
+                  ),
+                  value: `${fmt(eFbAbs * 256, 6, 'LSB')} = ${fmt(eFbAbs * tVcoPs * 1000, 6, 'fs')}`,
+                },
+              ],
+              answer: (
+                <>
+                  <M>{'R_{FB}'}</M> = {rFb}、<M>{'R_{INJ}'}</M> = {rInj},
+                  <M>{'(R_{FB}+R_{INJ}) \\bmod 256'}</M> = {pymod(sum, g)} ={' '}
+                  <M>{'R_{zero}'}</M>,<M>{'e_{pair,digital}'}</M> = {fmt(pair, 6, 'cyc')}(0 fs)
+                </>
+              ),
+              warn:
+                Math.abs(a - Math.round(a)) < 1e-9
+                  ? `A_ideal 恰為整數 LSB(on-grid):此拍量化零誤差,e_FB_abs = 0`
+                  : undefined,
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={2}
+          tag="EXACT"
+          title="§9 sub-LSB canonical:pair 為零、absolute 各差 85 fs"
+          prompt={
+            <>
+              MODEL_SPEC §9 的標準例:<M>{'N = 3.125'}</M>(<M>{'T_{vco} = 80'}</M> ps、1 LSB =
+              312.5 fs)、<M>{'u_{FB,ideal} = 0.337'}</M> cycle。請算出 nearest 量化後的{' '}
+              <M>{'R_{FB}'}</M>、<M>{'u_{FB,actual}'}</M> 與 <M>{'e_{FB,abs}'}</M>;再以{' '}
+              <M>{'R_{INJ} = (R_{zero} - R_{FB}) \\bmod 256'}</M> 求 injection 側的{' '}
+              <M>{'u_{INJ,actual}'}</M> 與 <M>{'e_{INJ,abs}'}</M>(理想值{' '}
+              <M>{'u_{INJ,ideal} = \\operatorname{wrap01}(R_{zero}/G - u_{FB,ideal})'}</M>),
+              最後檢查 <M>{'e_{pair,digital}'}</M>。
+            </>
+          }
+          inputs={[
+            {
+              key: 'u',
+              label: <M>{'u_{FB,ideal}'}</M>,
+              def: 0.337,
+              min: 0,
+              max: 0.999,
+              step: 0.001,
+              unit: 'cyc',
+            },
+            { key: 'N', label: <M>{'N'}</M>, def: 3.125, min: 2, max: 8, step: 0.0005 },
+            {
+              key: 'fref',
+              label: <M>{'f_{ref}'}</M>,
+              def: 4,
+              min: 0.1,
+              max: 20,
+              step: 0.1,
+              unit: 'GHz',
+            },
+            { key: 'rzero', label: <M>{'R_{zero}'}</M>, def: 0, min: 0, max: 255, step: 1 },
+          ]}
+          compute={(v) => {
+            const cfg = fromPartial({ n_div: v.N, f_ref_hz: v.fref * 1e9, r_zero: v.rzero });
+            const g = configG(cfg);
+            const tVcoPs = configTVcoS(cfg) * 1e12;
+            const fine = g * v.u;
+            const rFb = pymod(qNearest(fine), g);
+            const uFb = rFb / g;
+            const eFb = uFb - v.u;
+            const rInj = pymod(v.rzero - rFb, g);
+            const uInj = rInj / g;
+            const uInjIdealVal = wrap01(v.rzero / g - v.u);
+            const eInj = wrapCycles(uInj - uInjIdealVal);
+            const pair = ePair(Float64Array.of(uFb), Float64Array.of(uInj), v.rzero, g)[0];
+            return {
+              steps: [
+                {
+                  label: (
+                    <>
+                      ideal fine code <M>{'G\\,u_{FB,ideal}'}</M>
+                    </>
+                  ),
+                  value: fmt(fine, 8, 'LSB'),
+                },
+                {
+                  label: (
+                    <>
+                      <M>{'R_{FB} = \\operatorname{qNearest}(\\cdot) \\bmod 256'}</M> →{' '}
+                      <M>{'u_{FB,actual}'}</M>
+                    </>
+                  ),
+                  value: `${rFb} → ${fmt(uFb, 8, 'cyc')}`,
+                },
+                {
+                  label: (
+                    <>
+                      <M>{'e_{FB,abs} = u_{FB,actual} - u_{FB,ideal}'}</M>
+                    </>
+                  ),
+                  value: `${fmt(eFb, 6, 'cyc')} = ${fmt(eFb * 256, 6, 'LSB')} = ${fmt(
+                    eFb * tVcoPs * 1000,
+                    6,
+                    'fs',
+                  )}`,
+                },
+                {
+                  label: (
+                    <>
+                      <M>{'R_{INJ} = (R_{zero} - R_{FB}) \\bmod 256'}</M> →{' '}
+                      <M>{'u_{INJ,actual}'}</M>
+                    </>
+                  ),
+                  value: `${rInj} → ${fmt(uInj, 8, 'cyc')}`,
+                },
+                {
+                  label: (
+                    <>
+                      <M>{'u_{INJ,ideal} = \\operatorname{wrap01}(R_{zero}/G - u_{FB,ideal})'}</M>
+                    </>
+                  ),
+                  value: fmt(uInjIdealVal, 8, 'cyc'),
+                },
+                {
+                  label: (
+                    <>
+                      <M>{'e_{INJ,abs}'}</M>
+                    </>
+                  ),
+                  value: `${fmt(eInj, 6, 'cyc')} = ${fmt(eInj * 256, 6, 'LSB')} = ${fmt(
+                    eInj * tVcoPs * 1000,
+                    6,
+                    'fs',
+                  )}`,
+                },
+                {
+                  label: (
+                    <>
+                      <M>{'u_{FB,actual} + u_{INJ,actual}'}</M> →{' '}
+                      <M>{'e_{pair,digital}'}</M>
+                    </>
+                  ),
+                  value: `${fmt(uFb + uInj, 8, 'cyc')} → ${fmt(pair, 6, 'cyc')}`,
+                },
+              ],
+              answer: (
+                <>
+                  <M>{'e_{FB,abs}'}</M> = {fmt(eFb * tVcoPs * 1000, 6, 'fs')}、
+                  <M>{'e_{INJ,abs}'}</M> = {fmt(eInj * tVcoPs * 1000, 6, 'fs')}(等量反號),但{' '}
+                  <M>{'e_{pair,digital}'}</M> = {fmt(pair, 6, 'cyc')}
+                </>
+              ),
+              warn:
+                Math.abs(eFb * 256) > 0.499
+                  ? `落在量化邊界(e_FB_abs = ${fmt(eFb * 256, 3)} LSB),±1 LSB 兩個 code 都算合理`
+                  : undefined,
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={3}
+          tag="EXPERIMENT"
+          title="Mode B vs Mode D 的 pair error 預算(ef1,短模擬)"
+          prompt={
+            <>
+              以 ef1 quantizer 跑兩次相同長度的模擬:一次 Mode B(feedback / injection 各跑一份
+              獨立 DSM state)、一次 Mode D(quantize 一次 + modular reverse),並同時加入{' '}
+              <M>{'\\delta_{tap}'}</M>(全部 taps)。請統計 Mode B 有多少拍{' '}
+              <M>{'e_{pair,digital} \\neq 0'}</M>、其 rms 是多少(LSB / fs),並確認 Mode D 的
+              digital pair error 逐位為零 —— 但它的 <M>{'e_{pair,analog}'}</M>{' '}
+              仍被 tap mismatch 抬起來(shared code 管不到 analog 層)。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 3, max: 3.25, step: 0.0005 },
+            {
+              key: 'n',
+              label: <>模擬長度 <M>{'n_{cycles}'}</M></>,
+              def: N_EXAMPLE,
+              min: 8,
+              max: N_EXAMPLE,
+              step: 8,
+            },
+            {
+              key: 'dtap',
+              label: <>tap mismatch(全部)</>,
+              def: 1,
+              min: 0,
+              max: 3,
+              step: 0.1,
+              unit: '°',
+            },
+          ]}
+          compute={(v) => {
+            const n = Math.min(N_EXAMPLE, Math.max(1, Math.round(v.n)));
+            const mm = Array.from({ length: 8 }, () => v.dtap / 360);
+            const mk = (arch: ArchMode) =>
+              simulate(
+                fromPartial({
+                  n_div: v.N,
+                  n_cycles: n,
+                  arch_mode: arch,
+                  quantizer: 'ef1',
+                  tap_mismatch_cycles: mm,
+                }),
+              );
+            const resB = mk('B');
+            const resD = mk('D');
+            const sB = summary(resB);
+            const sD = summary(resD);
+            const eB = resB.data.e_pair_digital;
+            let nzB = 0;
+            let maxB = 0;
+            for (let k = 0; k < n; k++) {
+              if (eB[k] !== 0) nzB += 1;
+              maxB = Math.max(maxB, Math.abs(eB[k]));
+            }
+            const eD = resD.data.e_pair_digital;
+            let maxD = 0;
+            for (let k = 0; k < n; k++) maxD = Math.max(maxD, Math.abs(eD[k]));
+            const alphaG = (v.N - Math.trunc(v.N)) * 256;
+            return {
+              steps: [
+                {
+                  label: <>Mode B:<M>{'e_{pair,digital} \\neq 0'}</M> 的拍數</>,
+                  value: `${nzB} / ${n}(${fmt((100 * nzB) / n, 4)}%)`,
+                },
+                {
+                  label: <>Mode B:rms <M>{'e_{pair,digital}'}</M></>,
+                  value: `${fmt(sB.e_pair_digital.rms_cycles * 256, 6, 'LSB')} = ${fmt(
+                    sB.e_pair_digital.rms_fs,
+                    6,
+                    'fs',
+                  )}`,
+                },
+                {
+                  label: <>Mode B:瞬時最大 <M>{'|e_{pair,digital}|'}</M></>,
+                  value: fmt(maxB * 256, 6, 'LSB'),
+                },
+                {
+                  label: <>Mode D:瞬時最大 <M>{'|e_{pair,digital}|'}</M></>,
+                  value: fmt(maxD * 256, 6, 'LSB'),
+                },
+                {
+                  label: <>Mode D:rms <M>{'e_{pair,analog}'}</M>(tap mismatch 造成)</>,
+                  value: `${fmt(sD.e_pair_analog.rms_cycles * 256, 6, 'LSB')} = ${fmt(
+                    sD.e_pair_analog.rms_fs,
+                    6,
+                    'fs',
+                  )}`,
+                },
+                {
+                  label: <>對照 Mode B:rms <M>{'e_{pair,analog}'}</M></>,
+                  value: fmt(sB.e_pair_analog.rms_cycles * 256, 6, 'LSB'),
+                },
+              ],
+              answer: (
+                <>
+                  Mode B:{n} 拍中 {nzB} 拍 <M>{'e_{pair,digital} \\neq 0'}</M>,rms{' '}
+                  {fmt(sB.e_pair_digital.rms_cycles * 256, 6, 'LSB')} ={' '}
+                  {fmt(sB.e_pair_digital.rms_fs, 6, 'fs')};Mode D:digital 恆 0 LSB,但{' '}
+                  <M>{'e_{pair,analog}'}</M> 仍有{' '}
+                  {fmt(sD.e_pair_analog.rms_cycles * 256, 6, 'LSB')} ={' '}
+                  {fmt(sD.e_pair_analog.rms_fs, 6, 'fs')}
+                </>
+              ),
+              warn:
+                Math.abs(alphaG - Math.round(alphaG)) < 1e-9
+                  ? `α·G = ${fmt(alphaG, 6)} 為整數(on-grid):兩邊 quantizer 的輸入皆為整數 LSB,Mode B 的 pair error 也結構性歸零 —— 看不出病徵,請改用 N = 3.13`
+                  : v.dtap === 0
+                    ? 'δ_tap = 0:analog 全 ideal,Mode D 的 e_pair_analog 也為零'
+                    : undefined,
+            };
+          }}
+        />
       </SectionExample>
 
       <SectionFigure

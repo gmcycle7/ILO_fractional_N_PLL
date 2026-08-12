@@ -25,6 +25,7 @@ import {
 import EChart from '../components/EChart';
 import EpistemicTag from '../components/EpistemicTag';
 import Callout from '../components/Callout';
+import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { M, MathBlock } from '../components/Math';
 import { ParamPanel, Slider, SelectControl, PresetButtons } from '../components/controls';
 import UnitSwitch, { useUnit } from '../components/UnitSwitch';
@@ -42,8 +43,18 @@ import {
   presetConfigs,
   rms,
   peakToPeak,
+  wrap01,
+  wrapCycles,
+  qNearest,
+  qFloor,
+  configG,
+  uInjIdeal,
+  cyclesToDegrees,
 } from '../model';
 import type { Quantizer, SimResult } from '../model';
+
+/** G is fixed by n_pmux/b_dtc defaults (256); independent of n_div. */
+const G_FINE = configG(fromPartial({}));
 
 const meta = chapterById(9)!;
 const N_CYCLES = 256;
@@ -463,6 +474,204 @@ export default function Chapter09() {
           <EpistemicTag kind="EXACT" />
         </p>
         <p>目前顯示單位下,0.39 cycle = {formatPhase(0.39, unit, tVco)}。</p>
+
+        <ExampleProblem
+          index={1}
+          tag="EXACT"
+          title="從絕對相位算瞬時除頻命令 n[k]"
+          prompt={
+            <>
+              給定 <M>{'N'}</M>、起始相位 <M>{'s_0'}</M> 與拍數 <M>{'k'}</M>,先算絕對相位{' '}
+              <M>{'s_{ideal}[k]=s_0+kN'}</M> 與下一拍 <M>{'s_{ideal}[k+1]'}</M>,各量化為
+              fine code <M>{'A_{FB}=\\operatorname{qNearest}(G\\,s_{ideal})'}</M>,再取整數
+              cycle index <M>{'I_{FB}=\\lfloor A_{FB}/G\\rfloor'}</M>。除頻器這一拍的瞬時
+              command 是 <M>{'n[k]=I_{FB}[k+1]-I_{FB}[k]'}</M>,對應的 frequency-like 殘量{' '}
+              <M>{'q_N[k]=N-n[k]'}</M>。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 2, max: 8, step: 0.001 },
+            { key: 's0', label: <M>{'s_0'}</M>, def: 0, min: -100, max: 100, step: 0.01, unit: 'cyc' },
+            { key: 'k', label: <M>{'k'}</M>, def: 5, min: 0, max: 1023, step: 1 },
+          ]}
+          compute={(v) => {
+            const N = v.N;
+            const s0 = v.s0;
+            const k = Math.round(v.k);
+            const G = G_FINE;
+            const sK = s0 + k * N;
+            const sK1 = s0 + (k + 1) * N;
+            const xK = wrap01(sK);
+            const aFbK = qNearest(G * sK);
+            const aFbK1 = qNearest(G * sK1);
+            const iFbK = qFloor(aFbK / G);
+            const iFbK1 = qFloor(aFbK1 / G);
+            const nK = iFbK1 - iFbK;
+            const qN = N - nK;
+            return {
+              steps: [
+                { label: <M>{'s_{ideal}[k]=s_0+kN'}</M>, value: fmt(sK, 9, 'cyc') },
+                { label: <M>{'s_{ideal}[k+1]'}</M>, value: fmt(sK1, 9, 'cyc') },
+                { label: <M>{'x_{ideal}[k]=\\operatorname{wrap01}(s_{ideal}[k])'}</M>, value: fmt(xK, 6, 'cyc') },
+                { label: <M>{'A_{FB}[k]=\\operatorname{qNearest}(G\\,s_{ideal}[k])'}</M>, value: `${aFbK} LSB` },
+                { label: <M>{'A_{FB}[k+1]'}</M>, value: `${aFbK1} LSB` },
+                { label: <M>{'I_{FB}[k]=\\lfloor A_{FB}[k]/G\\rfloor'}</M>, value: `${iFbK}` },
+                { label: <M>{'I_{FB}[k+1]'}</M>, value: `${iFbK1}` },
+              ],
+              answer: (
+                <>
+                  瞬時除頻命令 <M>{'n[k]=I_{FB}[k+1]-I_{FB}[k]'}</M> = {nK};frequency-like
+                  殘量 <M>{'q_N[k]=N-n[k]'}</M> = {fmt(qN, 6)} cyc(它不是 phase — 見下兩例)
+                </>
+              ),
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={2}
+          tag="EXACT"
+          title="同一個 n[k] 卻對應不同的 injection 目標 u_INJ_ideal"
+          prompt={
+            <>
+              取兩個拍 <M>{'k_1, k_2'}</M>,各自算出瞬時除頻命令{' '}
+              <M>{'n[k_1], n[k_2]'}</M>(同上例)與 injection 理想目標{' '}
+              <M>{'u_{INJ,ideal}[k]=\\operatorname{wrap01}(-x_{ideal}[k])'}</M>(z0=0)。若{' '}
+              <M>{'n[k_1]=n[k_2]'}</M>,比較兩者的 <M>{'u_{INJ,ideal}'}</M> 差{' '}
+              <M>{'\\operatorname{wrapCycles}(u_{INJ,ideal}[k_1]-u_{INJ,ideal}[k_2])'}</M> —
+              同一個瞬時 bit,injection 落點仍可能天差地遠。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 2, max: 8, step: 0.001 },
+            { key: 's0', label: <M>{'s_0'}</M>, def: 0, min: -100, max: 100, step: 0.01, unit: 'cyc' },
+            { key: 'k1', label: <M>{'k_1'}</M>, def: 1, min: 0, max: 1023, step: 1 },
+            { key: 'k2', label: <M>{'k_2'}</M>, def: 4, min: 0, max: 1023, step: 1 },
+          ]}
+          compute={(v) => {
+            const N = v.N;
+            const s0 = v.s0;
+            const k1 = Math.round(v.k1);
+            const k2 = Math.round(v.k2);
+            const G = G_FINE;
+            const nAndX = (k: number) => {
+              const sK = s0 + k * N;
+              const sK1 = s0 + (k + 1) * N;
+              const aFbK = qNearest(G * sK);
+              const aFbK1 = qNearest(G * sK1);
+              const iFbK = qFloor(aFbK / G);
+              const iFbK1 = qFloor(aFbK1 / G);
+              return { n: iFbK1 - iFbK, x: wrap01(sK) };
+            };
+            const r1 = nAndX(k1);
+            const r2 = nAndX(k2);
+            const uArr = uInjIdeal([r1.x, r2.x], 0);
+            const u1 = uArr[0];
+            const u2 = uArr[1];
+            const diff = wrapCycles(u1 - u2);
+            const sameN = r1.n === r2.n;
+            return {
+              steps: [
+                { label: <><M>{'x_{ideal}[k_1]'}</M></>, value: fmt(r1.x, 6, 'cyc') },
+                { label: <><M>{'x_{ideal}[k_2]'}</M></>, value: fmt(r2.x, 6, 'cyc') },
+                { label: <><M>{'n[k_1]'}</M></>, value: `${r1.n}` },
+                { label: <><M>{'n[k_2]'}</M></>, value: `${r2.n}` },
+                { label: <><M>{'u_{INJ,ideal}[k_1]=\\operatorname{wrap01}(-x_{ideal}[k_1])'}</M></>, value: fmt(u1, 6, 'cyc') },
+                { label: <><M>{'u_{INJ,ideal}[k_2]'}</M></>, value: fmt(u2, 6, 'cyc') },
+                {
+                  label: <M>{'\\Delta u_{INJ,ideal}=\\operatorname{wrapCycles}(u_{INJ,ideal}[k_1]-u_{INJ,ideal}[k_2])'}</M>,
+                  value: `${fmt(diff, 6, 'cyc')} = ${fmt(cyclesToDegrees(Math.abs(diff)), 5)}°`,
+                },
+              ],
+              answer: sameN ? (
+                <>
+                  <M>{'n[k_1]=n[k_2]='}</M>
+                  {r1.n}(同一個瞬時 bit),但 <M>{'u_{INJ,ideal}'}</M> 相差{' '}
+                  {fmt(diff, 6, 'cyc')} cyc = {fmt(cyclesToDegrees(Math.abs(diff)), 5)}° —
+                  只看 bit 無法決定 injection 落點
+                </>
+              ) : (
+                <>
+                  這組 <M>{'k_1,k_2'}</M> 的 <M>{'n[k]'}</M> 本身就不同({r1.n} vs {r2.n}),
+                  <M>{'u_{INJ,ideal}'}</M> 差 {fmt(diff, 6, 'cyc')} cyc — 換一組 <M>{'n[k_1]=n[k_2]'}</M>{' '}
+                  的 k(如預設值 1、4)更能凸顯本章論點
+                </>
+              ),
+              warn: sameN
+                ? undefined
+                : `n[k_1]=${r1.n} ≠ n[k_2]=${r2.n} — 本例的重點是 n 相同時的對照,試試預設值`,
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={3}
+          tag="EXACT"
+          title="累積量 p[k] 的 telescoping 恆等式與 Mode D round-trip(多步驟)"
+          prompt={
+            <>
+              用短程模擬(quantizer = nearest、mode D、最多 128 拍)重建累積量{' '}
+              <M>{'p[k+1]=p[k]+N-n[k]'}</M>(<M>{'p[0]=s_0-I_{FB}[0]'}</M>),與模擬直接輸出
+              的 <M>{'x_{ideal}[k]'}</M> 比較,驗證恆等式{' '}
+              <M>{'p[k]=s_{ideal}[k]-I_{FB}[k]'}</M> 只在 half-LSB 之內偏離{' '}
+              <M>{'x_{ideal}[k]'}</M>;同時檢查 Mode D 的 code round-trip{' '}
+              <M>{'(R_{FB}[k]+R_{INJ}[k])\\bmod G = R_{zero}'}</M> 是否成立。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 2, max: 8, step: 0.001 },
+            { key: 's0', label: <M>{'s_0'}</M>, def: 0, min: -10, max: 10, step: 0.01, unit: 'cyc' },
+            { key: 'k', label: <M>{'k'}</M>, def: 7, min: 1, max: 120, step: 1 },
+          ]}
+          compute={(v) => {
+            const N = v.N;
+            const s0 = v.s0;
+            const k = Math.round(v.k);
+            const nCycles = Math.min(128, k + 1);
+            const cfg = fromPartial({
+              n_div: N,
+              s0,
+              n_cycles: nCycles,
+              quantizer: 'nearest',
+              arch_mode: 'D',
+            });
+            const sim = simulate(cfg);
+            const G = sim.g;
+            const d = sim.data;
+            let p = d.s_ideal[0] - d.I_FB[0];
+            for (let i = 0; i < k; i++) {
+              p = p + N - d.n_int[i];
+            }
+            const xIdealK = d.x_ideal[k];
+            const diff = wrapCycles(p - xIdealK);
+            const halfLsb = 1 / (2 * G);
+            const withinBound = Math.abs(diff) <= halfLsb + 1e-9;
+            const rFb = d.R_FB[k];
+            const rInj = d.R_INJ[k];
+            const identity = (rFb + rInj) % G;
+            return {
+              steps: [
+                { label: <><M>{'p[0]=s_0-I_{FB}[0]'}</M></>, value: fmt(d.s_ideal[0] - d.I_FB[0], 8, 'cyc') },
+                { label: <>對 <M>{'p[k+1]=p[k]+N-n[k]'}</M> 遞迴 {k} 次後</>, value: fmt(p, 8, 'cyc') },
+                { label: <>模擬直接輸出的 <M>{'x_{ideal}[k]'}</M></>, value: fmt(xIdealK, 8, 'cyc') },
+                { label: <><M>{'\\operatorname{wrapCycles}(p[k]-x_{ideal}[k])'}</M></>, value: fmt(diff, 8, 'cyc') },
+                { label: <>half-LSB 界 <M>{'1/(2G)'}</M></>, value: fmt(halfLsb, 6, 'cyc') },
+                { label: <><M>{'R_{FB}[k]'}</M> / <M>{'R_{INJ}[k]'}</M></>, value: `${rFb} / ${rInj}` },
+                { label: <><M>{'(R_{FB}[k]+R_{INJ}[k])\\bmod G'}</M></>, value: `${identity}` },
+              ],
+              answer: (
+                <>
+                  <M>{'|p[k]-x_{ideal}[k]|'}</M> = {fmt(Math.abs(diff), 6, 'cyc')} ≤ half-LSB
+                  = {fmt(halfLsb, 6, 'cyc')}({withinBound ? '成立' : '不成立'});Mode D
+                  round-trip <M>{'(R_{FB}+R_{INJ})\\bmod G'}</M> = {identity}(= R_zero)
+                </>
+              ),
+              warn: withinBound
+                ? undefined
+                : `|p[k]-x_ideal[k]| 超出 half-LSB — 檢查 n_cycles=${nCycles} 是否被 128 拍上限截斷`,
+            };
+          }}
+        />
       </SectionExample>
 
       <SectionFigure

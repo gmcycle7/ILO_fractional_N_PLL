@@ -13,6 +13,7 @@ import {
 import EChart from '../components/EChart';
 import EpistemicTag from '../components/EpistemicTag';
 import Callout from '../components/Callout';
+import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { M, MathBlock } from '../components/Math';
 import { ParamPanel, Slider } from '../components/controls';
 import UnitSwitch, { useUnit } from '../components/UnitSwitch';
@@ -22,7 +23,17 @@ import { useChartTheme } from '../lib/useChartTheme';
 import { trimNumber, phaseUnitLabel, phaseToUnitValue } from '../lib/format';
 import { useSimStatus } from '../SimStatusContext';
 import { chapterById } from './index';
-import { simulate, fromPartial, rms } from '../model';
+import {
+  simulate,
+  fromPartial,
+  rms,
+  configAlpha,
+  configG,
+  configTVcoS,
+  wrapCycles,
+  cyclesToDegrees,
+  tapActual,
+} from '../model';
 import type { SimConfig } from '../model';
 
 const meta = chapterById(20)!;
@@ -420,6 +431,159 @@ export default function Chapter20() {
           排序即設計優先序:digital 正確性(免費)→ analog 校正(有成本)→
           quantizer 頻譜(權衡)。<EpistemicTag kind="INFERENCE" />
         </p>
+
+        <ExampleProblem
+          index={1}
+          tag="EXACT"
+          title="tap mismatch 對 half-LSB 預算的比值(Q12)"
+          prompt={
+            <>
+              給定 <M>{'N'}</M>、單一 tap 的角度誤差與 tap index <M>{'j'}</M>,用
+              <code>tapActual</code> 算出 tap 的實際相位與理想相位 <M>{'j/8'}</M> 之差,換算成
+              fs,再對照 half-LSB(<M>{'T_{vco}/(2G)'}</M>)看倍率 —— 就是誤差預算表第三列的
+              互動版。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.125, min: 3, max: 3.25, step: 0.0001 },
+            { key: 'mismatchDeg', label: 'tap 角度誤差', def: 1, min: -10, max: 10, step: 0.1, unit: '°' },
+            { key: 'j', label: <M>{'j'}</M>, def: 0, min: 0, max: 7, step: 1 },
+          ]}
+          compute={(v) => {
+            const cfg = fromPartial({ n_div: v.N });
+            const tVcoPs = configTVcoS(cfg) * 1e12;
+            const g = configG(cfg);
+            const j = Math.max(0, Math.min(7, Math.round(v.j)));
+            const deltaTap = new Array(8).fill(v.mismatchDeg / 360);
+            const nominalCycles = j / 8;
+            const actualCycles = tapActual(j, 8, deltaTap);
+            const mismatchCycles = actualCycles - nominalCycles;
+            const mismatchFs = mismatchCycles * tVcoPs * 1000;
+            const halfLsbFs = (tVcoPs * 1000) / (2 * g);
+            const ratio = Math.abs(mismatchFs) / halfLsbFs;
+            return {
+              steps: [
+                { label: <>理想 tap 相位 <M>{'j/8'}</M></>, value: fmt(nominalCycles, 6, 'cyc') },
+                { label: <>實際 tap 相位 <code>tapActual(j)</code></>, value: fmt(actualCycles, 6, 'cyc') },
+                { label: <>mismatch(實際 − 理想)</>, value: fmt(mismatchFs, 6, 'fs') },
+                { label: <>half-LSB <M>{'=T_{vco}/(2G)'}</M></>, value: fmt(halfLsbFs, 5, 'fs') },
+                { label: <>倍率</>, value: `${fmt(ratio, 4)}×` },
+              ],
+              answer: (
+                <>
+                  mismatch = {fmt(mismatchFs, 5, 'fs')},是 half-LSB({fmt(halfLsbFs, 4, 'fs')})的{' '}
+                  {fmt(ratio, 4)} 倍
+                </>
+              ),
+              warn: ratio > 1 ? '單一 tap mismatch 已超過 half-LSB 量化預算,需要校正' : undefined,
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={2}
+          tag="EXACT"
+          title="latency bug 的靜態誤差(Q9)"
+          prompt={
+            <>
+              固定 latency <M>{'L'}</M>、沒有 look-ahead 時,誤差是{' '}
+              <M>{'e_{bug}=\\operatorname{wrapCycles}(L\\alpha)'}</M>,其中{' '}
+              <M>{'\\alpha=N-\\lfloor N\\rfloor'}</M>。給定 <M>{'N'}</M> 與 <M>{'L'}</M>,算出這個
+              靜態誤差(度)並對照 half-LSB 看倍率。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 3, max: 3.25, step: 0.0001 },
+            { key: 'L', label: <M>{'L'}</M>, def: 1, min: 0, max: 8, step: 1, unit: 'cyc' },
+          ]}
+          compute={(v) => {
+            const cfg = fromPartial({ n_div: v.N });
+            const alpha = configAlpha(cfg);
+            const L = Math.round(v.L);
+            const eBug = wrapCycles(L * alpha);
+            const eBugDeg = cyclesToDegrees(eBug);
+            const g = configG(cfg);
+            const halfLsbDeg = 360 / (2 * g);
+            const ratio = Math.abs(eBugDeg) / halfLsbDeg;
+            return {
+              steps: [
+                { label: <><M>{'\\alpha=N-\\lfloor N\\rfloor'}</M></>, value: fmt(alpha, 6, 'cyc') },
+                { label: <><M>{'e_{bug}=\\operatorname{wrapCycles}(L\\alpha)'}</M></>, value: fmt(eBug, 6, 'cyc') },
+                { label: <>換算成度數</>, value: fmt(eBugDeg, 4, '°') },
+                { label: <>half-LSB(度)</>, value: fmt(halfLsbDeg, 5, '°') },
+                { label: <>倍率</>, value: `${fmt(ratio, 4)}×` },
+              ],
+              answer: (
+                <>
+                  e_bug = {fmt(eBugDeg, 4)}°,是 half-LSB({fmt(halfLsbDeg, 4)}°)的{' '}
+                  {fmt(ratio, 4)} 倍
+                </>
+              ),
+              warn: ratio > 10 ? 'latency bug 造成的誤差遠超量化預算 —— look-ahead 是免費的修正' : undefined,
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={3}
+          tag="EXPERIMENT"
+          title="error budget roll-up:多誤差源合併是否等於 RSS?"
+          prompt={
+            <>
+              同時開啟 DTC gain 誤差與 tap mismatch,用 <code>simulate()</code> 量測合併後的{' '}
+              <M>{'\\mathrm{rms}(e_{ZC,hw})'}</M>;再分別只開一項算出各自的 rms,取
+              root-sum-square <M>{'\\sqrt{\\mathrm{rms}_{gain}^2+\\mathrm{rms}_{tap}^2}'}</M>{' '}
+              當作 naive 誤差預算估計,比較兩者是否一致。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 3, max: 3.25, step: 0.0001 },
+            { key: 'gainPct', label: 'DTC gain 誤差', def: 1, min: -10, max: 10, step: 0.1, unit: '%' },
+            { key: 'mismatchDeg', label: 'tap 角度誤差', def: 1, min: -10, max: 10, step: 0.1, unit: '°' },
+            { key: 'n', label: <M>{'n'}</M>, def: 64, min: 8, max: 128, step: 8, unit: 'cyc' },
+          ]}
+          compute={(v) => {
+            const n = Math.max(8, Math.round(v.n));
+            const tapMismatch = new Array(8).fill(v.mismatchDeg / 360);
+            const gain = 1 + v.gainPct / 100;
+            const cfgBoth = fromPartial({
+              n_div: v.N,
+              dtc_inj_gain: gain,
+              tap_mismatch_cycles: tapMismatch,
+              n_cycles: n,
+            });
+            const cfgGain = fromPartial({ n_div: v.N, dtc_inj_gain: gain, n_cycles: n });
+            const cfgTap = fromPartial({ n_div: v.N, tap_mismatch_cycles: tapMismatch, n_cycles: n });
+            const resBoth = simulate(cfgBoth);
+            const resGain = simulate(cfgGain);
+            const resTap = simulate(cfgTap);
+            const tVcoFs = configTVcoS(cfgBoth) * 1e15;
+            const rmsBothFs = rms(resBoth.data.e_ZC_hw) * tVcoFs;
+            const rmsGainFs = rms(resGain.data.e_ZC_hw) * tVcoFs;
+            const rmsTapFs = rms(resTap.data.e_ZC_hw) * tVcoFs;
+            const rss = Math.sqrt(rmsGainFs * rmsGainFs + rmsTapFs * rmsTapFs);
+            const ratio = rmsBothFs / rss;
+            return {
+              steps: [
+                { label: <>只開 DTC gain:<M>{'\\mathrm{rms}(e_{ZC,hw})'}</M></>, value: fmt(rmsGainFs, 6, 'fs') },
+                { label: <>只開 tap mismatch:<M>{'\\mathrm{rms}(e_{ZC,hw})'}</M></>, value: fmt(rmsTapFs, 6, 'fs') },
+                { label: <>RSS 估計 <M>{'\\sqrt{a^2+b^2}'}</M></>, value: fmt(rss, 6, 'fs') },
+                { label: <>兩項同開:實測 <M>{'\\mathrm{rms}(e_{ZC,hw})'}</M></>, value: fmt(rmsBothFs, 6, 'fs') },
+                { label: <>實測 / RSS 估計</>, value: fmt(ratio, 4) },
+              ],
+              answer: (
+                <>
+                  實測合併 rms = {fmt(rmsBothFs, 5, 'fs')},naive RSS 估計 = {fmt(rss, 5, 'fs')}
+                  (比值 {fmt(ratio, 4)})
+                </>
+              ),
+              warn:
+                Math.abs(ratio - 1) > 0.05
+                  ? 'RSS 假設誤差源互相獨立;實測偏離 RSS 表示各誤差源之間有相關性,naive 預算表只能當估計'
+                  : undefined,
+            };
+          }}
+        />
       </SectionExample>
 
       <SectionFigure

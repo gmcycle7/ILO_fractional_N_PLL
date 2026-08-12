@@ -24,6 +24,7 @@ import {
 import EChart from '../components/EChart';
 import EpistemicTag from '../components/EpistemicTag';
 import Callout from '../components/Callout';
+import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { M, MathBlock } from '../components/Math';
 import { ParamPanel, Slider, PresetButtons } from '../components/controls';
 import UnitSwitch, { useUnit } from '../components/UnitSwitch';
@@ -40,7 +41,17 @@ import {
 import type { PhaseUnit } from '../lib/format';
 import { useSimStatus } from '../SimStatusContext';
 import { chapterById } from './index';
-import { simulate, fromPartial, qNearest, pymod, wrap01, wrapCycles, tVcoS } from '../model';
+import {
+  simulate,
+  fromPartial,
+  qNearest,
+  pymod,
+  wrap01,
+  wrapCycles,
+  tVcoS,
+  uInjIdeal,
+  ePair,
+} from '../model';
 
 const meta = chapterById(10)!;
 const G = 256;
@@ -453,6 +464,167 @@ export default function Chapter10() {
           結論:absolute phase 各差 85 fs,但 pair 數位上 exact reverse — 下方互動圖
           把滑桿設回 0.337 可即時重現整條計算。
         </p>
+
+        <ExampleProblem
+          index={1}
+          tag="EXACT"
+          title="Feedback 側量化任意 ideal phase u"
+          prompt={
+            <>
+              給定 <M>{'N'}</M>、<M>{'f_{ref}'}</M> 與 ideal fractional phase{' '}
+              <M>{'u\\in[0,1)'}</M>,算出 fine code <M>{'G\\,u'}</M>、nearest 量化後的{' '}
+              <M>{'R_{FB}=\\operatorname{qNearest}(G\\,u)\\bmod G'}</M>、實際相位{' '}
+              <M>{'u_{FB,actual}=R_{FB}/G'}</M> 與絕對誤差{' '}
+              <M>{'e_{FB}=\\operatorname{wrapCycles}(u_{FB,actual}-u)'}</M>(換算成時間)。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.125, min: 2, max: 8, step: 0.001 },
+            { key: 'fref', label: <M>{'f_{ref}'}</M>, def: 4, min: 0.5, max: 20, step: 0.1, unit: 'GHz' },
+            { key: 'u', label: <M>{'u'}</M>, def: 0.61, min: 0, max: 1, step: 0.001, unit: 'cyc' },
+          ]}
+          compute={(v) => {
+            const { N, fref, u } = v;
+            const tVco = tVcoS(N, fref * 1e9);
+            const fine = G * u;
+            const rFb = pymod(qNearest(fine), G);
+            const uFbAct = rFb / G;
+            const eFb = wrapCycles(uFbAct - u);
+            const eFbTime = eFb * tVco;
+            return {
+              steps: [
+                { label: <><M>{'G\\,u'}</M>(fine code)</>, value: fmt(fine, 8, 'LSB') },
+                { label: <><M>{'R_{FB}=\\operatorname{qNearest}(G\\,u)\\bmod G'}</M></>, value: `${rFb}` },
+                { label: <><M>{'u_{FB,actual}=R_{FB}/G'}</M></>, value: fmt(uFbAct, 8, 'cyc') },
+                { label: <><M>{'e_{FB}=\\operatorname{wrapCycles}(u_{FB,actual}-u)'}</M></>, value: fmt(eFb, 6, 'cyc') },
+                { label: <>換算時間 <M>{'e_{FB}\\times T_{vco}'}</M></>, value: fmt(eFbTime * 1e15, 5, 'fs') },
+              ],
+              answer: (
+                <>
+                  <M>{'R_{FB}'}</M> = {rFb},<M>{'u_{FB,actual}'}</M> = {fmt(uFbAct, 6, 'cyc')},
+                  絕對誤差 <M>{'e_{FB}'}</M> = {fmt(eFb, 5, 'cyc')} cyc = {fmt(eFbTime * 1e15, 4, 'fs')}
+                </>
+              ),
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={2}
+          tag="EXACT"
+          title="Mode D modular reverse 與 pair identity(任意 R_zero)"
+          prompt={
+            <>
+              沿用上例的 <M>{'R_{FB}'}</M>,mode D 不再量化,直接{' '}
+              <M>{'R_{INJ}=(R_{zero}-R_{FB})\\bmod G'}</M>。取{' '}
+              <M>{'z_0=R_{zero}/G'}</M> 算出 ideal target{' '}
+              <M>{'u_{INJ,ideal}=\\operatorname{wrap01}(z_0-u)'}</M> 與絕對誤差{' '}
+              <M>{'e_{INJ}'}</M>,並用 <code>ePair</code> 驗證{' '}
+              <M>{'e_{pair}=\\operatorname{wrapCycles}(u_{FB,actual}+u_{INJ,actual}-z_0)'}</M> 是否恆為 0。
+            </>
+          }
+          inputs={[
+            { key: 'u', label: <M>{'u'}</M>, def: 0.61, min: 0, max: 1, step: 0.001, unit: 'cyc' },
+            { key: 'Rzero', label: <M>{'R_{zero}'}</M>, def: 0, min: 0, max: 255, step: 1 },
+          ]}
+          compute={(v) => {
+            const { u } = v;
+            const rZero = Math.round(v.Rzero);
+            const fine = G * u;
+            const rFb = pymod(qNearest(fine), G);
+            const uFbAct = rFb / G;
+            const eFb = wrapCycles(uFbAct - u);
+            const rInj = pymod(rZero - rFb, G);
+            const uInjAct = rInj / G;
+            const z0 = rZero / G;
+            const uInjIdealVal = uInjIdeal([u], z0)[0];
+            const eInj = wrapCycles(uInjAct - uInjIdealVal);
+            const ePairVal = ePair([uFbAct], [uInjAct], rZero, G)[0];
+            return {
+              steps: [
+                { label: <><M>{'R_{FB}'}</M>(同上例)</>, value: `${rFb}` },
+                { label: <><M>{'R_{INJ}=(R_{zero}-R_{FB})\\bmod G'}</M></>, value: `${rInj}` },
+                { label: <><M>{'u_{INJ,actual}=R_{INJ}/G'}</M></>, value: fmt(uInjAct, 8, 'cyc') },
+                { label: <><M>{'u_{INJ,ideal}=\\operatorname{wrap01}(z_0-u)'}</M></>, value: fmt(uInjIdealVal, 8, 'cyc') },
+                { label: <><M>{'e_{INJ}=\\operatorname{wrapCycles}(u_{INJ,actual}-u_{INJ,ideal})'}</M></>, value: fmt(eInj, 6, 'cyc') },
+                { label: <>鏡像檢查 <M>{'e_{INJ}+e_{FB}'}</M></>, value: fmt(eInj + eFb, 8, 'cyc') },
+                { label: <><M>{'e_{pair}'}</M>(<code>ePair</code>)</>, value: fmt(ePairVal, 8, 'cyc') },
+              ],
+              answer: (
+                <>
+                  <M>{'R_{INJ}'}</M> = {rInj},<M>{'e_{pair,digital}'}</M> = {fmt(ePairVal, 6, 'cyc')}
+                  (mode D identity 恆為 0);<M>{'e_{INJ}=-e_{FB}'}</M> 鏡像:{fmt(eInj, 5, 'cyc')} vs{' '}
+                  {fmt(-eFb, 5, 'cyc')}
+                </>
+              ),
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={3}
+          tag="EXPERIMENT"
+          title="短程模擬驗證 max|e_FB_abs| ≤ half-LSB(多步驟 error budget)"
+          prompt={
+            <>
+              跑 <M>{'N_{cyc}'}</M> 拍(最多 128 拍)的 nearest、mode D 模擬,取{' '}
+              <M>{'e_{FB,abs}[k]'}</M> 的最大絕對值,與 half-LSB 界{' '}
+              <M>{'1/(2G)'}</M> 比較,確認 nearest quantizer 的誤差界不被違反。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 3, max: 3.25, step: 0.001 },
+            { key: 'fref', label: <M>{'f_{ref}'}</M>, def: 4, min: 0.5, max: 20, step: 0.1, unit: 'GHz' },
+            { key: 's0', label: <M>{'s_0'}</M>, def: 0, min: -10, max: 10, step: 0.01, unit: 'cyc' },
+            { key: 'cycles', label: <M>{'N_{cyc}'}</M>, def: 64, min: 2, max: 128, step: 1 },
+          ]}
+          compute={(v) => {
+            const { N, fref, s0 } = v;
+            const nCycles = Math.min(128, Math.max(2, Math.round(v.cycles)));
+            const cfg = fromPartial({
+              n_div: N,
+              f_ref_hz: fref * 1e9,
+              s0,
+              n_cycles: nCycles,
+              quantizer: 'nearest',
+              arch_mode: 'D',
+            });
+            const sim = simulate(cfg);
+            const g = sim.g;
+            const tVco = sim.t_vco_s;
+            const eArr = sim.data.e_FB_abs;
+            let maxAbs = 0;
+            let argk = 0;
+            for (let i = 0; i < eArr.length; i++) {
+              const a = Math.abs(eArr[i]);
+              if (a > maxAbs) {
+                maxAbs = a;
+                argk = i;
+              }
+            }
+            const halfLsb = 1 / (2 * g);
+            const ratio = maxAbs / halfLsb;
+            const within = maxAbs <= halfLsb + 1e-9;
+            return {
+              steps: [
+                { label: <>fine LSB 數 <M>{'G'}</M></>, value: `${g}` },
+                { label: <>half-LSB(cycle)</>, value: fmt(halfLsb, 6, 'cyc') },
+                { label: <>half-LSB(時間)</>, value: fmt((halfLsb * tVco) * 1e15, 5, 'fs') },
+                { label: <><M>{'\\max_k |e_{FB,abs}[k]|'}</M></>, value: `${fmt(maxAbs, 6, 'cyc')}(k=${argk})` },
+                { label: <>同上,換算時間</>, value: fmt(maxAbs * tVco * 1e15, 5, 'fs') },
+                { label: <>對 half-LSB 的比例</>, value: fmt(ratio, 5) },
+              ],
+              answer: (
+                <>
+                  {nCycles} 拍內 <M>{'\\max|e_{FB,abs}|'}</M> = {fmt(maxAbs, 5, 'cyc')} ={' '}
+                  {fmt(maxAbs * tVco * 1e15, 4, 'fs')},為 half-LSB 的 {fmt(ratio, 4)}
+                  倍 — {within ? '確認未超出界限' : '超出界限(不應發生於 nearest)'}
+                </>
+              ),
+              warn: within ? undefined : `max|e_FB_abs| 超出 half-LSB 界 — 請確認 quantizer 設定`,
+            };
+          }}
+        />
       </SectionExample>
 
       <SectionFigure

@@ -25,6 +25,8 @@
 | B5 | quantizer 預設 nearest(half-up),DSM(ef1/mash11/mash111)為選項 | `quantizer='nearest'` |
 | B6 | actuator 預設 full(fine 1/G quantization);`dsm_only` 為 classic divider-modulating DSM:quantizer 作用在整數 cycle,R_FB=R_INJ≡0,injection 對齊誤差掃 ±0.5 cycle(MODEL_SPEC §7.1)。mash11/mash111 在 N∈(3,3.25) 的 dsm_only 多數不合法(瞬時 divide ratio 觸 0,model 故意 raise) | `actuator_mode='full'` |
 | B7 | injection gating 為 deterministic digital gate:`threshold` mode 只在 \|e_ZC_hw\|≤threshold 時 fire;非 fire 拍無 phase kick、theta 照常累積;PRNG 消耗與 gating 無關(MODEL_SPEC §14) | `inj_gate_mode='off'`, `inj_gate_threshold_cycles=0.0625` |
+| B8 | PLL loop 以 behavioral type-II PI loop 近似:PD 直接取樣 residual phase `pd_e=wrapRadians(theta_minus)`(injection kick 之前),proportional kick `-loop_kp*pd_e` 同拍施加,integrator `u_loop[k+1]=u_loop[k]-loop_ki*pd_e[k]` 修正 detuning 項;非真實 PFD/CP/LF/VCO tuning 模型,gain 為 lumped 無因次參數(MODEL_SPEC §14.1) | `loop_mode='off'`, `loop_kp=0.05`, `loop_ki=0.005` |
+| B9 | `qnc` actuator = `dsm_only` divider(整數 cycle quantization)+ cancellation DTC:`code = clamp(qNearest(wrap01(s_ideal−y)·G·qnc_gain), 0, G−1)` 於 feedback edge 施加(照常 decode m/c),injection 一律取 modular reverse(不論 arch_mode、不消耗 dsm_inj draws);`qnc_gain=1`+nearest 與 full actuator timing 等效至 1 LSB(max\|e_FB_abs\|≤1/512+1/256),gain≠1 產生 code-dependent residual(0.98 實測 max 0.02125 cycles);cancellation DTC 假設 ideal digital mapping,analog 非理想性沿用 §10(MODEL_SPEC §7.2) | `actuator_mode='full'`, `qnc_gain=1.0` |
 
 ## Analog nonideality 層(全部 behavioral)
 

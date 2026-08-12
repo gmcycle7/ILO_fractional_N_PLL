@@ -2,6 +2,8 @@
  * Chapter 13 — Actual VCO Injection Dynamics (MODEL_SPEC §14, all APPROX).
  * Figure #21: phase response curve with stable/unstable fixed points;
  * Figure #22: convergence plot with K_inj / delta_f / noise sliders;
+ * Figure #22d/#22e: PLL loop co-simulation (§14.1, exp23) — loop-only /
+ * injection-only / both / both+route-offset convergence and u_loop trace;
  * lock range check; PDR LUT CSV import UI.
  */
 
@@ -24,6 +26,7 @@ import EChart from '../components/EChart';
 import EpistemicTag from '../components/EpistemicTag';
 import Callout from '../components/Callout';
 import { M, MathBlock } from '../components/Math';
+import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { ParamPanel, Slider, SelectControl, PresetButtons } from '../components/controls';
 import PhaseWheel from '../components/PhaseWheel';
 import { makeLineOption, makeMarkLine } from '../lib/chartOptions';
@@ -40,9 +43,17 @@ import {
   getPreset,
   presetConfigs,
   replaceConfig,
+  runDynamics,
+  makeAllStreams,
+  configG,
+  configTRefS,
+  wrapCycles,
+  cyclesToDegrees,
+  TWO_PI,
   rms,
+  mean,
 } from '../model';
-import type { InjModel } from '../model';
+import type { InjModel, LoopMode } from '../model';
 
 const meta = chapterById(13)!;
 
@@ -108,6 +119,23 @@ const dth =
     : deltaTheta(cfg.inj_model, cfg.k_inj, e, lutE, lutD);
 const tp = wrapRadians(tm + dth);`;
 
+const LOOP_CODE = `// web/src/model/injectionDynamics.ts — behavioral PI loop(MODEL_SPEC §14.1)
+const loopPi = cfg.loop_mode === 'pi';
+let uLoop = 0.0;
+for (let k = 0; k < n; k++) {
+  /* ... */
+  const tm = loopPi ? tpPrev + a + uLoop + w : tpPrev + a + w;
+  const pd = wrapRadians(tm); // behavioral PD, before any kick (section 14.1)
+  /* ... e_inj 與 deltaTheta 與 §14 完全相同 ... */
+  const tp = loopPi ? wrapRadians(tm - cfg.loop_kp * pd + dth) : wrapRadians(tm + dth);
+  uLoopArr[k] = uLoop;
+  pdE[k] = pd;
+  tpPrev = tp;
+  if (loopPi) {
+    uLoop = uLoop - cfg.loop_ki * pd; // integrator: u_loop[k+1]
+  }
+}`;
+
 /** Gate-threshold sweep points for 圖 #22c(cycles). */
 const GATE_SWEEP = [0.005, 0.01, 0.02, 0.03125, 0.0625, 0.09375, 0.125, 0.1875, 0.25, 0.375, 0.5];
 
@@ -152,6 +180,345 @@ function exampleLutText(): string {
     lines.push(`${e.toPrecision(8)}, ${d.toPrecision(8)}`);
   }
   return lines.join('\n');
+}
+
+/* ---------------------------------------------------------------------------
+ * 數值例子(SectionExample):三個互動 worked example。
+ * 每個 compute 都是 pure function 且完全走 ../model(lockCondition /
+ * sinFixedPointRad / runDynamics / simulate),沒有任何寫死的答案常數 —
+ * 換掉任何一個輸入,步驟與答案都跟著重算。
+ * ------------------------------------------------------------------------- */
+
+const EX_N_GATE_CYCLES = 128; // 例 3 的模擬長度(互動流暢度上限)
+
+const EX_LOCK_INPUTS = [
+  { key: 'kInj', label: <M>{'K_{inj}'}</M>, def: 0.3, min: 0.001, max: 1, step: 0.01 },
+  {
+    key: 'dfMHz',
+    label: <M>{'\\Delta f'}</M>,
+    def: 1,
+    min: -400,
+    max: 400,
+    step: 0.1,
+    unit: 'MHz',
+  },
+  { key: 'frefGHz', label: <M>{'f_{ref}'}</M>, def: 4, min: 0.1, max: 20, step: 0.1, unit: 'GHz' },
+];
+
+function exLockCompute(v: Record<string, number>) {
+  const cfg = fromPartial({
+    f_ref_hz: v.frefGHz * 1e9,
+    k_inj: v.kInj,
+    delta_f_hz: v.dfMHz * 1e6,
+  });
+  const tRefS = configTRefS(cfg);
+  const a = TWO_PI * cfg.delta_f_hz * tRefS; // rad/cycle
+  const locked = lockCondition(cfg.k_inj, cfg.delta_f_hz, cfg.f_ref_hz);
+  const thetaSs = sinFixedPointRad(cfg.k_inj, cfg.delta_f_hz, cfg.f_ref_hz);
+  const dfMaxHz = (cfg.k_inj * cfg.f_ref_hz) / TWO_PI;
+  const ratio = a / cfg.k_inj;
+  return {
+    steps: [
+      {
+        label: (
+          <>
+            <M>{'T_{ref} = 1/f_{ref}'}</M>
+          </>
+        ),
+        value: fmt(tRefS * 1e12, 6, 'ps'),
+      },
+      {
+        label: (
+          <>
+            <M>{'a = 2\\pi\\,\\Delta f\\,T_{ref}'}</M>(每拍自由漂移)
+          </>
+        ),
+        value: fmt(a, 6, 'rad/cycle'),
+      },
+      {
+        label: (
+          <>
+            <M>{'a/K_{inj}'}</M>(<M>{'\\sin\\theta_{ss}'}</M> 的值,必須 ≤ 1)
+          </>
+        ),
+        value: fmt(ratio, 6),
+      },
+      {
+        label: (
+          <>
+            lock condition <M>{'|a| \\le K_{inj}'}</M>
+          </>
+        ),
+        value: locked ? '成立(有 fixed point)' : '不成立(cycle slipping)',
+      },
+      {
+        label: (
+          <>
+            <M>{'\\theta_{ss} = \\arcsin(a/K_{inj})'}</M>(stable 解)
+          </>
+        ),
+        value: thetaSs === null ? '不存在' : fmt(thetaSs, 6, 'rad'),
+      },
+      {
+        label: (
+          <>
+            <M>{'\\Delta f_{max} = K_{inj} f_{ref}/(2\\pi)'}</M>
+          </>
+        ),
+        value: fmt(dfMaxHz / 1e6, 7, 'MHz'),
+      },
+    ],
+    answer:
+      thetaSs === null ? (
+        <>
+          超出 lock range:<M>{'|a|'}</M> = {fmt(Math.abs(a), 6, 'rad')} &gt; <M>{'K_{inj}'}</M> ={' '}
+          {fmt(cfg.k_inj, 6)},sin map 無 fixed point
+        </>
+      ) : (
+        <>
+          <M>{'\\theta_{ss}'}</M> = {fmt(thetaSs, 6, 'rad')} ={' '}
+          {fmt(cyclesToDegrees(thetaSs / TWO_PI), 6, '°')},lock range ±
+          {fmt(dfMaxHz / 1e6, 7, 'MHz')}
+        </>
+      ),
+    warn:
+      thetaSs !== null && Math.abs(ratio) > 0.9
+        ? `接近 lock range 邊界(a/K_inj = ${fmt(ratio, 4)}),θ_ss 逼近 90°、cos θ_ss → 0,穩定裕度極小`
+        : undefined,
+  };
+}
+
+const EX_KICK_INPUTS = [
+  {
+    key: 'eLsb',
+    label: (
+      <>
+        <M>{'e_{ZC,hw}'}</M>(未 wrap)
+      </>
+    ),
+    def: 160,
+    min: -512,
+    max: 512,
+    step: 1,
+    unit: 'LSB',
+  },
+  { key: 'kInj', label: <M>{'K_{inj}'}</M>, def: 0.3, min: 0.001, max: 1, step: 0.01 },
+  {
+    key: 'dfMHz',
+    label: <M>{'\\Delta f'}</M>,
+    def: 1,
+    min: -400,
+    max: 400,
+    step: 0.1,
+    unit: 'MHz',
+  },
+  { key: 'frefGHz', label: <M>{'f_{ref}'}</M>, def: 4, min: 0.1, max: 20, step: 0.1, unit: 'GHz' },
+];
+
+function exKickCompute(v: Record<string, number>) {
+  const cfg = fromPartial({
+    f_ref_hz: v.frefGHz * 1e9,
+    n_cycles: 1,
+    inj_model: 'sin',
+    k_inj: v.kInj,
+    delta_f_hz: v.dfMHz * 1e6,
+  });
+  const g = configG(cfg);
+  const raw = v.eLsb / g; // cycles, 未 wrap
+  const eCyc = wrapCycles(raw); // (-0.5, 0.5]
+  const dyn = runDynamics(cfg, [eCyc], makeAllStreams(cfg.seed), null);
+  const eInj = dyn.e_inj[0];
+  const dTheta = dyn.delta_theta[0];
+  const frac = eInj === 0 ? 0 : Math.abs(dTheta / eInj);
+  return {
+    steps: [
+      {
+        label: (
+          <>
+            <M>{'e_{ZC,hw}'}</M> 換算成 cycles(<M>{'\\mathrm{LSB} = 1/G'}</M>,G = {g})
+          </>
+        ),
+        value: fmt(raw, 8, 'cyc'),
+      },
+      {
+        label: (
+          <>
+            <M>{'\\operatorname{wrapCycles}'}</M> 後(mod-1 之後最近的 zero crossing)
+          </>
+        ),
+        value: fmt(eCyc, 8, 'cyc'),
+      },
+      {
+        label: (
+          <>
+            <M>{'\\varepsilon_{hw} = 2\\pi\\,e_{ZC,hw}'}</M>
+          </>
+        ),
+        value: fmt(dyn.epsilon_hw[0], 6, 'rad'),
+      },
+      {
+        label: (
+          <>
+            <M>{'\\theta^{-}[0] = \\theta^{+}[-1] + a'}</M>
+          </>
+        ),
+        value: fmt(dyn.theta_minus[0], 6, 'rad'),
+      },
+      {
+        label: (
+          <>
+            <M>{'e_{inj} = \\operatorname{wrapRadians}(\\theta^{-} + \\varepsilon_{hw})'}</M>
+          </>
+        ),
+        value: fmt(eInj, 6, 'rad'),
+      },
+      {
+        label: (
+          <>
+            <M>{'\\Delta\\theta = -K_{inj}\\sin(e_{inj})'}</M>(sin map)
+          </>
+        ),
+        value: fmt(dTheta, 6, 'rad'),
+      },
+      {
+        label: (
+          <>
+            單拍修正比例 <M>{'|\\Delta\\theta| / |e_{inj}|'}</M>
+          </>
+        ),
+        value: fmt(frac * 100, 4, '%'),
+      },
+    ],
+    answer: (
+      <>
+        <M>{'\\theta^{+}[0] = \\operatorname{wrapRadians}(\\theta^{-} + \\Delta\\theta)'}</M> ={' '}
+        {fmt(dyn.theta_plus[0], 6, 'rad')} ={' '}
+        {fmt(cyclesToDegrees(dyn.theta_plus[0] / TWO_PI), 6, '°')}
+      </>
+    ),
+    warn:
+      Math.abs(eInj) > Math.PI / 2
+        ? `|e_inj| = ${fmt(Math.abs(eInj), 4)} rad 已超出 sin map 的近線性區(π/2),拉力隨 |e| 增大而下降 — 這正是 dsm_only 需要 gating 的原因`
+        : undefined,
+  };
+}
+
+const EX_GATE_INPUTS = [
+  { key: 'nDiv', label: <M>{'N'}</M>, def: 3.13, min: 3, max: 3.25, step: 0.001 },
+  {
+    key: 'th',
+    label: (
+      <>
+        gate threshold <M>{'\\mathrm{th}'}</M>
+      </>
+    ),
+    def: 0.0625,
+    min: 0.002,
+    max: 0.5,
+    step: 0.0005,
+    unit: 'cyc',
+  },
+  { key: 'kInj', label: <M>{'K_{inj}'}</M>, def: 0.3, min: 0.001, max: 1, step: 0.01 },
+  {
+    key: 'dfMHz',
+    label: <M>{'\\Delta f'}</M>,
+    def: 1,
+    min: -400,
+    max: 400,
+    step: 0.1,
+    unit: 'MHz',
+  },
+];
+
+function exGateCompute(v: Record<string, number>) {
+  const cfg = fromPartial({
+    f_ref_hz: F_REF,
+    n_div: v.nDiv,
+    n_cycles: EX_N_GATE_CYCLES,
+    actuator_mode: 'dsm_only',
+    inj_model: 'sin',
+    k_inj: v.kInj,
+    delta_f_hz: v.dfMHz * 1e6,
+    inj_gate_mode: 'threshold',
+    inj_gate_threshold_cycles: v.th,
+  });
+  const res = simulate(cfg);
+  const fired = res.data.inj_fired;
+  let nFired = 0;
+  for (let k = 0; k < fired.length; k++) nFired += fired[k];
+  const rho = mean(fired);
+  const rhoPred = 2 * v.th;
+  const a = TWO_PI * cfg.delta_f_hz * configTRefS(cfg);
+  const budget = rho * cfg.k_inj;
+  const effective = Math.abs(a) <= budget;
+  const tailRms = rms(res.data.theta_plus.subarray(EX_N_GATE_CYCLES / 2));
+  return {
+    steps: [
+      {
+        label: (
+          <>
+            <M>{'a = 2\\pi\\,\\Delta f\\,T_{ref}'}</M>
+          </>
+        ),
+        value: fmt(a, 6, 'rad/cycle'),
+      },
+      {
+        label: <>實際 fire 拍數(simulate,dsm_only + threshold gate)</>,
+        value: `${nFired} / ${EX_N_GATE_CYCLES}`,
+      },
+      {
+        label: (
+          <>
+            實測 fire 率 <M>{'\\rho'}</M>
+          </>
+        ),
+        value: fmt(rho * 100, 6, '%'),
+      },
+      {
+        label: (
+          <>
+            預估 <M>{'\\rho \\approx 2\\,\\mathrm{th}'}</M>(均勻分布假設)
+          </>
+        ),
+        value: fmt(rhoPred * 100, 6, '%'),
+      },
+      {
+        label: (
+          <>
+            有效修正預算 <M>{'\\rho\\,K_{inj}'}</M>
+          </>
+        ),
+        value: fmt(budget, 6, 'rad/cycle'),
+      },
+      {
+        label: (
+          <>
+            gated lock 條件 <M>{'|a| \\lesssim \\rho\\,K_{inj}'}</M>
+          </>
+        ),
+        value: effective ? '成立' : '不成立',
+      },
+      {
+        label: (
+          <>
+            後半段 <M>{'\\theta^{+}'}</M> 的 rms(k ≥ {EX_N_GATE_CYCLES / 2})
+          </>
+        ),
+        value: `${fmt(tailRms, 6, 'rad')} = ${fmt(cyclesToDegrees(tailRms / TWO_PI), 6, '°')}`,
+      },
+    ],
+    answer: (
+      <>
+        <M>{'\\rho'}</M> = {fmt(rho * 100, 6, '%')}({nFired}/{EX_N_GATE_CYCLES}),
+        <M>{'\\rho K_{inj}'}</M> = {fmt(budget, 6)} rad/cycle {effective ? '≥' : '<'}{' '}
+        <M>{'|a|'}</M> = {fmt(Math.abs(a), 6)} → {effective ? '仍可鎖定' : '鎖不住'};tail rms{' '}
+        <M>{'\\theta^{+}'}</M> = {fmt(tailRms, 6, 'rad')}
+      </>
+    ),
+    warn: effective
+      ? undefined
+      : `gate 太窄:平均每拍修正量 ρK_inj = ${fmt(budget, 4)} rad 追不上 detuning |a| = ${fmt(Math.abs(a), 4)} rad,θ 會持續漂移`,
+  };
 }
 
 export default function Chapter13() {
@@ -230,6 +597,67 @@ export default function Chapter13() {
       }),
     [exp21cfgs],
   );
+
+  // --- PLL loop co-simulation(MODEL_SPEC §14.1,exp23)---
+  const [loopMode, setLoopMode] = useState<LoopMode>('pi');
+  const [loopKp, setLoopKp] = useState(0.05);
+  const [loopKi, setLoopKi] = useState(0.005);
+  const [kInjL, setKInjL] = useState(0.3);
+  const [dfLMhz, setDfLMhz] = useState(250);
+  const [routeC, setRouteC] = useState(0.01);
+
+  const aL = 2 * Math.PI * dfLMhz * 1e6 * T_REF; // per-cycle detuning(rad)
+  const loopBase = useMemo(
+    () => ({
+      n_div: 3.13,
+      sigma_vco_w_rad: 0.02,
+      delta_f_hz: dfLMhz * 1e6,
+      loop_kp: loopKp,
+      loop_ki: loopKi,
+    }),
+    [dfLMhz, loopKp, loopKi],
+  );
+  // exp23a/b/c/d 結構:同參數下 loop-only / injection-only / both / both+route
+  const resLoopOnly = useMemo(
+    () => simulate(fromPartial({ ...loopBase, inj_model: 'none', loop_mode: loopMode })),
+    [loopBase, loopMode],
+  );
+  const resInjOnly = useMemo(
+    () => simulate(fromPartial({ ...loopBase, inj_model: 'sin', k_inj: kInjL })),
+    [loopBase, kInjL],
+  );
+  const resBoth = useMemo(
+    () => simulate(fromPartial({ ...loopBase, inj_model: 'sin', k_inj: kInjL, loop_mode: loopMode })),
+    [loopBase, kInjL, loopMode],
+  );
+  const resRoute = useMemo(
+    () =>
+      simulate(
+        fromPartial({
+          ...loopBase,
+          inj_model: 'sin',
+          k_inj: kInjL,
+          loop_mode: loopMode,
+          route_inj_cycles: routeC,
+        }),
+      ),
+    [loopBase, kInjL, loopMode, routeC],
+  );
+  const loopStats = useMemo(() => {
+    const tail = (a: Float64Array) => a.subarray(256);
+    return {
+      rmsLoop: rms(tail(resLoopOnly.data.theta_plus)),
+      rmsInj: rms(tail(resInjOnly.data.theta_plus)),
+      rmsBoth: rms(tail(resBoth.data.theta_plus)),
+      rmsRoute: rms(tail(resRoute.data.theta_plus)),
+      eInjRmsInj: rms(tail(resInjOnly.data.e_inj)),
+      eInjRmsBoth: rms(tail(resBoth.data.e_inj)),
+      meanTpRoute: mean(tail(resRoute.data.theta_plus)),
+      meanEInjRoute: mean(tail(resRoute.data.e_inj)),
+      uEndBoth: resBoth.data.u_loop[N_SIM - 1],
+      uEndRoute: resRoute.data.u_loop[N_SIM - 1],
+    };
+  }, [resLoopOnly, resInjOnly, resBoth, resRoute]);
 
   useEffect(() => {
     setStatus(
@@ -426,6 +854,98 @@ export default function Chapter13() {
     return opt;
   }, [gateSweep, ct]);
 
+  // --- 圖 #22d:loop-only / injection-only / both / both+route convergence ---
+  const loopConvOption = useMemo(() => {
+    const xy = (arr: Float64Array) => Array.from(arr, (v, k) => [k, v] as [number, number]);
+    const opt = makeLineOption({
+      xLabel: 'k (reference cycle)',
+      yLabel: 'θ⁺[k] (rad)',
+      yTickFormatter: (v) => trimNumber(v, 3),
+      series: [
+        {
+          name: `(b) injection only(K=${trimNumber(kInjL, 3)})`,
+          data: xy(resInjOnly.data.theta_plus),
+          color: ct.bad,
+          width: 1,
+        },
+        {
+          name: `(a) loop only(${loopMode === 'pi' ? `kp=${trimNumber(loopKp, 4)}, ki=${trimNumber(loopKi, 4)}` : 'loop off'})`,
+          data: xy(resLoopOnly.data.theta_plus),
+          color: ct.series[1],
+          width: 1.2,
+        },
+        {
+          name: '(c) both',
+          data: xy(resBoth.data.theta_plus),
+          color: ct.accent,
+          width: 1.8,
+        },
+        {
+          name: `(d) both + route_inj=${trimNumber(routeC, 4)} cycle`,
+          data: xy(resRoute.data.theta_plus),
+          color: ct.series[3],
+          dashed: true,
+        },
+      ],
+    });
+    const o = opt as unknown as { series?: Record<string, unknown>[] };
+    if (o.series && o.series[0]) {
+      o.series[0].markLine = makeMarkLine([
+        { y: Math.PI, label: '+π' },
+        { y: -Math.PI, label: '−π' },
+      ]);
+    }
+    return opt;
+  }, [resLoopOnly, resInjOnly, resBoth, resRoute, loopMode, loopKp, loopKi, kInjL, routeC, ct]);
+
+  // --- 圖 #22e:u_loop[k] integrator trace ---
+  const uLoopOption = useMemo(() => {
+    const xy = (arr: Float64Array) => Array.from(arr, (v, k) => [k, v] as [number, number]);
+    const uTarget = -aL; // loop-only / both 的理論終點
+    const uTargetRoute = -aL + kInjL * Math.sin(2 * Math.PI * routeC);
+    const opt = makeLineOption({
+      xLabel: 'k (reference cycle)',
+      yLabel: 'u_loop[k] (rad/cycle)',
+      yTickFormatter: (v) => trimNumber(v, 3),
+      series: [
+        {
+          name: '(a) loop only',
+          data: xy(resLoopOnly.data.u_loop),
+          color: ct.series[1],
+          width: 1.2,
+        },
+        {
+          name: '(c) both',
+          data: xy(resBoth.data.u_loop),
+          color: ct.accent,
+          width: 1.8,
+        },
+        {
+          name: `(d) both + route_inj=${trimNumber(routeC, 4)}`,
+          data: xy(resRoute.data.u_loop),
+          color: ct.series[3],
+          dashed: true,
+        },
+      ],
+    });
+    const o = opt as unknown as { series?: Record<string, unknown>[] };
+    if (o.series && o.series[0]) {
+      o.series[0].markLine = makeMarkLine([
+        { y: uTarget, label: `−2πΔf·T_ref = ${trimNumber(uTarget, 4)}`, color: ct.good },
+        ...(routeC !== 0
+          ? [
+              {
+                y: uTargetRoute,
+                label: `−a + K·sin(2π·route) = ${trimNumber(uTargetRoute, 4)}`,
+                color: ct.warn,
+              },
+            ]
+          : []),
+      ]);
+    }
+    return opt;
+  }, [resLoopOnly, resBoth, resRoute, aL, kInjL, routeC, ct]);
+
   return (
     <ChapterShell chapter={meta.id} titleZh={meta.titleZh} titleEn={meta.titleEn}>
       <SectionQuestion>
@@ -445,6 +965,11 @@ export default function Chapter13() {
           </li>
           <li>為什麼 scheduler(第 3–12 章)要先在 open-loop 驗證完,才加上 injection dynamics?</li>
           <li>transistor-level 的 PDR/PRC 曲線如何以 CSV LUT 匯入取代 sin map?</li>
+          <li>
+            PLL loop 與 injection 同時作用在同一個 VCO 時,誰負責 frequency、誰負責
+            per-cycle jitter?loop integrator 會如何「誤讀」injection 的 static offset?
+            <EpistemicTag kind="EXPERIMENT" />
+          </li>
         </ul>
       </SectionQuestion>
 
@@ -623,17 +1148,86 @@ export default function Chapter13() {
           static offset 校正到零(第 15 章 calibrated mapping),要嘛讓 loop 對 injection
           residual 的可見度降低(gated integrator / 降 BW)。<EpistemicTag kind="INFERENCE" />
         </p>
-        <Callout type="warn" title="ASSUMPTION — 本模型不 co-simulate PLL loop">
+        <Callout type="note" title="上兩段的定性推論,現在可以量化了">
           <p>
-            本章的 θ 遞迴只有固定 detuning <M>{'\\Delta f'}</M> 與 noise,<strong>沒有</strong>{' '}
-            loop filter / integrator 狀態(<M>{'\\Delta f'}</M> 不隨 θ 回授更新)。上兩段的
-            loop–injection 互動是定性推論,本 model 無法給數字。co-simulation 需要加入:PFD
-            對 <M>{'\\theta^{+}'}</M> 的取樣、loop filter 狀態(<M>{'K_p, K_i'}</M>)、每拍更新
-            的 <M>{'\\Delta f[k]'}</M> 與 loop 延遲,才能量化 contention 的平衡 detuning、
-            kick 振幅分布、spur level 對 loop BW 的關係與雙 actuator 的穩定裕度。
-            <EpistemicTag kind="ASSUMPTION" />
+            MODEL_SPEC §14.1 已加入 behavioral type-II PI loop(<code>loop_mode='pi'</code>:
+            per-cycle 的 <M>{'u_{loop}[k]'}</M> integrator 狀態 + proportional kick),讓 loop
+            與 injection 在<strong>同一個</strong> phase map 中共跑 — 見下一節 LOOP
+            CO-SIMULATION 的遞迴式與圖 #22d/#22e(exp23)。它仍是理想化 PI,不是真實
+            CP/LF(限制見章末)。<EpistemicTag kind="ASSUMPTION" />
           </p>
         </Callout>
+      </SectionMath>
+
+      <SectionMath>
+        <p>
+          <strong>LOOP CO-SIMULATION(MODEL_SPEC §14.1,<code>loop_mode='pi'</code>)。</strong>
+          在 §14 的遞迴上加一個 behavioral type-II PI loop:integrator 狀態{' '}
+          <M>{'u_{loop}[k]'}</M>(rad/cycle)直接加進 detuning 項,proportional kick 與
+          injection kick 在同一次 wrap 內施加。<EpistemicTag kind="ASSUMPTION" />
+        </p>
+        <MathBlock>
+          {
+            '\\theta^{-}[k] = \\theta^{+}[k-1] + \\big(\\underbrace{2\\pi\\,\\Delta f\\,T_{ref}}_{a} + u_{loop}[k]\\big) + w_{vco}[k]'
+          }
+        </MathBlock>
+        <MathBlock>
+          {
+            'e_{pd}[k] = \\operatorname{wrapRadians}\\big(\\theta^{-}[k]\\big) \\qquad (\\text{behavioral PD,在任何 kick 之前取樣})'
+          }
+        </MathBlock>
+        <MathBlock>
+          {
+            'u_{loop}[0]=0,\\qquad u_{loop}[k+1] = u_{loop}[k] - K_i\\, e_{pd}[k]'
+          }
+        </MathBlock>
+        <MathBlock>
+          {
+            '\\theta^{+}[k] = \\operatorname{wrapRadians}\\big(\\theta^{-}[k] - K_p\\, e_{pd}[k] + \\Delta\\theta[k]\\big)'
+          }
+        </MathBlock>
+        <p>
+          <strong>Sign convention</strong>:VCO 超前(<M>{'e_{pd}>0'}</M>)→ integrator 把{' '}
+          <M>{'u_{loop}'}</M> 往負推 → 下一拍的等效 detuning 變小 — 負回授。
+          <M>{'u_{loop}'}</M> 是 per-cycle 的頻率修正(等效{' '}
+          <M>{'\\Delta f_{corr} = u_{loop}/(2\\pi T_{ref})'}</M>)。injection kick{' '}
+          <M>{'\\Delta\\theta[k]'}</M> 的公式、gating 與 PRNG 消耗<strong>完全不變</strong>;
+          PD 取樣在 proportional / injection kick <strong>之前</strong>(<M>{'\\theta^{-}'}</M>{' '}
+          一側)。兩個新 per-cycle columns:<code>u_loop</code>(= <M>{'u_{loop}[k]'}</M>,
+          rad/cycle)與 <code>pd_e</code>(= <M>{'e_{pd}[k]'}</M>,rad)。
+          <code>loop_mode='off'</code> 時遞迴與 §14 逐位相同(committed vectors
+          byte-identical)。<EpistemicTag kind="EXACT" />
+        </p>
+        <p>
+          <strong>它建模什麼</strong>:type-II 行為 — integrator 的固定點要求{' '}
+          <M>{'e_{pd}\\to 0'}</M>(靜態 phase error 為零),detuning 完全被吸收:
+          <M>{'u_{loop}\\to -2\\pi\\Delta f\\,T_{ref}'}</M>。pull-in <strong>不受</strong>{' '}
+          injection lock range <M>{'|a|\\le K_{inj}'}</M> 限制:cycle-slip 期間{' '}
+          <M>{'K_p'}</M> 使 <M>{'e_{pd}>0'}</M> 的區段走得較慢,不對稱掃描讓 integrator
+          淨累積出正確的頻率修正。<EpistemicTag kind="APPROX" />
+        </p>
+        <p>
+          <strong>它不建模什麼</strong>:這不是真實 CP/LF — 無 PFD deadzone、無 charge-pump
+          電流 noise/mismatch、無 RC loop filter 極零點,<M>{'K_p,K_i'}</M> 是無因次的
+          per-cycle 增益(對真實 loop BW 的映射非 1:1);PD 直接讀 model 的 residual
+          phase,回授路徑<strong>沒有 divider 與 latency</strong>(真實 loop 的 PFD 比的是
+          divided edge,且慢一個以上的 ref cycle)。<EpistemicTag kind="ASSUMPTION" />
+        </p>
+        <p>
+          <strong>Both + injection static offset</strong>(<M>{'\\varepsilon = 2\\pi\\cdot\\mathrm{route\\_inj}'}</M>)
+          的穩態 <EpistemicTag kind="APPROX" />:integrator 仍強制 <M>{'e_{pd}\\to 0'}</M>,故
+        </p>
+        <MathBlock>
+          {
+            'e_{inj}\\to\\varepsilon,\\qquad \\theta^{+}\\to -K_{inj}\\sin\\varepsilon,\\qquad u_{loop}\\to -2\\pi\\Delta f\\,T_{ref} + K_{inj}\\sin\\varepsilon'
+          }
+        </MathBlock>
+        <p>
+          — loop 把 injection 的 static offset「積分」成 VCO phase shift 與 integrator
+          offset:每個 kick 穩態非零(<M>{'-K_{inj}\\sin\\varepsilon'}</M>),這就是前面
+          qualitative 段落說的雙 actuator 角力,現在有數字(圖 #22d/#22e,exp23d)。
+          <EpistemicTag kind="EXPERIMENT" />
+        </p>
       </SectionMath>
 
       <SectionExample>
@@ -669,6 +1263,62 @@ export default function Chapter13() {
           )}
           。<EpistemicTag kind="APPROX" />
         </p>
+
+        <ExampleProblem
+          index={1}
+          tag="APPROX"
+          title="Lock range 與 sin map 的 steady-state phase"
+          prompt={
+            <>
+              VCO 自由振盪頻率與 <M>{'N f_{ref}'}</M> 差 <M>{'\\Delta f'}</M>,每個 reference
+              cycle 自由漂移 <M>{'a = 2\\pi\\,\\Delta f\\,T_{ref}'}</M>;injection 以 sin map
+              每拍拉回 <M>{'-K_{inj}\\sin\\theta'}</M>。請判斷是否落在 lock range{' '}
+              <M>{'|a|\\le K_{inj}'}</M>,並算出 stable fixed point{' '}
+              <M>{'\\theta_{ss}=\\arcsin(a/K_{inj})'}</M> 與最大可鎖定 detuning{' '}
+              <M>{'\\Delta f_{max}=K_{inj}f_{ref}/(2\\pi)'}</M>。
+            </>
+          }
+          inputs={EX_LOCK_INPUTS}
+          compute={exLockCompute}
+        />
+
+        <ExampleProblem
+          index={2}
+          tag="APPROX"
+          title="單拍 phase map:從 e_ZC,hw 到 θ⁺(含 wrap)"
+          prompt={
+            <>
+              scheduler 這一拍留下的 deterministic 誤差是 <M>{'e_{ZC,hw}'}</M>(以 fine LSB
+              給定,<strong>尚未</strong> wrap)。請先用 <M>{'\\operatorname{wrapCycles}'}</M>{' '}
+              折進 <M>{'(-0.5,0.5]'}</M>(mod-1 ambiguity:誤差超過半個 cycle 時「最近的 zero
+              crossing」會換到另一個 edge),再依 <M>{'\\varepsilon_{hw}=2\\pi e_{ZC,hw}'}</M>、
+              <M>{'e_{inj}=\\operatorname{wrapRadians}(\\theta^{-}+\\varepsilon_{hw})'}</M>、
+              <M>{'\\Delta\\theta=-K_{inj}\\sin e_{inj}'}</M> 走完第 0 拍(<M>{'\\theta^{+}[-1]=0'}</M>
+              ),求 <M>{'\\theta^{+}[0]'}</M>。
+            </>
+          }
+          inputs={EX_KICK_INPUTS}
+          compute={exKickCompute}
+        />
+
+        <ExampleProblem
+          index={3}
+          tag="EXPERIMENT"
+          title="Gated injection:實測 fire 率與有效 lock 條件"
+          prompt={
+            <>
+              在 <code>actuator_mode=&apos;dsm_only&apos;</code>(無 PMUX/DTC actuator,
+              <M>{'e_{ZC,hw}'}</M> 掃過整個 <M>{'\\pm 0.5'}</M> cycle)下開啟 threshold gate:
+              第 k 拍 fire 若且唯若 <M>{'|e_{ZC,hw}[k]| \\le \\mathrm{th}'}</M>。跑{' '}
+              {EX_N_GATE_CYCLES} 拍模擬,量出實際 fire 率 <M>{'\\rho'}</M>、與均勻分布預估{' '}
+              <M>{'2\\,\\mathrm{th}'}</M> 比較,再用 gated 有效條件{' '}
+              <M>{'|a| \\lesssim \\rho K_{inj}'}</M> 判斷能否鎖住,最後看後半段{' '}
+              <M>{'\\theta^{+}'}</M> 的 rms 是否收斂。
+            </>
+          }
+          inputs={EX_GATE_INPUTS}
+          compute={exGateCompute}
+        />
       </SectionExample>
 
       <SectionFigure
@@ -820,6 +1470,147 @@ export default function Chapter13() {
         <EChart option={gateSweepOption} height={300} />
       </SectionFigure>
 
+      <SectionFigure
+        title="圖 #22d — Loop co-simulation:loop-only / injection-only / both(exp23)"
+        caption={
+          <span>
+            exp23 config:N=3.13、σ_vco_w=0.02 rad、Δf=250 MHz — 刻意選在 injection lock
+            edge(K=0.3 → 191 MHz)之外。committed 量測(experiments.ts,tail = 後 256 拍,
+            seed 12345):(a) loop-only 鎖住(u_loop mean −0.392 ≈ −2πΔf·T_ref = −0.3927,
+            θ⁺ rms 0.060 rad)但每拍 jitter 全留;(b) injection-only 失鎖 slips(e_inj rms
+            1.82 rad);(c) both:loop 延伸有效範圍、injection 壓 per-cycle jitter(θ⁺ rms
+            0.019 rad,e_inj rms 0.030 vs 0.063 loop-only);(d) both + route_inj 0.01 cycle:
+            loop 把 injection static offset 積分成 phase shift(mean θ⁺ −0.0134 ≈
+            −K·sin(2π·0.01) = −0.0188,mean e_inj 0.071 ≈ 2π·0.01 = 0.0628)。
+            <EpistemicTag kind="EXPERIMENT" />
+          </span>
+        }
+      >
+        <EChart option={loopConvOption} height={340} />
+        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 8 }}>
+          <div style={{ minWidth: 260, flex: '1 1 260px' }}>
+            <SelectControl<LoopMode>
+              label="loop_mode"
+              value={loopMode}
+              options={[
+                { value: 'pi', label: 'pi(behavioral PI)' },
+                { value: 'off', label: 'off' },
+              ]}
+              onChange={setLoopMode}
+            />
+            <Slider label="loop_kp" value={loopKp} min={0} max={0.2} step={0.005} onChange={setLoopKp} />
+            <Slider
+              label="loop_ki"
+              value={loopKi}
+              min={0}
+              max={0.02}
+              step={0.0005}
+              onChange={setLoopKi}
+            />
+          </div>
+          <div style={{ minWidth: 260, flex: '1 1 260px' }}>
+            <Slider label="K_inj" value={kInjL} min={0} max={1} step={0.01} onChange={setKInjL} />
+            <Slider
+              label="Δf(detuning)"
+              value={dfLMhz}
+              min={0}
+              max={400}
+              step={10}
+              unit="MHz"
+              onChange={setDfLMhz}
+            />
+            <Slider
+              label="route_inj(case d)"
+              value={routeC}
+              min={0}
+              max={0.05}
+              step={0.005}
+              unit="cycle"
+              onChange={setRouteC}
+            />
+          </div>
+        </div>
+        <PresetButtons
+          label="Preset(exp23 one-click)"
+          presets={[
+            {
+              label: 'exp23 標準(Δf=250M,out-of-range)',
+              onClick: () => {
+                setLoopMode('pi');
+                setLoopKp(0.05);
+                setLoopKi(0.005);
+                setKInjL(0.3);
+                setDfLMhz(250);
+                setRouteC(0.01);
+              },
+            },
+            {
+              label: 'in-range Δf=100M',
+              onClick: () => {
+                setLoopMode('pi');
+                setLoopKp(0.05);
+                setLoopKi(0.005);
+                setKInjL(0.3);
+                setDfLMhz(100);
+                setRouteC(0.01);
+              },
+            },
+            {
+              label: 'ki=0(拿掉 integrator)',
+              onClick: () => {
+                setLoopMode('pi');
+                setLoopKp(0.05);
+                setLoopKi(0);
+                setKInjL(0.3);
+                setDfLMhz(250);
+                setRouteC(0.01);
+              },
+            },
+            {
+              label: 'loop off',
+              onClick: () => {
+                setLoopMode('off');
+                setKInjL(0.3);
+                setDfLMhz(250);
+                setRouteC(0.01);
+              },
+            },
+          ]}
+        />
+        <p style={{ marginTop: 6 }}>
+          目前量測(tail = 後 256 拍):θ⁺ rms — loop-only {trimNumber(loopStats.rmsLoop, 4)}、
+          inj-only {trimNumber(loopStats.rmsInj, 4)}、both {trimNumber(loopStats.rmsBoth, 4)}、
+          both+route {trimNumber(loopStats.rmsRoute, 4)} rad;e_inj rms — inj-only{' '}
+          {trimNumber(loopStats.eInjRmsInj, 4)}、both {trimNumber(loopStats.eInjRmsBoth, 4)} rad;
+          route case:mean θ⁺ {trimNumber(loopStats.meanTpRoute, 4)}(理論 −K·sin(2π·route) ={' '}
+          {trimNumber(-kInjL * Math.sin(2 * Math.PI * routeC), 4)})、mean e_inj{' '}
+          {trimNumber(loopStats.meanEInjRoute, 4)}(理論 2π·route ={' '}
+          {trimNumber(2 * Math.PI * routeC, 4)})。<EpistemicTag kind="EXPERIMENT" />
+        </p>
+      </SectionFigure>
+
+      <SectionFigure
+        title="圖 #22e — u_loop[k]:integrator 吸收 detuning"
+        caption={
+          <span>
+            integrator 狀態 u_loop[k](rad/cycle)從 0 斜坡到綠色標線 −2πΔf·T_ref:detuning
+            被 loop 完全吸收後 e_pd → 0(type-II:靜態 phase error 為零)。斜率由 ki·e_pd
+            決定 — pull-in 期間 e_pd 在 ±π 掃動,kp 造成的不對稱讓淨累積指向正確方向。
+            (d) route case(虛線)停在黃色標線 −a + K·sin(2π·route)(exp23d 實測 u_loop end
+            −0.3739 = −0.3927 + 0.0188):integrator 多扛了 injection static offset 的
+            等效頻率,每拍 kick 穩態非零。<EpistemicTag kind="EXPERIMENT" />
+          </span>
+        }
+      >
+        <EChart option={uLoopOption} height={300} />
+        <p style={{ marginTop: 6 }}>
+          目前 u_loop end:both {trimNumber(loopStats.uEndBoth, 4)}、both+route{' '}
+          {trimNumber(loopStats.uEndRoute, 4)} rad/cycle(理論 −a = {trimNumber(-aL, 4)};−a +
+          K·sin(2π·route) = {trimNumber(-aL + kInjL * Math.sin(2 * Math.PI * routeC), 4)})。
+          <EpistemicTag kind="EXPERIMENT" />
+        </p>
+      </SectionFigure>
+
       <SectionCode
         language="typescript"
         title="web/src/model/injectionDynamics.ts — response models 與 fixed point(節錄)"
@@ -835,6 +1626,19 @@ export default function Chapter13() {
           gate mask 由 deterministic 的 <code>e_ZC_hw</code> 計算(§14 convention),dynamics
           迴圈在非 fire 拍直接令 <code>dth = 0</code> — θ 照常累積 detuning 與 noise,
           <code>e_inj</code> 仍照常記錄(「若 fire 會看到的誤差」)。
+        </p>
+      </SectionCode>
+
+      <SectionCode
+        language="typescript"
+        title="web/src/model/injectionDynamics.ts — behavioral PI loop(§14.1,節錄)"
+        code={LOOP_CODE}
+      >
+        <p>
+          <code>uLoop</code> 進 detuning 項、<code>pd</code> 在任何 kick 之前取樣、integrator
+          在拍尾更新(所以記錄的 <code>u_loop[k]</code> 是該拍<strong>使用</strong>的值)。
+          <code>loop_mode='off'</code> 走原路徑,逐位不變 — committed test vectors
+          byte-identical。<EpistemicTag kind="EXACT" />
         </p>
       </SectionCode>
 
@@ -936,6 +1740,28 @@ export default function Chapter13() {
           <li>
             模擬穩態值與綠色理論線重合(殘差為 noise floor)。<EpistemicTag kind="EXPERIMENT" />
           </li>
+          <li>
+            圖 #22d(exp23 preset,Δf=250 MHz &gt; lock edge 191 MHz):injection-only 紅線
+            slips、loop-only 鎖住但抖(0.060 rad)、both 兩者兼得(0.019 rad)。把 loop_mode
+            切 off:both 退化成 inj-only。<EpistemicTag kind="EXPERIMENT" />
+          </li>
+          <li>
+            圖 #22d preset「ki=0」:u_loop 恆 0,detuning 沒被吸收,both 在 Δf=250 MHz 仍失鎖
+            (tail rms 1.49 rad)— pull-in 超出 injection lock range 靠的是{' '}
+            <strong>integrator</strong>,不是 kp(反過來 kp=0 仍鎖,tail rms 0.021 rad)。
+            <EpistemicTag kind="EXPERIMENT" />
+          </li>
+          <li>
+            圖 #22d preset「in-range Δf=100M」:injection-only 也鎖,但留 static offset(mean
+            θ⁺ 0.395 rad = θ_ss − a,θ_ss = asin(a/K) = 0.551);加 loop 後 mean θ⁺ → 0.004 —
+            loop 把靜態 phase error 歸零,injection 只剩 per-cycle jitter 的工作。
+            <EpistemicTag kind="EXPERIMENT" />
+          </li>
+          <li>
+            圖 #22e:route_inj 從 0 掃到 0.05 cycle,黃色標線(−a + K·sin(2π·route))跟著
+            上移、(d) 曲線終點跟著走;route=0 時 (c)(d) 重合於 −a。
+            <EpistemicTag kind="EXPERIMENT" />
+          </li>
         </ul>
       </SectionObserve>
 
@@ -990,9 +1816,17 @@ export default function Chapter13() {
             <a href={chapterHref('dsm-residual-injection-lock')}>第 22 章</a>。
           </li>
           <li>
-            loop / injection 分工:frequency correction 屬 loop、cycle-to-cycle jitter 屬
-            injection;injection 的 static offset 會被 loop integrator 誤讀並積分 — 要嘛校正到
-            零,要嘛降低 loop 對它的可見度。<EpistemicTag kind="INFERENCE" />
+            loop / injection 分工,實測(exp23):<strong>loop = frequency + 低頻</strong>
+            (integrator 把超出 injection lock range 的 Δf=250 MHz 全吸進 u_loop →
+            −2πΔf·T_ref,靜態 phase error → 0);<strong>injection = per-cycle jitter</strong>
+            (loop-only θ⁺ tail rms 0.060 rad → both 0.019 rad;injection-only 直接失鎖)。
+            <EpistemicTag kind="EXPERIMENT" />
+          </li>
+          <li>
+            injection 的 static offset 會被 loop integrator 誤讀並積分成 VCO phase shift:
+            route offset 0.01 cycle → mean θ⁺ = −K·sin(2π·0.01)、u_loop 多扛 +K·sin(ε),
+            每拍 kick 穩態非零(spur/擾動能量變大)— 要嘛校正到零(第 15 章 calibrated
+            mapping),要嘛降低 loop 對它的可見度。<EpistemicTag kind="EXPERIMENT" />
           </li>
         </ul>
       </SectionTakeaway>
@@ -1011,10 +1845,12 @@ export default function Chapter13() {
             </li>
             <li>LUT 模式也只是 static map:假設 phase response 不隨 amplitude/溫度/corner 變化。</li>
             <li>
-              本模型<strong>不</strong> co-simulate PLL loop:θ 遞迴含固定 detuning,無 loop
-              filter/integrator(Δf 不隨 θ 回授)。loop–injection 互動(integrator 對 injection
-              static offset 的積分、contention 平衡點、spur vs loop BW)僅為定性推論;量化需要
-              加入 PFD 取樣、LF 狀態與 per-cycle Δf 更新的 co-simulation。
+              loop co-simulation(§14.1)已存在,但是<strong>理想化的 behavioral PI</strong>:
+              PD 每拍直接讀 residual phase(無真實 PFD/CP — 無 deadzone、無 charge-pump
+              noise/mismatch)、無 RC loop filter 極零點與 CP/LF noise 注入、
+              <strong>無 divider-in-loop 延遲</strong>(回授路徑沒有 N-divider 與 latency,
+              真實 loop 的 PFD 比的是 divided edge 且至少慢一拍);K_p/K_i 為無因次 per-cycle
+              增益,對真實 loop BW 的映射非 1:1。CP/LF 的 spur 與 noise 貢獻不在本模型內。
               <EpistemicTag kind="ASSUMPTION" />
             </li>
             <li>

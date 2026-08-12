@@ -8,7 +8,14 @@ import { useEffect, useState } from 'react';
 import type { ChapterMeta } from '../chapters/index';
 import { useSimStatus, type SimStatus } from '../SimStatusContext';
 import { getThemeMode, setThemeMode, subscribeTheme, type ThemeMode } from '../lib/theme';
-import { N_DIV_MAX, N_DIV_MIN, N_DIV_PRESETS, useGlobalNDiv } from '../lib/globalParams';
+import {
+  N_DIV_MAX,
+  N_DIV_MIN,
+  N_DIV_PRESETS,
+  N_DIV_PRESET_GROUPS,
+  findNDivPreset,
+  useGlobalNDiv,
+} from '../lib/globalParams';
 
 const STATUS_LABELS: Record<SimStatus, string> = {
   idle: 'Idle',
@@ -30,6 +37,44 @@ function SimStatusIndicator() {
         {message ? ` — ${message}` : ''}
       </span>
     </span>
+  );
+}
+
+/**
+ * The extra preset groups (sub-LSB 階梯 / 特殊) behind one compact select, so
+ * the top bar keeps exactly the five original buttons. Index 0 of
+ * N_DIV_PRESET_GROUPS is the 基本 group already rendered as those buttons.
+ */
+const N_DIV_EXTRA_GROUPS = N_DIV_PRESET_GROUPS.slice(1);
+
+function NDivMoreSelect({ nDiv, setNDiv }: { nDiv: number; setNDiv: (n: number) => void }) {
+  const active = N_DIV_EXTRA_GROUPS.some((g) => g.values.some((p) => p.n === nDiv))
+    ? findNDivPreset(nDiv)
+    : undefined;
+  return (
+    <select
+      className={`topbar-ndiv-more${active ? ' topbar-ndiv-active' : ''}`}
+      aria-label="更多 N presets"
+      title={active ? active.hint : '更多 N presets:sub-LSB 階梯 / 特殊'}
+      value={active ? String(active.n) : ''}
+      onChange={(e) => {
+        const raw = e.target.value;
+        if (raw === '') return;
+        const n = Number(raw);
+        if (Number.isFinite(n)) setNDiv(n);
+      }}
+    >
+      <option value="">更多…</option>
+      {N_DIV_EXTRA_GROUPS.map((g) => (
+        <optgroup key={g.label} label={g.label}>
+          {g.values.map((p) => (
+            <option key={p.n} value={String(p.n)} title={p.hint}>
+              {p.label}
+            </option>
+          ))}
+        </optgroup>
+      ))}
+    </select>
   );
 }
 
@@ -59,12 +104,14 @@ function NDivControl() {
             key={n}
             type="button"
             className={`topbar-ndiv-preset${nDiv === n ? ' topbar-ndiv-active' : ''}`}
+            title={findNDivPreset(n)?.hint}
             onClick={() => setNDiv(n)}
           >
             {String(n)}
           </button>
         ))}
       </div>
+      <NDivMoreSelect nDiv={nDiv} setNDiv={setNDiv} />
       <input
         type="number"
         className="topbar-ndiv-input"

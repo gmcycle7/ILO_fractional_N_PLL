@@ -12,16 +12,18 @@ export type ArchMode = 'A' | 'B' | 'C' | 'D';
 export type InjMapping = 'naive' | 'nearest' | 'calibrated';
 export type DtcModeName = 'normalized' | 'fixed_time';
 export type InjModel = 'none' | 'reset' | 'linear' | 'sin' | 'lut';
-export type ActuatorMode = 'full' | 'dsm_only';
+export type ActuatorMode = 'full' | 'dsm_only' | 'qnc';
 export type InjGateMode = 'off' | 'threshold';
+export type LoopMode = 'off' | 'pi';
 
 const QUANTIZERS: readonly string[] = ['floor', 'nearest', 'truncate', 'ef1', 'mash11', 'mash111'];
 const ARCH_MODES: readonly string[] = ['A', 'B', 'C', 'D'];
 const INJ_MAPPINGS: readonly string[] = ['naive', 'nearest', 'calibrated'];
 const DTC_MODES: readonly string[] = ['normalized', 'fixed_time'];
 const INJ_MODELS: readonly string[] = ['none', 'reset', 'linear', 'sin', 'lut'];
-const ACTUATOR_MODES: readonly string[] = ['full', 'dsm_only'];
+const ACTUATOR_MODES: readonly string[] = ['full', 'dsm_only', 'qnc'];
 const INJ_GATE_MODES: readonly string[] = ['off', 'threshold'];
+const LOOP_MODES: readonly string[] = ['off', 'pi'];
 
 export interface SimConfig {
   // --- core system (MODEL_SPEC section 1) ---
@@ -39,7 +41,8 @@ export interface SimConfig {
   quantizer: Quantizer; // floor|nearest|truncate|ef1|mash11|mash111 [B5]
   dither_amp_lsb: number; // triangular dither amplitude (quantizer LSB), pre-quantize
   arch_mode: ArchMode; // A|B|C|D (section 7; D = quantize once + modular reverse)
-  actuator_mode: ActuatorMode; // full|dsm_only (section 7.1)
+  actuator_mode: ActuatorMode; // full|dsm_only|qnc (sections 7.1, 7.2)
+  qnc_gain: number; // QNC cancellation-DTC gain (section 7.2; 'qnc' mode only)
   inj_mapping: InjMapping; // naive|nearest|calibrated (section 8)
   dtc_mode: DtcModeName; // normalized|fixed_time (section 11)
   dtc_lsb_fs: number; // fixed_time DTC LSB in fs [B2]
@@ -73,6 +76,11 @@ export interface SimConfig {
   pdr_lut: number[][] | null; // [[e_rad, dtheta_rad], ...]
   inj_gate_mode: InjGateMode; // off|threshold (section 14 gating)
   inj_gate_threshold_cycles: number; // fire iff |e_ZC_hw| <= threshold
+
+  // --- PLL loop co-simulation (section 14.1) ---
+  loop_mode: LoopMode; // off|pi (behavioral type-II PI loop) [B8]
+  loop_kp: number; // proportional gain (dimensionless)
+  loop_ki: number; // integral gain (dimensionless)
 }
 
 /** Spec defaults (identical to the Python dataclass defaults). */
@@ -91,6 +99,7 @@ export function defaultConfig(): SimConfig {
     dither_amp_lsb: 0.0,
     arch_mode: 'D',
     actuator_mode: 'full',
+    qnc_gain: 1.0,
     inj_mapping: 'naive',
     dtc_mode: 'normalized',
     dtc_lsb_fs: 312.5,
@@ -120,6 +129,9 @@ export function defaultConfig(): SimConfig {
     pdr_lut: null,
     inj_gate_mode: 'off',
     inj_gate_threshold_cycles: 0.0625,
+    loop_mode: 'off',
+    loop_kp: 0.05,
+    loop_ki: 0.005,
   };
 }
 
@@ -145,6 +157,9 @@ export function validateConfig(cfg: SimConfig): SimConfig {
   }
   if (!INJ_GATE_MODES.includes(cfg.inj_gate_mode)) {
     throw new Error(`inj_gate_mode must be one of ${INJ_GATE_MODES.join(', ')}`);
+  }
+  if (!LOOP_MODES.includes(cfg.loop_mode)) {
+    throw new Error(`loop_mode must be one of ${LOOP_MODES.join(', ')}`);
   }
   if (cfg.tap_mismatch_cycles.length !== cfg.n_tap) {
     throw new Error('tap_mismatch_cycles must have n_tap entries');

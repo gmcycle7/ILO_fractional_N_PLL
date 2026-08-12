@@ -37,6 +37,23 @@
  * (Delta_theta = 0; theta keeps accumulating detuning/noise); e_inj is still
  * recorded as the error a pulse would have seen, and PRNG stream consumption
  * is identical with or without gating.
+ *
+ * PLL loop co-simulation (spec section 14.1) [ASSUMPTION], loop_mode == 'pi':
+ * behavioral type-II PI loop; the PD samples the residual phase BEFORE the
+ * injection kick:
+ *
+ *     theta_minus[k] = theta_plus[k-1] + (2*pi*Delta_f*T_ref + u_loop[k])
+ *                      + w_vco[k]
+ *     pd_e[k]        = wrapRadians(theta_minus[k])
+ *     u_loop[0] = 0;  u_loop[k+1] = u_loop[k] - loop_ki * pd_e[k]
+ *     theta_plus[k]  = wrapRadians(theta_minus[k] - loop_kp*pd_e[k]
+ *                                  + Delta_theta[k])
+ *
+ * The injection kick is unchanged (same e_inj formula, gating, PRNG draws)
+ * and is applied after the proportional kick (summed in the same wrap).
+ * loop_mode == 'off' keeps the section-14 recursion bit-identical
+ * (u_loop == 0, no proportional kick); pd_e is still recorded as the error
+ * the PD would observe.
  */
 
 import type { SimConfig } from './config';
@@ -51,6 +68,8 @@ export interface DynamicsResult {
   delta_theta: Float64Array;
   theta_plus: Float64Array;
   e_ZC_total: Float64Array;
+  u_loop: Float64Array;
+  pd_e: Float64Array;
 }
 
 /** |2*pi*Delta_f*T_ref| <= K_inj (sinusoidal map lock range). */
@@ -154,14 +173,18 @@ export function runDynamics(
   const dTheta = new Float64Array(n);
   const thetaPlus = new Float64Array(n);
   const eZcTotal = new Float64Array(n);
+  const uLoopArr = new Float64Array(n);
+  const pdE = new Float64Array(n);
 
   const sVw = streams.vco_w;
   const sRw = streams.vco_rw;
   const sRef = streams.ref;
   const sPulse = streams.pulse;
 
+  const loopPi = cfg.loop_mode === 'pi';
   let tpPrev = 0.0;
   let rw = 0.0;
+  let uLoop = 0.0;
   for (let k = 0; k < n; k++) {
     let w = 0.0;
     if (cfg.sigma_vco_w_rad > 0.0 && sVw !== undefined) {
@@ -171,7 +194,8 @@ export function runDynamics(
       rw += cfg.sigma_vco_rw_rad * sRw.gauss();
       w += rw;
     }
-    const tm = tpPrev + a + w;
+    const tm = loopPi ? tpPrev + a + uLoop + w : tpPrev + a + w;
+    const pd = wrapRadians(tm); // behavioral PD, before any kick (section 14.1)
     let epsRand = 0.0;
     if (cfg.sigma_ref_s > 0.0 && sRef !== undefined) {
       epsRand += (twoPi * (cfg.sigma_ref_s * sRef.gauss())) / tVco;
@@ -184,14 +208,19 @@ export function runDynamics(
       fired !== null && fired[k] === 0
         ? 0.0 // gated out: no phase kick this cycle
         : deltaTheta(cfg.inj_model, cfg.k_inj, e, lutE, lutD);
-    const tp = wrapRadians(tm + dth);
+    const tp = loopPi ? wrapRadians(tm - cfg.loop_kp * pd + dth) : wrapRadians(tm + dth);
 
     thetaMinus[k] = tm;
     eInj[k] = e;
     dTheta[k] = dth;
     thetaPlus[k] = tp;
     eZcTotal[k] = e / twoPi;
+    uLoopArr[k] = uLoop;
+    pdE[k] = pd;
     tpPrev = tp;
+    if (loopPi) {
+      uLoop = uLoop - cfg.loop_ki * pd;
+    }
   }
 
   return {
@@ -201,5 +230,7 @@ export function runDynamics(
     delta_theta: dTheta,
     theta_plus: thetaPlus,
     e_ZC_total: eZcTotal,
+    u_loop: uLoopArr,
+    pd_e: pdE,
   };
 }

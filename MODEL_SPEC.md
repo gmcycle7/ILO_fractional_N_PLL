@@ -40,6 +40,50 @@ Preset N 值:`3.000, 3.125, 3.130, 3.1375, 3.250`。
 - `N=3.125 → f_vco=12.500 GHz, T_vco=80.000 ps`
 - `N=3.250 → f_vco=13.000 GHz, T_vco=76.923... ps`
 
+### 1.1 Preset N 目錄(完整) `[EXACT]`
+
+`P` 定義為 **DTC grid 上 feedback 量化誤差序列 `e_FB_abs[k]` 的週期**:
+把 `alpha = N - 3` 約分成 `p/q`,則
+
+```
+P = q / gcd(q, G)          (G = 256)
+```
+
+spur 落在 `f_spur,m = (m/P) * f_ref`(§17),故**間距 = `f_ref / P` = 4 GHz / P**。
+`P = 1` 表示 `alpha` on-grid、`e_FB_abs ≡ 0`,**沒有** fractional spur。
+(注意:DTC code 序列 `R_FB[k]` 的週期是 `q` 本身,通常長於 `P`;
+決定 spur 的是誤差序列,不是 code 序列。)
+
+| id | N | f_vco | `alpha*G` | P (DTC grid) | spur 間距 | story |
+|---|---|---|---|---|---|---|
+| — | 3.0 | 12.000 GHz | 0 | 1 | — | integer-N,on-grid,`e_FB ≡ 0` |
+| — | 3.125 | 12.500 GHz | 32 | 1 | — | on-grid `alpha=1/8`,`e_FB ≡ 0` |
+| — | 3.13 | 12.520 GHz | 33.28 | 25 | 160 MHz | 預設 off-grid 主力案例 |
+| — | 3.1375 | 12.550 GHz | 35.2 | 5 | 800 MHz | off-grid `alpha=11/80` |
+| — | 3.25 | 13.000 GHz | 64 | 1 | — | on-grid `alpha=1/4`,`e_FB ≡ 0` |
+| F1 | 3.126953125 | 12.5078125 GHz | 32.5 | 2 | 2 GHz | 半 LSB tie:`alpha=65/512`,half-up `qNearest` 每隔一拍才進位,誤差序列 `0, +0.5 LSB` 交替 → **Nyquist tone** `f_ref/2` |
+| F2 | 3.1259765625 | 12.50390625 GHz | 32.25 | 4 | 1 GHz | 殘量 0.25 LSB(`alpha=129/1024`),4 拍鋸齒 |
+| F3 | 3.125390625 | 12.5015625 GHz | 32.1 | 10 | 400 MHz | 殘量 0.1 LSB(`alpha=321/2560`),10 拍鋸齒 |
+| F4 | 3.1250390625 | 12.50015625 GHz | 32.01 | 100 | 40 MHz | 殘量 0.01 LSB(`alpha=3201/25600`),fractional-boundary **close-in spur** |
+| F5 | 3.2 | 12.800 GHz | 51.2 | 5 | 800 MHz | `alpha=1/5`:integer / PMUX / DTC **三層 grid 的 P 都是 5**(`q=5` 與 1, 4, 256 互質) |
+| F6 | 3.22265625 | 12.890625 GHz | 57 | 1 | — | `12.890625 GHz = 25.78125 Gbps / 2`(Ethernet);`alpha*G = 57` **exactly on-grid**,`e_FB ≡ 0` |
+| F7 | 3.001 | 12.004 GHz | 0.256 | 125 | 32 MHz | near-integer:`alpha = 0.001 < 3/256` → DSM 進入 `n_int = 2` regime(§4);close-in spur |
+| F8 | 3.1545084971874737 | 12.618033988749895 GHz | 39.554175279993274 | — | — | `alpha = 0.25/phi`,`phi = (1+sqrt(5))/2`:quasi-periodic,**無離散 spur** `[APPROX]` |
+
+float64 註記 `[EXACT]`:只有 `3.0, 3.125, 3.25, F1, F2, F6` 是 dyadic rational、
+可被 float64 精確表示;`3.13, 3.1375, F3, F4, F5, F7` 儲存的是十進位值的
+**nearest double**,F8 是無理數的 nearest double。偏差為每個 reference edge
+`~1e-16` cycle,遠低於 `1/256` cycle 的 LSB,故在任何實用模擬長度下
+觀測到的誤差週期等於表列的 nominal `P`(TS 側 `web/src/lib/globalParams.test.ts`
+以數值方式重新推導 P 並比對)。
+
+F8 的 `[APPROX]` 理由:float64 嚴格來說仍是有理數
+(`3.1545084971874737 = 7103321646235285 / 2251799813685248`,`q = 2^51`),
+故形式上 `P = q / gcd(q, 256) = 2^43 = 8796093022208`。
+該週期遠長於任何模擬長度,實務上等同 quasi-periodic、無可辨識的離散 spur。
+F8 的正式儲存值是 float64 計算 `3 + 0.25/((1+sqrt(5))/2)` 的結果
+(Python 與 JS 逐位相同),十進位短表示為 `3.1545084971874737`。
+
 ---
 
 ## 2. 單位與 wrap conventions `[EXACT]`
@@ -143,7 +187,7 @@ DSM quantizer(ef1 與 mash11)給出 `n_integer[k] ∈ {2, 3, 4}`:2 只在
 integer-cycle 邊界;phase quantizer 作用在 absolute fine code 上,每拍增量
 ~`G*N ≈ 800 LSB`)。測試檢查 `{2,3,4}`。
 
-`actuator_mode='dsm_only'`(§7.1)時 quantizer 作用在 **integer-cycle**
+`actuator_mode='dsm_only'` 或 `'qnc'`(§7.1、§7.2)時 quantizer 作用在 **integer-cycle**
 granularity,集合變寬 `[EXPERIMENT]`(同一 grid 實測):nearest/floor →
 `{3,4}`;ef1 → `{2,3,4,5}`;mash11 / mash111 在 `N ∈ (3, 3.25)` 的多數值
 會使瞬時 divide ratio 觸及 0(duplicate edge)而違反 edge monotonicity
@@ -267,7 +311,7 @@ z0 = 0 時:u_INJ_ideal[k] = wrap01( -x_nominal[k] )
    (binary-exact)→ 前 8 個輸出 `0, 4, 5, 11, 10, 18, 16, 22`。)
 7. optional triangular dither:`u' = u + d_amp * (U1 + U2 - 1)`,U 來自 §12 PRNG,
    在 quantize 前加入,預設 off。`d_amp` 單位為 **quantizer LSB**
-   (full actuator = 1 fine LSB;`dsm_only`(§7.1)= 1 VCO cycle)。
+   (full actuator = 1 fine LSB;`dsm_only`(§7.1)與 `qnc`(§7.2)= 1 VCO cycle)。
 
 **0.3 LSB canonical example** `[EXACT]`(Test 4):
 `u[k] = m[k] + 0.3` 時:
@@ -338,6 +382,59 @@ route mismatch、latency error、VCO random noise。
   `N ∈ (3, 3.25)` 的多數值使瞬時 divide ratio 觸及 0(duplicate edge)→
   monotonicity assertion **故意** raise:MASH 階數 m 的瞬時 ratio 擺動需要
   更大的 integer part 才合法(classic 設計約束),本 model 不掩蓋它。
+
+### 7.2 Actuator mode `[EXACT]`:`qnc`(explicit DTC quantization-noise cancellation)
+
+`actuator_mode='qnc'`:divider 路徑與 `dsm_only` 完全相同地以**整數 cycle**
+granularity quantize(選定的 quantizer 作用在 cycles:`y[k] = Q(A_ideal[k]/G)`),
+但一顆 **cancellation DTC** 接收 accumulated sub-cycle residue、乘上 gain 後
+量化為 fine code,在 feedback edge 上施加:
+
+```
+r[k]    = s_ideal[k] − y[k]      (accumulated sub-cycle residue, cycles)
+code[k] = clamp( qNearest( wrap01(r[k]) · G · qnc_gain ), 0, G−1 )
+A_FB[k] = y[k] · G + code[k]
+```
+
+因此 `R_FB[k] = code[k]`,照常 decode `m_FB = floor(R_FB/64)`、
+`c_FB = R_FB mod 64`(§4);`dsm_out` 仍為整數 cycle 數 `y`。
+新 config 欄位 `qnc_gain`(預設 `1.0`)為 cancellation DTC gain;
+序列化遵循 §18 omit-at-default 規則(schema-v3 欄位)。
+乘法求值順序 `[EXACT]`:`(wrap01(r) * G) * qnc_gain`(左至右,
+兩語言 float64 bit-identical)。
+
+Injection 側 `[EXACT]`:**一律**為 cancellation code 的 modular reverse——
+`R_INJ[k] = (R_zero − R_FB[k]) mod G`,**不論 `arch_mode`**(不消耗
+`dsm_inj` draws);tap/DTC decode 照 §8。故 Mode-D identity
+`e_pair_digital ≡ 0` 在 qnc 模式下成立。
+
+Dither(§6 item 7)作用在 integer-cycle quantizer 輸入,LSB 單位 =
+1 VCO cycle(同 `dsm_only`)。
+
+等效性 `[EXACT]` bound + `[EXPERIMENT]` 實測:`qnc_gain = 1.0` + `nearest`
+quantizer 時,feedback timing 與 full actuator 等效到 1 LSB 之內:
+
+```
+max|e_FB_abs| ≤ 1/512 + 1/256
+```
+
+(1/512 = fine 量化 half-LSB;1/256 涵蓋 residue 逼近整數 cycle 時
+`wrap01`+clamp 的 1 LSB 邊界情形)。實測(N=3.13、512 cycles、seed 12345):
+`max|e_FB_abs| = 0.001875000000154614` cycles(≈0.48 fine LSB),與 full
+actuator 同 config 的 peak 相同;`A_FB` 可與 full 相差整數個 cycle
+(divider edge 早/晚整數個 T_vco),但 timing mod T_vco 等效
+(`e_FB_abs` 以 `wrapCycles` 度量)。
+
+Gain error `[EXPERIMENT]`:`qnc_gain = 0.98` 時出現 **code-dependent
+residual**(cancellation 不完全,殘差 ≈ wrap01(r)·(1−qnc_gain)):
+實測(N=3.13、`nearest`、512 cycles)`max|e_FB_abs| = 0.02125` cycles
+(≈5.44 fine LSB),444/512 cycles 超出 half-LSB(1/512)。此 residual 即
+Ch11 LMS demo 的 error signal;pure helper
+`lms_qnc_step(gain, mu, e, r) = gain − mu·e·r`(Python
+`feedback_scheduler.lms_qnc_step` / TS `lmsQncStep`,求值順序
+`gain − ((mu·e)·r)`,deterministic、兩語言 bit-identical)提供單步 LMS 更新。
+
+`dsm_only`(§7.1)行為不受 qnc 新增影響。
 
 ---
 
@@ -541,6 +638,44 @@ inj_model != 'none', gate 'off'      -> inj_fired ≡ 1
 inj_model != 'none', gate 'threshold'-> inj_fired[k] = (|e_ZC_hw[k]| <= threshold)
 ```
 
+### 14.1 PLL loop co-simulation `[ASSUMPTION]`(behavioral type-II PI loop)
+
+讓 loop 與 injection 在同一 per-cycle phase map 中共跑。Config:
+
+- `loop_mode`: `'off'`(預設)| `'pi'`
+- `loop_kp`: proportional gain(預設 0.05,無因次)
+- `loop_ki`: integral gain(預設 0.005,無因次)
+
+`loop_mode='pi'` 時,每 reference cycle k(behavioral PD 取樣 residual phase,
+**在 injection kick 之前**):
+
+```
+theta_minus[k] = theta_plus[k-1] + (2*pi*Delta_f*T_ref + u_loop[k]) + w_vco[k]
+pd_e[k]        = wrapRadians(theta_minus[k])
+u_loop[0] = 0;  u_loop[k+1] = u_loop[k] - loop_ki * pd_e[k]
+theta_plus[k]  = wrapRadians(theta_minus[k] - loop_kp*pd_e[k] + Delta_theta[k])
+```
+
+- `u_loop`(rad/cycle)為 integrator 的 detuning correction,直接加進 detuning 項。
+- injection kick `Delta_theta[k]` **完全不變**(`e_inj` 公式、gating、PRNG 消耗
+  皆與 §14 相同),在 proportional kick 之後施加(同一次 wrap 內相加)。
+- `loop_mode='off'`:dynamics 與 §14 逐位相同(`u_loop ≡ 0`、無 proportional
+  kick);`pd_e[k] = wrapRadians(theta_minus[k])` 仍照常記錄(觀測值)。
+- 新增 per-cycle float columns:`u_loop`(rad/cycle)、`pd_e`(rad)。
+
+Steady state `[APPROX]`(noise-free):
+
+- loop-only(inj `none`):integrator 固定點要求 `pd_e → 0`,
+  故 `u_loop → -2*pi*Delta_f*T_ref`(type-II:靜態 phase error 為 0,
+  detuning 完全被 integrator 吸收)。pull-in 不受 injection lock range
+  `|2*pi*Delta_f*T_ref| <= K_inj` 限制 — loop 由 cycle-slip 的不對稱掃描
+  速率拉入(kp 使 pd_e>0 的區段走得較慢)。
+- both + injection 靜態 offset(如 `route_inj`,`eps = 2*pi*route_inj`):
+  integrator 仍強制 `pd_e → 0`,故 `e_inj → eps`、
+  `theta_plus → -K_inj*sin(eps)`(kick 後的 VCO phase shift)、
+  `u_loop → -2*pi*Delta_f*T_ref + K_inj*sin(eps)` — loop 把 injection 的
+  靜態 offset 積分成 VCO phase shift 與 integrator offset。
+
 ---
 
 ## 15. Shorting injection zero-crossing error `[APPROX]`
@@ -624,7 +759,9 @@ Python 產生 `test_vectors/*.json`,TS 讀取並比對。Schema:
 `n3p125_dtc_gain_1pct`, `n3p130_dynamics_sin`(K_inj=0.3, Δf=1 MHz, noise on),
 `n3p130_mash111`(Mode D + mash111, full actuator),
 `n3p130_dsm_only_gated`(exp21c-style:ef1, dsm_only, threshold gating,
-sin K_inj=0.4, Δf=1 MHz, σ_vco_w=0.02 rad)。
+sin K_inj=0.4, Δf=1 MHz, σ_vco_w=0.02 rad),
+`n3p130_loop_both`(exp23c-style:sin K_inj=0.3, Δf=250 MHz,
+σ_vco_w=0.02 rad, `loop_mode='pi'` — loop + injection 共跑)。
 
 Schema 穩定性規則 `[EXACT]`:
 
@@ -632,9 +769,13 @@ Schema 穩定性規則 `[EXACT]`:
   (檔案 byte-identical,regression 由 `tests/test_vectors_committed.py` 釘住)。
 - **schema-v2** vectors(`n3p130_mash111`, `n3p130_dsm_only_gated`)在
   columns 末端**追加** int column `inj_fired`(§14)。
-- config 序列化:schema-v2 新增欄位(`actuator_mode`, `inj_gate_mode`,
-  `inj_gate_threshold_cycles`)**等於預設值時省略**(`from_dict`/`fromPartial`
-  會補回預設,round-trip 仍 exact)— 這使 schema-v1 檔案不因新欄位而改變。
+- **schema-v4** vector(`n3p130_loop_both`)在 schema-v2 columns 末端再
+  **追加** float columns `u_loop`, `pd_e`(§14.1)。
+- config 序列化:schema-v2 之後新增的欄位(schema-v2:`actuator_mode`,
+  `inj_gate_mode`, `inj_gate_threshold_cycles`;schema-v3:`qnc_gain`(§7.2);
+  schema-v4:`loop_mode`, `loop_kp`, `loop_ki`)**等於預設值時省略**
+  (`from_dict`/`fromPartial` 會補回預設,round-trip 仍 exact)—
+  這使既有檔案不因新欄位而改變。
 
 另產生 `test_vectors/csv/` 每-cycle command CSV(給 Verilog-A testbench):
 欄位 `k, t_ref_ns, n_int, m_FB, c_FB, j_INJ, c_INJ, R_FB, R_INJ, seq_id`。
@@ -662,6 +803,8 @@ Schema 穩定性規則 `[EXACT]`:
 | 15 | mash111 canonical | `u=3k+0.25` → 前 8 輸出 `0,4,5,11,10,18,16,22`;§6 遞迴逐拍相符;sweep n_int ⊆ {2,3,4}(= mash11,實測非更寬) |
 | 16 | dsm_only invariants | `A_FB` 為整 cycle、`R_FB=m_FB=c_FB=R_INJ=j=c_INJ≡0`、`e_pair_digital≡0`、`e_ZC_hw` 掃 ±0.5 cycle;n_int:nearest/floor {3,4}、ef1 {2,3,4,5};mash11/mash111 @N=3.13 → monotonicity assertion raise |
 | 17 | injection gating | `inj_fired` 遵守 §14 convention;fired mask = (\|e_ZC_hw\|≤threshold);非 fire 拍 `delta_theta≡0`;exp21:gating 使 dsm_only tail rms 1.81 → 0.10 rad |
+| 18 | qnc mode(§7.2) | `qnc_gain=1`+nearest @N=3.13:max\|e_FB_abs\|≤1/512+1/256(實測 0.001875000000154614,與 full actuator peak 相同);`qnc_gain=0.98`:code-dependent residual,實測 max\|e_FB_abs\|=0.02125 cycles(444/512 拍超出 1/512);Mode-D reverse identity 於 qnc 成立(所有 arch_mode、`e_pair_digital≡0`);`lms_qnc_step(1.0,0.1,0.5,0.2)=0.99` exact |
+| 19 | PLL loop co-sim(§14.1) | loop-only(Δf 在 loop 拉入範圍內)`mean(pd_e)→0`;`u_loop` steady mean ≈ `−2π·Δf·T_ref`(sign 已驗證,Δf>0 → u_loop<0);exp23 @Δf=250 MHz(`2π·Δf·T_ref=0.3927 rad > K_inj=0.3`,injection-only 失鎖 e_inj rms 1.82 rad):both-mode tail rms < injection-only tail rms(實測 e_inj rms 0.030 vs 1.82 rad,theta_plus rms 0.019 rad);exp23d route offset 0.01 cycle → mean e_inj ≈ 2π·0.01、mean theta_plus ≈ −K_inj·sin(2π·0.01)、u_loop end = −2π·Δf·T_ref + K_inj·sin(2π·0.01)(實測 −0.3739);`loop_mode='off'` 逐位不變(committed vectors byte-identical) |
 
 ---
 

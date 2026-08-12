@@ -36,8 +36,8 @@ COLUMNS = [
     "dsm_state", "dsm_out", "u_INJ_ideal", "R_INJ", "j_INJ", "c_INJ",
     "u_INJ_digital", "u_INJ_analog", "e_INJ_abs", "e_pair_digital",
     "e_pair_analog", "e_ZC_hw", "inj_fired", "theta_minus", "e_inj",
-    "delta_theta", "theta_plus", "e_ZC_total", "seq_id", "k_computed",
-    "k_applied",
+    "delta_theta", "theta_plus", "e_ZC_total", "u_loop", "pd_e", "seq_id",
+    "k_computed", "k_applied",
 ]
 
 _INT_COLUMNS = {"k", "A_FB", "I_FB", "R_FB", "m_FB", "c_FB", "n_int",
@@ -231,6 +231,8 @@ def simulate(cfg: SimConfig) -> SimResult:
         "delta_theta": dyn["delta_theta"],
         "theta_plus": dyn["theta_plus"],
         "e_ZC_total": dyn["e_ZC_total"],
+        "u_loop": dyn["u_loop"],
+        "pd_e": dyn["pd_e"],
         "seq_id": lat["seq_id"],
         "k_computed": lat["k_computed"],
         "k_applied": lat["k_applied"],

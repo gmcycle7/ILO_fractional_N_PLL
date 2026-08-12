@@ -26,6 +26,7 @@ import EChart from '../components/EChart';
 import SimVeil from '../components/SimVeil';
 import EpistemicTag from '../components/EpistemicTag';
 import Callout from '../components/Callout';
+import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { M, MathBlock } from '../components/Math';
 import { ParamPanel, PresetButtons, SelectControl, Slider, Toggle } from '../components/controls';
 import UnitSwitch, { useUnit } from '../components/UnitSwitch';
@@ -40,13 +41,17 @@ import {
   COLUMNS,
   EXPERIMENTS,
   configAlpha,
+  configG,
   configTVcoS,
   cyclesToDegrees,
   defaultConfig,
   fromPartial,
   getPreset,
+  mean,
   periodogramPsd,
   presetConfigs,
+  pymod,
+  qNearest,
   replaceConfig,
   simulate,
   summary,
@@ -267,6 +272,29 @@ const EXP_META: Record<string, ExpMeta> = {
       '高階 MASH 改的是頻譜形狀(higher-order noise shaping),不是誤差大小 —— peak 與 ' +
       'placement 誤差反而變大,必須由 DTC(full actuator)吃掉。掃 N∈[3,3.25] 時 ' +
       'mash11/mash111 的 n_int 可達 {2,3,4}(小 α 才出現 2),divider 整數餘裕要照最壞情況設計。',
+  },
+  exp23: {
+    plot: 'theta_plus',
+    metric: 'e_ZC_total',
+    chapters: [13],
+    observe:
+      '四條 theta_plus[k](rad,seed 12345;browser 預設 256 cycles 對應 tail 穩態):' +
+      '(a) loop-only(inj none):Δf=250 MHz 使 2π·Δf·T_ref=0.3927 rad,積分器把它幾乎完全吸收' +
+      '(u_loop mean −0.392 ≈ −2π·Δf·T_ref,mean pd_e → 0.0013 rad),theta_plus rms 0.060 rad;' +
+      '(b) injection-only(sin K=0.3、loop off):同一 Δf 超出 sin map 的 lock range' +
+      '(2π·Δf·T_ref=0.3927 > K_inj=0.3),theta_plus 漂移不收斂,e_inj rms 1.82 rad;' +
+      '(c) both:loop 把 detuning 拉回 lock range 內(u_loop 終值 −0.3927,mean pd_e → 0.0088)後,' +
+      'injection 再壓低逐拍殘量 —— theta_plus rms 降到 0.019 rad,e_inj rms 0.030 rad' +
+      '(遠低於 (a) 的 0.063 與 (b) 的 1.82);(d) both + route_inj=0.01 cycle 靜態 offset:' +
+      '積分器仍強迫 mean pd_e → 0,但把 injection 的固定偏移吸收成 VCO phase shift' +
+      '(mean theta_plus −0.0134 rad ≈ −K_inj·sin(2π·0.01)=−0.0188)與 integrator offset' +
+      '(u_loop 終值 −0.3739 = −2π·Δf·T_ref + K_inj·sin(2π·0.01))。',
+    conclusion:
+      'loop 與 injection 互補,不是互斥:積分器吃掉 injection sin map 拉不進來的大 detuning' +
+      '(把 out-of-range Δf 拉回 lock range 內),injection 再吃掉 loop 本身無法瞬時修正的' +
+      '逐拍 residual/noise —— both 模式的 theta_plus rms(0.019 rad)同時優於 loop-only' +
+      '(0.060)與失鎖的 injection-only(1.82)。但 route_inj 這類 injection 端的靜態 offset' +
+      '會被積分器吸收進 u_loop,永久改變 VCO 穩態 detuning,不是「自由」的校正項。',
   },
 };
 
@@ -821,6 +849,171 @@ export default function Chapter17() {
             <EpistemicTag kind="EXACT" />
           </li>
         </ul>
+
+        <ExampleProblem
+          index={1}
+          tag="EXACT"
+          title="e_FB_abs:absolute error 家族的基本代入"
+          prompt={
+            <>
+              取分頻比 <M>{'N'}</M>、起始相位 <M>{'s_0'}</M> 與第 <M>{'k'}</M> 拍,先算
+              <M>{'s_{ideal}=s_0+kN'}</M>,乘上 <M>{'G=256'}</M> 得高解析度目標
+              <M>{'A_{ideal}'}</M>,再以 nearest quantizer 取
+              <M>{'A_{FB}=\\operatorname{qNearest}(A_{ideal})'}</M>,最後用 error 家族公式
+              <M>{'e_{FB,abs}=\\operatorname{wrapCycles}(A_{FB}/G-s_{ideal})'}</M> 算出這一拍的
+              absolute error。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 3, max: 3.25, step: 0.0001 },
+            { key: 's0', label: <M>{'s_0'}</M>, def: 0, min: -20, max: 20, step: 0.01, unit: 'cyc' },
+            { key: 'k', label: <M>{'k'}</M>, def: 5, min: 0, max: 2000, step: 1 },
+          ]}
+          compute={(v) => {
+            const cfg = fromPartial({ n_div: v.N });
+            const g = configG(cfg);
+            const tVcoPs = configTVcoS(cfg) * 1e12;
+            const sIdealVal = v.s0 + v.k * v.N;
+            const aIdealVal = g * sIdealVal;
+            const aFb = qNearest(aIdealVal);
+            const sFbActual = aFb / g;
+            const eFbAbs = wrapCycles(sFbActual - sIdealVal);
+            const eFbDeg = cyclesToDegrees(eFbAbs);
+            return {
+              steps: [
+                { label: <><M>{'s_{ideal}=s_0+kN'}</M></>, value: fmt(sIdealVal, 8, 'cyc') },
+                { label: <><M>{'A_{ideal}=G\\,s_{ideal}'}</M></>, value: fmt(aIdealVal, 8) },
+                {
+                  label: <><M>{'A_{FB}=\\operatorname{qNearest}(A_{ideal})'}</M></>,
+                  value: `${aFb} / ${g} LSB`,
+                },
+                { label: <><M>{'s_{FB,actual}=A_{FB}/G'}</M></>, value: fmt(sFbActual, 8, 'cyc') },
+                {
+                  label: <><M>{'e_{FB,abs}=\\operatorname{wrapCycles}(s_{FB,actual}-s_{ideal})'}</M></>,
+                  value: fmt(eFbAbs, 6, 'cyc'),
+                },
+              ],
+              answer: (
+                <>
+                  <M>{'e_{FB,abs}'}</M> = {fmt(eFbAbs, 6, 'cyc')} = {fmt(eFbDeg, 4)}° ={' '}
+                  {fmt(eFbAbs * tVcoPs, 4, 'ps')}
+                </>
+              ),
+              warn:
+                Math.abs(eFbAbs * g) > 0.499
+                  ? `落在量化邊界(殘差 ${fmt(eFbAbs * g, 3)} LSB),±1 LSB 都算合理`
+                  : undefined,
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={2}
+          tag="EXACT"
+          title="Mode D pairwise identity:R_INJ 的 modular reverse"
+          prompt={
+            <>
+              同一個 <M>{'A_{FB}'}</M> 先 decode 成 <M>{'I_{FB}=\\lfloor A_{FB}/G\\rfloor'}</M>、
+              <M>{'R_{FB}=A_{FB}\\bmod G'}</M>,Mode D 再取
+              <M>{'R_{INJ}=(R_{zero}-R_{FB})\\bmod G'}</M>。驗證恆等式
+              <M>{'(R_{FB}+R_{INJ})\\bmod G=R_{zero}'}</M> 對任意 <M>{'N, k, s_0, R_{zero}'}</M>{' '}
+              都成立 —— 這是 e_pair_digital ≡ 0 的構造性證明。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 3, max: 3.25, step: 0.0001 },
+            { key: 's0', label: <M>{'s_0'}</M>, def: 0, min: -20, max: 20, step: 0.01, unit: 'cyc' },
+            { key: 'k', label: <M>{'k'}</M>, def: 5, min: 0, max: 2000, step: 1 },
+            { key: 'rZero', label: <M>{'R_{zero}'}</M>, def: 0, min: 0, max: 255, step: 1 },
+          ]}
+          compute={(v) => {
+            const cfg = fromPartial({ n_div: v.N });
+            const g = configG(cfg);
+            const sIdealVal = v.s0 + v.k * v.N;
+            const aIdealVal = g * sIdealVal;
+            const aFb = qNearest(aIdealVal);
+            const iFb = Math.floor(aFb / g);
+            const rFb = pymod(aFb, g);
+            const rInj = pymod(v.rZero - rFb, g);
+            const identity = pymod(rFb + rInj, g);
+            return {
+              steps: [
+                { label: <><M>{'A_{FB}=\\operatorname{qNearest}(G\\,s_{ideal})'}</M></>, value: fmt(aFb, 8) },
+                { label: <><M>{'I_{FB}=\\lfloor A_{FB}/G\\rfloor'}</M></>, value: fmt(iFb, 8) },
+                { label: <><M>{'R_{FB}=A_{FB}\\bmod G'}</M></>, value: `${rFb} / ${g} LSB` },
+                {
+                  label: <><M>{'R_{INJ}=(R_{zero}-R_{FB})\\bmod G'}</M></>,
+                  value: `${rInj} / ${g} LSB`,
+                },
+                {
+                  label: <><M>{'(R_{FB}+R_{INJ})\\bmod G'}</M></>,
+                  value: `${identity} / ${g} LSB`,
+                },
+              ],
+              answer: (
+                <>
+                  <M>{'R_{FB}'}</M> = {rFb},<M>{'R_{INJ}'}</M> = {rInj},恆等式{' '}
+                  {identity} = <M>{'R_{zero}'}</M> = {v.rZero}(mod 構造保證,與 N/k/s_0 無關)
+                </>
+              ),
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={3}
+          tag="EXPERIMENT"
+          title="latency bug:公式預測 vs. simulate() 實測"
+          prompt={
+            <>
+              給定 <M>{'N'}</M> 與固定 latency <M>{'L'}</M>(look-ahead 關閉),公式預測靜態誤差{' '}
+              <M>{'e_{lat}=\\operatorname{wrapCycles}(L\\alpha)'}</M>。用 <code>simulate()</code>{' '}
+              跑 <M>{'n'}</M> 拍(<code>lookahead=false</code>),取 e_FB_abs 的平均值與公式比對,
+              並換算成 half-LSB 的倍數。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 3, max: 3.25, step: 0.0001 },
+            { key: 'L', label: <M>{'L'}</M>, def: 1, min: 0, max: 8, step: 1, unit: 'cyc' },
+            { key: 'n', label: <M>{'n'}</M>, def: 64, min: 8, max: 128, step: 8, unit: 'cyc' },
+          ]}
+          compute={(v) => {
+            const L = Math.round(v.L);
+            const n = Math.round(v.n);
+            const cfg0 = fromPartial({ n_div: v.N });
+            const alpha = configAlpha(cfg0);
+            const eLatPred = wrapCycles(L * alpha);
+            const res = simulate(
+              fromPartial({ n_div: v.N, latency_cycles: L, lookahead: false, n_cycles: n }),
+            );
+            const measuredMean = mean(res.data.e_FB_abs);
+            const g = configG(res.config);
+            const halfLsbDeg = 360 / (2 * g);
+            const ratio = Math.abs(cyclesToDegrees(eLatPred)) / halfLsbDeg;
+            return {
+              steps: [
+                { label: <><M>{'\\alpha=N-\\lfloor N\\rfloor'}</M></>, value: fmt(alpha, 6, 'cyc') },
+                {
+                  label: <>公式預測 <M>{'e_{lat}=\\operatorname{wrapCycles}(L\\alpha)'}</M></>,
+                  value: `${fmt(eLatPred, 6, 'cyc')} = ${fmt(cyclesToDegrees(eLatPred), 4)}°`,
+                },
+                {
+                  label: <><code>simulate()</code> {n} 拍(lookahead=false)的 mean(e_FB_abs)</>,
+                  value: `${fmt(measuredMean, 6, 'cyc')} = ${fmt(cyclesToDegrees(measuredMean), 4)}°`,
+                },
+                { label: <>half-LSB = 360°/(2G)</>, value: fmt(halfLsbDeg, 5, '°') },
+                { label: <>倍率 |e_lat 度數| / half-LSB 度數</>, value: fmt(ratio, 4) },
+              ],
+              answer: (
+                <>
+                  公式預測 {fmt(cyclesToDegrees(eLatPred), 4)}°,實測平均{' '}
+                  {fmt(cyclesToDegrees(measuredMean), 4)}°,約為 half-LSB 的 {fmt(ratio, 4)} 倍
+                </>
+              ),
+              warn: n <= L ? 'n 太小(≤ L),模擬還沒進入穩態,平均值不具代表性' : undefined,
+            };
+          }}
+        />
       </SectionExample>
 
       <SectionFigure

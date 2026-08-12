@@ -30,6 +30,7 @@ import { ParamPanel, Slider, SelectControl, PresetButtons } from '../components/
 import UnitSwitch, { useUnit } from '../components/UnitSwitch';
 import PhaseWheel from '../components/PhaseWheel';
 import DebugTable from '../components/DebugTable';
+import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { makeLineOption, makeMarkLine } from '../lib/chartOptions';
 import { useChartTheme } from '../lib/useChartTheme';
 import { formatPhase, trimNumber } from '../lib/format';
@@ -38,12 +39,17 @@ import { chapterById } from './index';
 import {
   simulate,
   fromPartial,
+  configG,
+  configTVcoS,
   runInjection,
   makeDtc,
   tapTable,
   makeAllStreams,
   wrap01,
   wrapCycles,
+  qNearest,
+  qFloor,
+  pymod,
   type InjMapping,
 } from '../model';
 
@@ -467,6 +473,334 @@ export default function Chapter07() {
         <p>
           下方互動圖把 u<sub>target</sub> 調到 0.40、tap3 mismatch 調到 +1°,即可逐字重現這組數字。
         </p>
+
+        <ExampleProblem
+          index={1}
+          tag="EXACT"
+          title="naive floor decode:把 u_target 拆成 (tap j, DTC code c)"
+          prompt={
+            <>
+              scheduler 送來一個 fractional 目標 <M>{'u_{target}'}</M>(cycles)。請依 §8 的 naive
+              floor mapping 把它變成硬體命令:先量化成 fine code{' '}
+              <M>{'R_{INJ} = \\operatorname{qNearest}(G\\,u_{target}) \\bmod G'}</M>(<M>{'G = 256'}</M>),
+              再拆成 <M>{'j = \\lfloor R_{INJ}/32 \\rfloor'}</M>、<M>{'c = R_{INJ} \\bmod 32'}</M>,
+              合成 <M>{'u_{INJ,digital} = (32j + c)/256'}</M>,最後算對真實目標的殘差
+              (cycles / LSB / fs;<M>{'T_{vco} = 1/(N f_{ref})'}</M>)。
+            </>
+          }
+          inputs={[
+            {
+              key: 'u',
+              label: <M>{'u_{target}'}</M>,
+              def: 0.4,
+              min: 0,
+              max: 0.999,
+              step: 0.0025,
+              unit: 'cyc',
+            },
+            { key: 'N', label: <M>{'N'}</M>, def: 3.125, min: 2, max: 8, step: 0.0005 },
+            {
+              key: 'fref',
+              label: <M>{'f_{ref}'}</M>,
+              def: 4,
+              min: 0.1,
+              max: 20,
+              step: 0.1,
+              unit: 'GHz',
+            },
+          ]}
+          compute={(v) => {
+            const cfg = fromPartial({ n_div: v.N, f_ref_hz: v.fref * 1e9 });
+            const g = configG(cfg);
+            const tapStep = Math.floor(g / cfg.n_tap); // 32 LSB
+            const tVcoPs = configTVcoS(cfg) * 1e12;
+            const r = pymod(qNearest(g * v.u), g);
+            const j = qFloor(r / tapStep);
+            const c = pymod(r, tapStep);
+            const uDig = pymod(tapStep * j + c, g) / g;
+            const resid = wrapCycles(uDig - v.u);
+            return {
+              steps: [
+                {
+                  label: (
+                    <>
+                      量化前的實數 <M>{'G\\,u_{target}'}</M>
+                    </>
+                  ),
+                  value: fmt(g * v.u, 8, 'LSB'),
+                },
+                {
+                  label: (
+                    <>
+                      <M>{'R_{INJ} = \\operatorname{qNearest}(G u) \\bmod G'}</M>
+                    </>
+                  ),
+                  value: `${r} / ${g} LSB`,
+                },
+                {
+                  label: (
+                    <>
+                      <M>{'j = \\lfloor R_{INJ}/32 \\rfloor'}</M>
+                    </>
+                  ),
+                  value: `${j}(tap phase ${fmt(j / cfg.n_tap, 6, 'cyc')})`,
+                },
+                {
+                  label: (
+                    <>
+                      <M>{'c = R_{INJ} \\bmod 32'}</M>
+                    </>
+                  ),
+                  value: `${c}(DTC delay ${fmt(c / g, 8, 'cyc')})`,
+                },
+                {
+                  label: (
+                    <>
+                      <M>{'u_{INJ,digital} = (32j + c)/256'}</M>
+                    </>
+                  ),
+                  value: `${fmt(uDig, 8, 'cyc')} = ${fmt(uDig * tVcoPs, 6, 'ps')}`,
+                },
+                {
+                  label: (
+                    <>
+                      殘差 <M>{'\\operatorname{wrapCycles}(u_{digital} - u_{target})'}</M>
+                    </>
+                  ),
+                  value: `${fmt(resid, 6, 'cyc')} = ${fmt(resid * 256, 6, 'LSB')} = ${fmt(
+                    resid * tVcoPs * 1000,
+                    6,
+                    'fs',
+                  )}`,
+                },
+              ],
+              answer: (
+                <>
+                  <M>{'(j, c)'}</M> = ({j}, {c}),<M>{'u_{INJ,digital}'}</M> = {fmt(uDig, 8, 'cyc')} ={' '}
+                  {fmt(uDig * tVcoPs, 6, 'ps')},對 <M>{'u_{target}'}</M> 殘差{' '}
+                  {fmt(resid * 256, 6, 'LSB')} = {fmt(resid * tVcoPs * 1000, 6, 'fs')}
+                </>
+              ),
+              warn:
+                Math.abs(resid * 256) > 0.499
+                  ? `落在量化邊界(殘差 ${fmt(resid * 256, 3)} LSB),±1 LSB 兩個 code 都算合理`
+                  : undefined,
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={2}
+          tag="EXACT"
+          title="redundancy identity:同一個 code 的兩組 (j, c)"
+          prompt={
+            <>
+              tap spacing 32 LSB、DTC range 64 LSB,因此{' '}
+              <M>{'32j + c = 32(j-1) + (c+32)'}</M> —— 同一個 <M>{'R_{INJ}'}</M> 有兩組表示。
+              給定一組 <M>{'(j, c)'}</M>,請算出它對應的 <M>{'R_{INJ}'}</M> 與 digital phase,
+              再寫出 redundant 替代解(<M>{'c \\le 31'}</M> 時往前一個 tap、<M>{'c \\ge 32'}</M>{' '}
+              時往後一個 tap),並驗證兩者的 <M>{'\\operatorname{wrapCycles}'}</M> 差為 0。
+            </>
+          }
+          inputs={[
+            { key: 'j', label: <>tap <M>{'j'}</M></>, def: 3, min: 0, max: 7, step: 1 },
+            { key: 'c', label: <>DTC code <M>{'c'}</M></>, def: 6, min: 0, max: 63, step: 1 },
+            { key: 'N', label: <M>{'N'}</M>, def: 3.125, min: 2, max: 8, step: 0.0005 },
+            {
+              key: 'fref',
+              label: <M>{'f_{ref}'}</M>,
+              def: 4,
+              min: 0.1,
+              max: 20,
+              step: 0.1,
+              unit: 'GHz',
+            },
+          ]}
+          compute={(v) => {
+            const cfg = fromPartial({ n_div: v.N, f_ref_hz: v.fref * 1e9 });
+            const g = configG(cfg);
+            const tapStep = Math.floor(g / cfg.n_tap);
+            const tVcoPs = configTVcoS(cfg) * 1e12;
+            const jj = Math.min(7, Math.max(0, Math.round(v.j)));
+            const cc = Math.min(63, Math.max(0, Math.round(v.c)));
+            const up = cc >= tapStep; // c >= 32 -> 替代解往後一個 tap
+            const jAlt = pymod(jj + (up ? 1 : -1), cfg.n_tap);
+            const cAlt = up ? cc - tapStep : cc + tapStep;
+            const r = pymod(tapStep * jj + cc, g);
+            const rAlt = pymod(tapStep * jAlt + cAlt, g);
+            const u = r / g;
+            const uAlt = rAlt / g;
+            const diff = wrapCycles(u - uAlt);
+            return {
+              steps: [
+                {
+                  label: (
+                    <>
+                      <M>{'R_{INJ} = (32j + c) \\bmod 256'}</M>
+                    </>
+                  ),
+                  value: `${r} LSB`,
+                },
+                {
+                  label: (
+                    <>
+                      <M>{'u_{INJ,digital} = R_{INJ}/256'}</M>
+                    </>
+                  ),
+                  value: `${fmt(u, 8, 'cyc')} = ${fmt(u * tVcoPs, 6, 'ps')}`,
+                },
+                {
+                  label: <>redundant 替代解 <M>{'(j_{alt}, c_{alt})'}</M></>,
+                  value: `(${jAlt}, ${cAlt})`,
+                },
+                {
+                  label: (
+                    <>
+                      <M>{'(32 j_{alt} + c_{alt}) \\bmod 256'}</M>
+                    </>
+                  ),
+                  value: `${rAlt} LSB`,
+                },
+                {
+                  label: <>tap 位移 <M>{'\\mp 1/8'}</M> cycle(由 DTC 的 <M>{'\\pm 32'}</M> LSB 補回)</>,
+                  value: `${fmt(tapStep / g, 6, 'cyc')} = ${fmt((tapStep / g) * tVcoPs, 6, 'ps')}`,
+                },
+                {
+                  label: (
+                    <>
+                      <M>{'\\operatorname{wrapCycles}(u - u_{alt})'}</M>
+                    </>
+                  ),
+                  value: fmt(diff, 6, 'cyc'),
+                },
+              ],
+              answer: (
+                <>
+                  ({jj}, {cc}) 與 ({jAlt}, {cAlt}) 同為 <M>{'R_{INJ}'}</M> = {r} LSB,digital phase 皆為{' '}
+                  {fmt(u, 8, 'cyc')} = {fmt(u * tVcoPs, 6, 'ps')},差值 {fmt(diff, 6, 'cyc')}
+                </>
+              ),
+              warn:
+                cc >= tapStep
+                  ? `c = ${cc} ≥ 32:輸入本身已在 redundant 上半 range,替代解改往 (j+1, c−32)。naive floor 永遠只給 c ≤ 31`
+                  : undefined,
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={3}
+          tag="EXACT"
+          title="calibrated mapping 如何用 redundancy 繞開受損的 tap"
+          prompt={
+            <>
+              某顆晶片量到第 <M>{'j_{mm}'}</M> 個 injection tap 有 <M>{'\\delta_{tap}'}</M> 的
+              mismatch。對同一個 <M>{'u_{target}'}</M>,naive 與 calibrated 兩種 mapping 分別會選哪組{' '}
+              <M>{'(j, c)'}</M>?各自的 analog 落點對 digital 目標 <M>{'R_{INJ}/G'}</M> 差多少
+              (LSB / fs)?calibrated 的 joint argmin(§8)能把誤差改善多少?
+              (<M>{'G = 256'}</M>,mapping 由 model 的 <code>runInjection</code> 實際求解。)
+            </>
+          }
+          inputs={[
+            {
+              key: 'u',
+              label: <M>{'u_{target}'}</M>,
+              def: 0.4,
+              min: 0,
+              max: 0.999,
+              step: 0.0025,
+              unit: 'cyc',
+            },
+            { key: 'jmm', label: <>受損 tap <M>{'j_{mm}'}</M></>, def: 3, min: 0, max: 7, step: 1 },
+            {
+              key: 'deg',
+              label: <M>{'\\delta_{tap}'}</M>,
+              def: 1,
+              min: -3,
+              max: 3,
+              step: 0.1,
+              unit: '°',
+            },
+            { key: 'N', label: <M>{'N'}</M>, def: 3.125, min: 2, max: 8, step: 0.0005 },
+          ]}
+          compute={(v) => {
+            const jm = Math.min(7, Math.max(0, Math.round(v.jmm)));
+            const mm = Array.from({ length: 8 }, (_, i) => (i === jm ? v.deg / 360 : 0));
+            const baseCfg = fromPartial({
+              n_div: v.N,
+              arch_mode: 'A',
+              quantizer: 'nearest',
+              inj_mapping: 'naive',
+              tap_mismatch_cycles: mm,
+              n_cycles: 1,
+            });
+            const g = configG(baseCfg);
+            const tVcoPs = configTVcoS(baseCfg) * 1e12;
+            const streams = makeAllStreams(baseCfg.seed);
+            const dtc = makeDtc(baseCfg, 'inj', streams);
+            const taps = tapTable(baseCfg.n_tap, baseCfg.tap_mismatch_cycles);
+            // x_nominal 使 u_INJ_ideal = wrap01(z0 - x) = u_target
+            const x = Float64Array.of(wrap01(baseCfg.z0_cycles - v.u));
+            const zero = Float64Array.of(0);
+            const rN = runInjection(baseCfg, x, zero, dtc, taps, null);
+            const rC = runInjection(
+              fromPartial({ ...baseCfg, inj_mapping: 'calibrated' }),
+              x,
+              zero,
+              dtc,
+              taps,
+              null,
+            );
+            const code = rN.R_INJ[0];
+            const target = code / g;
+            const errN = wrapCycles(rN.u_INJ_analog[0] - target);
+            const errC = wrapCycles(rC.u_INJ_analog[0] - rC.R_INJ[0] / g);
+            const gain = (Math.abs(errN) - Math.abs(errC)) * tVcoPs * 1000;
+            const same = rN.j_INJ[0] === rC.j_INJ[0] && rN.c_INJ[0] === rC.c_INJ[0];
+            return {
+              steps: [
+                {
+                  label: (
+                    <>
+                      digital 命令 <M>{'R_{INJ}'}</M>(目標 <M>{'R_{INJ}/G'}</M>)
+                    </>
+                  ),
+                  value: `${code} LSB = ${fmt(target, 8, 'cyc')}`,
+                },
+                {
+                  label: <>naive 選中的 <M>{'(j, c)'}</M> 與 analog 落點</>,
+                  value: `(${rN.j_INJ[0]}, ${rN.c_INJ[0]}) → ${fmt(rN.u_INJ_analog[0], 8, 'cyc')}`,
+                },
+                {
+                  label: <>naive 對 digital 目標的誤差</>,
+                  value: `${fmt(errN * 256, 6, 'LSB')} = ${fmt(errN * tVcoPs * 1000, 6, 'fs')}`,
+                },
+                {
+                  label: <>calibrated 選中的 <M>{'(j, c)'}</M> 與 analog 落點</>,
+                  value: `(${rC.j_INJ[0]}, ${rC.c_INJ[0]}) → ${fmt(rC.u_INJ_analog[0], 8, 'cyc')}`,
+                },
+                {
+                  label: <>calibrated 對 digital 目標的誤差</>,
+                  value: `${fmt(errC * 256, 6, 'LSB')} = ${fmt(errC * tVcoPs * 1000, 6, 'fs')}`,
+                },
+                {
+                  label: <>改善量 <M>{'(|e_{naive}| - |e_{cal}|)'}</M></>,
+                  value: fmt(gain, 6, 'fs'),
+                },
+              ],
+              answer: (
+                <>
+                  calibrated 選 ({rC.j_INJ[0]}, {rC.c_INJ[0]}),對 digital 目標的誤差由{' '}
+                  {fmt(errN * 256, 6, 'LSB')}({fmt(errN * tVcoPs * 1000, 6, 'fs')})降到{' '}
+                  {fmt(errC * 256, 6, 'LSB')}({fmt(errC * tVcoPs * 1000, 6, 'fs')})
+                </>
+              ),
+              warn: same
+                ? 'calibrated 與 naive 選到同一組 (j, c):這個 target 沒有落在受損 tap 的轄區,redundancy 用不上'
+                : undefined,
+            };
+          }}
+        />
       </SectionExample>
 
       <SectionFigure

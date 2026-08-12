@@ -13,8 +13,9 @@ _ARCH_MODES = ("A", "B", "C", "D")
 _INJ_MAPPINGS = ("naive", "nearest", "calibrated")
 _DTC_MODES = ("normalized", "fixed_time")
 _INJ_MODELS = ("none", "reset", "linear", "sin", "lut")
-_ACTUATOR_MODES = ("full", "dsm_only")
+_ACTUATOR_MODES = ("full", "dsm_only", "qnc")
 _INJ_GATE_MODES = ("off", "threshold")
+_LOOP_MODES = ("off", "pi")
 
 #: fields added after the schema-v1 test vectors were committed; they are
 #: omitted from to_dict() when they hold their defaults so every committed
@@ -22,6 +23,16 @@ _INJ_GATE_MODES = ("off", "threshold")
 #: back in, so the round-trip is still exact).
 _SCHEMA_V2_FIELDS = ("actuator_mode", "inj_gate_mode",
                      "inj_gate_threshold_cycles")
+
+#: fields added after the schema-v2 test vectors were committed; same
+#: omit-at-default serialization rule (keeps v1 AND v2 vectors byte-identical).
+_SCHEMA_V3_FIELDS = ("qnc_gain",)
+
+#: PLL loop co-simulation fields (MODEL_SPEC section 14.1); same
+#: omit-at-default serialization rule as the schema-v2/v3 fields.
+_SCHEMA_V4_FIELDS = ("loop_mode", "loop_kp", "loop_ki")
+
+_OMIT_DEFAULT_FIELDS = _SCHEMA_V2_FIELDS + _SCHEMA_V3_FIELDS + _SCHEMA_V4_FIELDS
 
 
 @dataclass
@@ -41,9 +52,13 @@ class SimConfig:
     quantizer: str = "nearest"     # floor|nearest|truncate|ef1|mash11|mash111 [B5]
     dither_amp_lsb: float = 0.0    # triangular dither amplitude (quantizer LSB), pre-quantize
     arch_mode: str = "D"           # A|B|C|D (section 7; D = quantize once + modular reverse)
-    actuator_mode: str = "full"    # full|dsm_only (section 7.1; dsm_only =
-                                   # classic divider-modulating DSM, integer-
-                                   # cycle quantization, no fractional actuator)
+    actuator_mode: str = "full"    # full|dsm_only|qnc (sections 7.1, 7.2;
+                                   # dsm_only = classic divider-modulating DSM,
+                                   # integer-cycle quantization, no fractional
+                                   # actuator; qnc = dsm_only divider + DTC
+                                   # quantization-noise cancellation)
+    qnc_gain: float = 1.0          # QNC cancellation-DTC gain (section 7.2;
+                                   # only used when actuator_mode == 'qnc')
     inj_mapping: str = "naive"     # naive|nearest|calibrated (section 8)
     dtc_mode: str = "normalized"   # normalized|fixed_time (section 11)
     dtc_lsb_fs: float = 312.5      # fixed_time DTC LSB in fs [B2]
@@ -78,6 +93,11 @@ class SimConfig:
     inj_gate_mode: str = "off"     # off|threshold (section 14 gating)
     inj_gate_threshold_cycles: float = 0.0625  # fire iff |e_ZC_hw| <= threshold
 
+    # --- PLL loop co-simulation (section 14.1) ---
+    loop_mode: str = "off"         # off|pi (behavioral type-II PI loop) [B8]
+    loop_kp: float = 0.05          # proportional gain (dimensionless)
+    loop_ki: float = 0.005         # integral gain (dimensionless)
+
     # ------------------------------------------------------------------
     def __post_init__(self):
         if self.quantizer not in _QUANTIZERS:
@@ -94,6 +114,8 @@ class SimConfig:
             raise ValueError(f"actuator_mode must be one of {_ACTUATOR_MODES}")
         if self.inj_gate_mode not in _INJ_GATE_MODES:
             raise ValueError(f"inj_gate_mode must be one of {_INJ_GATE_MODES}")
+        if self.loop_mode not in _LOOP_MODES:
+            raise ValueError(f"loop_mode must be one of {_LOOP_MODES}")
         if len(self.tap_mismatch_cycles) != self.n_tap:
             raise ValueError("tap_mismatch_cycles must have n_tap entries")
         if len(self.pmux_mismatch_cycles) != self.n_pmux:
@@ -122,12 +144,12 @@ class SimConfig:
 
     # --- JSON round-trip ---
     def to_dict(self) -> dict:
-        """Full config dict, minus schema-v2 fields at their default values
-        (keeps the committed schema-v1 test vectors byte-identical;
+        """Full config dict, minus schema-v2/v3/v4 fields at their default
+        values (keeps the committed earlier-schema test vectors byte-identical;
         ``from_dict`` restores the defaults so the round-trip is exact)."""
         d = asdict(self)
-        defaults = _SCHEMA_V2_DEFAULTS
-        for name in _SCHEMA_V2_FIELDS:
+        defaults = _OMIT_DEFAULT_DEFAULTS
+        for name in _OMIT_DEFAULT_FIELDS:
             if d[name] == defaults[name]:
                 del d[name]
         return d
@@ -143,6 +165,6 @@ class SimConfig:
         return SimConfig.from_dict(d)
 
 
-#: default values of the schema-v2 fields (see _SCHEMA_V2_FIELDS / to_dict)
-_SCHEMA_V2_DEFAULTS = {f.name: f.default for f in fields(SimConfig)
-                       if f.name in _SCHEMA_V2_FIELDS}
+#: default values of the schema-v2/v3/v4 fields (see _OMIT_DEFAULT_FIELDS / to_dict)
+_OMIT_DEFAULT_DEFAULTS = {f.name: f.default for f in fields(SimConfig)
+                          if f.name in _OMIT_DEFAULT_FIELDS}

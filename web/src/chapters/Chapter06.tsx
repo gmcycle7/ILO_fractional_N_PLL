@@ -30,6 +30,7 @@ import { ParamPanel, Slider, SelectControl, Toggle, PresetButtons } from '../com
 import UnitSwitch, { useUnit } from '../components/UnitSwitch';
 import PhaseWheel from '../components/PhaseWheel';
 import DebugTable from '../components/DebugTable';
+import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { makeLineOption, makeMarkLine, type LineSeriesSpec } from '../lib/chartOptions';
 import { useChartTheme } from '../lib/useChartTheme';
 import {
@@ -44,10 +45,15 @@ import { chapterById } from './index';
 import {
   simulate,
   fromPartial,
+  configTVcoS,
   xIdeal,
   uInjIdeal,
   wrap01,
   wrapCycles,
+  tapTable,
+  makeDtc,
+  makeAllStreams,
+  rms,
   type Quantizer,
 } from '../model';
 
@@ -55,6 +61,7 @@ const meta = chapterById(6)!;
 
 const N_WHEEL = 200; // wheel 動畫長度(α=0.13 時 100 拍回歸)
 const N_SIM = 256; // 互動模擬長度(<= 1024)
+const N_EXAMPLE = 128; // 數值例子的短模擬長度(每次按鍵重算,故 <= 128)
 const HALF_LSB_CYC = 1 / 512; // half-LSB, cycles
 
 function toXY(a: ArrayLike<number>): [number, number][] {
@@ -636,6 +643,327 @@ export default function Chapter06() {
           <M>{'= +0.00109375'}</M> cycle(= {formatPhase(0.00109375, unit, tVco)}),仍在 half-LSB
           範圍內。<EpistemicTag kind="EXACT" />
         </p>
+
+        <ExampleProblem
+          index={1}
+          tag="EXACT"
+          title="第 k 拍的理想 injection 命令 u_INJ_ideal"
+          prompt={
+            <>
+              某 fractional-N PLL 取 divide ratio <M>{'N'}</M>、reference <M>{'f_{ref}'}</M>,校正後的
+              目標 zero crossing 為 <M>{'z_0'}</M>。請依 §3 與 §5.2 算出第 <M>{'k'}</M> 個 reference
+              edge 上 injection 路徑要合成的理想命令:先取絕對相位{' '}
+              <M>{'s_{ideal} = s_0 + kN'}</M>(<M>{'s_0 = 0'}</M>)、fractional{' '}
+              <M>{'x_{ideal}[k] = \\operatorname{wrap01}(s_{ideal})'}</M>,再取{' '}
+              <M>{'u_{INJ,ideal}[k] = \\operatorname{wrap01}(z_0 - x_{ideal}[k])'}</M>,換算成
+              時間延遲,並驗證 <M>{'\\operatorname{wrap01}(x + u) = z_0'}</M> 這條恆等式。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 2, max: 8, step: 0.0005 },
+            { key: 'k', label: <M>{'k'}</M>, def: 5, min: 0, max: 1023, step: 1 },
+            { key: 'z0', label: <M>{'z_0'}</M>, def: 0, min: 0, max: 0.999, step: 1 / 256, unit: 'cyc' },
+            {
+              key: 'fref',
+              label: <M>{'f_{ref}'}</M>,
+              def: 4,
+              min: 0.1,
+              max: 20,
+              step: 0.1,
+              unit: 'GHz',
+            },
+          ]}
+          compute={(v) => {
+            const cfg = fromPartial({ n_div: v.N, f_ref_hz: v.fref * 1e9, z0_cycles: v.z0 });
+            const tVcoPs = configTVcoS(cfg) * 1e12;
+            const s = v.k * v.N; // s0 = 0(§3:用乘法,不用累加)
+            const x = wrap01(s);
+            const u = uInjIdeal(Float64Array.of(x), v.z0)[0];
+            const ident = wrap01(x + u);
+            const alphaG = (v.N - Math.trunc(v.N)) * 256;
+            return {
+              steps: [
+                {
+                  label: (
+                    <>
+                      <M>{'s_{ideal} = s_0 + kN'}</M>
+                    </>
+                  ),
+                  value: fmt(s, 9, 'cyc'),
+                },
+                {
+                  label: (
+                    <>
+                      <M>{'x_{ideal}[k] = \\operatorname{wrap01}(s_{ideal})'}</M>
+                    </>
+                  ),
+                  value: fmt(x, 6, 'cyc'),
+                },
+                {
+                  label: (
+                    <>
+                      <M>{'u_{INJ,ideal}[k] = \\operatorname{wrap01}(z_0 - x)'}</M>
+                    </>
+                  ),
+                  value: fmt(u, 6, 'cyc'),
+                },
+                {
+                  label: (
+                    <>
+                      <M>{'T_{vco} = 1/(N f_{ref})'}</M>
+                    </>
+                  ),
+                  value: fmt(tVcoPs, 6, 'ps'),
+                },
+                {
+                  label: (
+                    <>
+                      命令延遲 <M>{'u_{INJ,ideal}\\cdot T_{vco}'}</M>
+                    </>
+                  ),
+                  value: fmt(u * tVcoPs, 6, 'ps'),
+                },
+                {
+                  label: (
+                    <>
+                      恆等式 <M>{'\\operatorname{wrap01}(x + u)'}</M>(應等於 <M>{'z_0'}</M>)
+                    </>
+                  ),
+                  value: fmt(ident, 6, 'cyc'),
+                },
+              ],
+              answer: (
+                <>
+                  <M>{'u_{INJ,ideal}[k]'}</M> = {fmt(u, 6, 'cyc')} = {fmt(u * tVcoPs, 6, 'ps')};
+                  <M>{'\\operatorname{wrap01}(x+u)'}</M> = {fmt(ident, 6, 'cyc')} = <M>{'z_0'}</M>
+                </>
+              ),
+              warn:
+                Math.abs(alphaG - Math.round(alphaG)) < 1e-9
+                  ? `α·G = ${fmt(alphaG, 6)} 為整數(on-grid):命令每拍恰好落在 fine code 格點,量化誤差為 0`
+                  : undefined,
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={2}
+          tag="EXACT"
+          title="zero-crossing alignment error e_ZC(實際 tap + DTC 落點)"
+          prompt={
+            <>
+              固定 <M>{'N = 3.13'}</M>(<M>{'T_{vco} = 79.872'}</M> ps)、<M>{'z_0 = 0'}</M>。第 k
+              拍量到的 VCO 實際 fractional phase 為 <M>{'x_{vco,actual}'}</M>(已含{' '}
+              <M>{'\\eta_{vco}'}</M>),actuator 選了第 <M>{'j'}</M> 個 injection tap 與 injection DTC
+              code <M>{'c'}</M>,而該 tap 有 <M>{'\\delta_{tap}'}</M> 的 mismatch。請用 §5.1 的{' '}
+              <M>{'e_{ZC} = \\operatorname{wrapCycles}(x_{vco,actual} + \\varphi_{tap,actual}[j] + d_{INJ} - z_0)'}</M>{' '}
+              算出對位誤差(cycles / LSB / fs / 度)。
+            </>
+          }
+          inputs={[
+            {
+              key: 'xvco',
+              label: <M>{'x_{vco,actual}'}</M>,
+              def: 0.65,
+              min: -1,
+              max: 2,
+              step: 0.01,
+              unit: 'cyc',
+            },
+            { key: 'j', label: <>tap <M>{'j'}</M></>, def: 2, min: 0, max: 7, step: 1 },
+            { key: 'c', label: <>DTC code <M>{'c'}</M></>, def: 26, min: 0, max: 63, step: 1 },
+            {
+              key: 'dtap',
+              label: <M>{'\\delta_{tap}[j]'}</M>,
+              def: 1,
+              min: -5,
+              max: 5,
+              step: 0.1,
+              unit: '°',
+            },
+          ]}
+          compute={(v) => {
+            const jj = Math.min(7, Math.max(0, Math.round(v.j)));
+            const cc = Math.min(63, Math.max(0, Math.round(v.c)));
+            const mm = Array.from({ length: 8 }, (_, i) => (i === jj ? v.dtap / 360 : 0));
+            const cfg = fromPartial({ n_div: 3.13, tap_mismatch_cycles: mm });
+            const tVcoPs = configTVcoS(cfg) * 1e12;
+            const taps = tapTable(cfg.n_tap, cfg.tap_mismatch_cycles);
+            const dtc = makeDtc(cfg, 'inj', makeAllStreams(cfg.seed));
+            const phi = taps[jj];
+            const d = dtc.delayCycles(cc);
+            const arg = v.xvco + phi + d - cfg.z0_cycles;
+            const e = wrapCycles(arg);
+            const eLsb = e * 256;
+            return {
+              steps: [
+                {
+                  label: (
+                    <>
+                      <M>{'\\varphi_{tap,actual}[j] = j/8 + \\delta_{tap}'}</M>
+                    </>
+                  ),
+                  value: fmt(phi, 8, 'cyc'),
+                },
+                {
+                  label: (
+                    <>
+                      <M>{'d_{INJ} = c/256'}</M>(normalized DTC)
+                    </>
+                  ),
+                  value: fmt(d, 8, 'cyc'),
+                },
+                {
+                  label: (
+                    <>
+                      wrap 前的引數 <M>{'x + \\varphi + d - z_0'}</M>
+                    </>
+                  ),
+                  value: fmt(arg, 9, 'cyc'),
+                },
+                {
+                  label: (
+                    <>
+                      <M>{'e_{ZC} = \\operatorname{wrapCycles}(\\cdot)'}</M>
+                    </>
+                  ),
+                  value: fmt(e, 6, 'cyc'),
+                },
+                { label: <>換成 fine code 單位</>, value: fmt(eLsb, 6, 'LSB') },
+                { label: <>換成時間(× T_vco)</>, value: fmt(e * tVcoPs * 1000, 6, 'fs') },
+                {
+                  label: (
+                    <>
+                      <M>{'\\theta_{ZC} = 360^\\circ \\cdot e_{ZC}'}</M>
+                    </>
+                  ),
+                  value: `${fmt(e * 360, 6)}°`,
+                },
+              ],
+              answer: (
+                <>
+                  <M>{'e_{ZC}'}</M> = {fmt(e, 6, 'cyc')} = {fmt(eLsb, 6, 'LSB')} ={' '}
+                  {fmt(e * tVcoPs * 1000, 6, 'fs')}({fmt(e * 360, 6)}°)
+                </>
+              ),
+              warn:
+                Math.abs(e) > 1 / 16
+                  ? `|e_ZC| 超過 1/16 cycle(16 LSB)的 basin 半寬:pulse 會被隔壁 zero crossing 捕捉(Ch7 false lock)`
+                  : Math.abs(e) > 1 / 512
+                    ? `|e_ZC| 超出 half-LSB(0.5 LSB):此點誤差由 tap/DTC 的 analog 項主導,不是 quantization`
+                    : undefined,
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={3}
+          tag="EXPERIMENT"
+          title="e_ZC_hw 誤差預算:quantization vs tap/DTC analog"
+          prompt={
+            <>
+              把七類誤差中<strong>第 3 類</strong>(quantization)與<strong>第 4、5 類</strong>
+              (tap mismatch、injection DTC gain)分開記帳:以同一組 <M>{'N'}</M> 跑兩次{' '}
+              {N_EXAMPLE} 拍的模擬 —— 一次全 ideal analog(只剩 quantization 的 baseline)、一次
+              帶入 <M>{'\\delta_{tap}'}</M>(全部 taps)與 <M>{'g_{INJ}'}</M> gain error,兩者
+              相減即 analog 項對第 <M>{'k'}</M> 拍 <M>{'e_{ZC,hw}'}</M> 的貢獻。請算出該拍的總誤差
+              與拆解,並與 half-LSB(0.5 LSB)比較。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 3, max: 3.25, step: 0.0005 },
+            { key: 'k', label: <M>{'k'}</M>, def: 64, min: 0, max: N_EXAMPLE - 1, step: 1 },
+            {
+              key: 'dtap',
+              label: <>tap mismatch(全部)</>,
+              def: 1,
+              min: -5,
+              max: 5,
+              step: 0.1,
+              unit: '°',
+            },
+            {
+              key: 'gain',
+              label: <>INJ DTC gain error</>,
+              def: 1,
+              min: -5,
+              max: 5,
+              step: 0.1,
+              unit: '%',
+            },
+          ]}
+          compute={(v) => {
+            const kk = Math.min(N_EXAMPLE - 1, Math.max(0, Math.round(v.k)));
+            const mm = Array.from({ length: 8 }, () => v.dtap / 360);
+            const base = simulate(
+              fromPartial({ n_div: v.N, n_cycles: N_EXAMPLE, quantizer: 'nearest' }),
+            );
+            const cur = simulate(
+              fromPartial({
+                n_div: v.N,
+                n_cycles: N_EXAMPLE,
+                quantizer: 'nearest',
+                tap_mismatch_cycles: mm,
+                dtc_inj_gain: 1 + v.gain / 100,
+              }),
+            );
+            const tVcoPs = cur.t_vco_s * 1e12;
+            const eb = base.data.e_ZC_hw[kk];
+            const ec = cur.data.e_ZC_hw[kk];
+            const delta = ec - eb;
+            const rmsB = rms(base.data.e_ZC_hw);
+            const rmsC = rms(cur.data.e_ZC_hw);
+            return {
+              steps: [
+                {
+                  label: (
+                    <>
+                      baseline(僅 quantization)<M>{'e_{ZC,hw}[k]'}</M>
+                    </>
+                  ),
+                  value: `${fmt(eb * 256, 6, 'LSB')} = ${fmt(eb * tVcoPs * 1000, 6, 'fs')}`,
+                },
+                {
+                  label: (
+                    <>
+                      含 analog 的 <M>{'e_{ZC,hw}[k]'}</M>
+                    </>
+                  ),
+                  value: `${fmt(ec * 256, 6, 'LSB')} = ${fmt(ec * tVcoPs * 1000, 6, 'fs')}`,
+                },
+                {
+                  label: <>analog 項貢獻(第 4、5 類)= 兩者之差</>,
+                  value: `${fmt(delta * 256, 6, 'LSB')} = ${fmt(delta * tVcoPs * 1000, 6, 'fs')}`,
+                },
+                {
+                  label: <>{N_EXAMPLE} 拍 rms:baseline</>,
+                  value: fmt(rmsB * 256, 6, 'LSB'),
+                },
+                {
+                  label: <>{N_EXAMPLE} 拍 rms:含 analog</>,
+                  value: fmt(rmsC * 256, 6, 'LSB'),
+                },
+                {
+                  label: <>該拍總誤差 / half-LSB</>,
+                  value: fmt(Math.abs(ec * 256) / 0.5, 6, '×'),
+                },
+              ],
+              answer: (
+                <>
+                  <M>{'e_{ZC,hw}[k]'}</M> = {fmt(ec * 256, 6, 'LSB')} ={' '}
+                  {fmt(ec * tVcoPs * 1000, 6, 'fs')};其中 quantization {fmt(eb * 256, 6, 'LSB')}、
+                  analog {fmt(delta * 256, 6, 'LSB')}
+                </>
+              ),
+              warn:
+                Math.abs(ec) > 1 / 16
+                  ? `總誤差超過 basin 半寬 1/16 cycle(16 LSB):已是對位問題,不只是精度問題(Ch7)`
+                  : v.dtap === 0 && v.gain === 0
+                    ? 'analog 全 ideal:此時只剩第 3 類 quantization 誤差,兩次模擬完全相同'
+                    : undefined,
+            };
+          }}
+        />
       </SectionExample>
 
       <SectionFigure

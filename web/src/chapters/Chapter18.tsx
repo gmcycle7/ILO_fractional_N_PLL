@@ -14,6 +14,7 @@ import {
 import EChart from '../components/EChart';
 import EpistemicTag from '../components/EpistemicTag';
 import Callout from '../components/Callout';
+import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { M, MathBlock } from '../components/Math';
 import { ParamPanel, SelectControl, Toggle } from '../components/controls';
 import UnitSwitch, { useUnit } from '../components/UnitSwitch';
@@ -23,7 +24,7 @@ import { useChartTheme } from '../lib/useChartTheme';
 import { trimNumber, phaseAxisLabel, makePhaseTickFormatter, formatPhase } from '../lib/format';
 import { useSimStatus } from '../SimStatusContext';
 import { chapterById } from './index';
-import { simulate, fromPartial } from '../model';
+import { simulate, fromPartial, Mulberry32 } from '../model';
 import type { SimConfig } from '../model';
 
 const meta = chapterById(18)!;
@@ -471,6 +472,150 @@ export default function Chapter18() {
           k=1, t=0.25 ns, n_int=3, m_FB=0, c_FB=33, j_INJ=6, c_INJ=31, R_FB=33,
           R_INJ=223, seq_id=1,與手算完全一致。<EpistemicTag kind="EXACT" />
         </p>
+
+        <ExampleProblem
+          index={1}
+          tag="EXACT"
+          title="三級 tolerance 判定:PASS 還是 FAIL?"
+          prompt={
+            <>
+              TS mirror 用 <code>simulate()</code> 算出第 <M>{'k'}</M> 拍的 <code>e_FB_abs</code>{' '}
+              當作 <M>{'y_{TS}'}</M>;某份 Python 輸出回報 <M>{'y_{Py}'}</M>。依欄位類型套用
+              MODEL_SPEC §18 的三級 tolerance(整數 0 / 純數位 float 1e-12 / noise-path
+              1e-9),判斷 <M>{'|y_{TS}-y_{Py}|'}</M> 是否通過。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 3, max: 3.25, step: 0.0001 },
+            { key: 'k', label: <M>{'k'}</M>, def: 1, min: 0, max: 500, step: 1 },
+            { key: 'yPy', label: <><M>{'y_{Py}'}</M>(Python 回報值)</>, def: -0.00109375, min: -1, max: 1, step: 1e-8, unit: 'cyc' },
+            {
+              key: 'colType',
+              label: '欄位類型(0=整數,1=純數位 float,2=noise-path)',
+              def: 1,
+              min: 0,
+              max: 2,
+              step: 1,
+            },
+          ]}
+          compute={(v) => {
+            const k = Math.max(0, Math.round(v.k));
+            const res = simulate(fromPartial({ n_div: v.N, n_cycles: k + 1 }));
+            const yTs = res.data.e_FB_abs[k];
+            const diff = Math.abs(yTs - v.yPy);
+            const colType = Math.round(v.colType);
+            const threshold = colType <= 0 ? 0 : colType === 1 ? 1e-12 : 1e-9;
+            const label = colType <= 0 ? 'integer(0)' : colType === 1 ? 'pure digital float(1e-12)' : 'noise-path(1e-9)';
+            const pass = diff <= threshold;
+            return {
+              steps: [
+                { label: <>TS 端:<code>simulate()</code> 的 <M>{'y_{TS}=e_{FB,abs}[k]'}</M></>, value: fmt(yTs, 10, 'cyc') },
+                { label: <>回報值 <M>{'y_{Py}'}</M></>, value: fmt(v.yPy, 10, 'cyc') },
+                { label: <><M>{'|y_{TS}-y_{Py}|'}</M></>, value: fmt(diff, 6) },
+                { label: <>套用的 tolerance 級別</>, value: label },
+                { label: <>tolerance 門檻</>, value: fmt(threshold, 3) },
+              ],
+              answer: (
+                <>
+                  {pass ? 'PASS' : 'FAIL'} — diff = {fmt(diff, 6)},門檻 = {fmt(threshold, 3)}
+                  {pass ? '(diff ≤ 門檻)' : '(diff > 門檻)'}
+                </>
+              ),
+              warn: pass ? undefined : `diff ${fmt(diff, 6)} 超過 ${label} 的門檻 ${fmt(threshold, 3)}`,
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={2}
+          tag="EXACT"
+          title="mulberry32:逐位可重現的 PRNG"
+          prompt={
+            <>
+              named stream 的種子是 <M>{'seed=\\text{base\\_seed}+\\text{offset}'}</M>(例如{' '}
+              <code>ref:1</code>)。給定 base seed、offset 與抽取次數,逐步呼叫{' '}
+              <code>next()</code>,回報最後一次抽出的均勻亂數(∈ [0,1))。
+            </>
+          }
+          inputs={[
+            { key: 'baseSeed', label: 'base seed', def: 12345, min: 0, max: 4294967295, step: 1 },
+            { key: 'offset', label: 'stream offset(1..10)', def: 1, min: 1, max: 10, step: 1 },
+            { key: 'numDraws', label: <>抽取次數</>, def: 3, min: 1, max: 20, step: 1 },
+          ]}
+          compute={(v) => {
+            const seed = (Math.round(v.baseSeed) + Math.round(v.offset)) >>> 0;
+            const n = Math.max(1, Math.round(v.numDraws));
+            const stream = new Mulberry32(seed);
+            const draws: number[] = [];
+            for (let i = 0; i < n; i++) draws.push(stream.next());
+            const shown = draws.slice(0, Math.min(draws.length, 6));
+            return {
+              steps: [
+                { label: 'seed = base_seed + offset', value: fmt(seed, 10) },
+                ...shown.map((d, i) => ({ label: <>第 {i + 1} 次 <code>next()</code></>, value: fmt(d, 10) })),
+                ...(draws.length > shown.length
+                  ? [{ label: <>…(共 {draws.length} 次)</>, value: '…' }]
+                  : []),
+              ],
+              answer: (
+                <>
+                  第 {n} 次 <code>next()</code> = {fmt(draws[draws.length - 1], 10)}(∈ [0,1))
+                </>
+              ),
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={3}
+          tag="EXACT"
+          title="config round-trip:JSON to_dict/from_dict 是否 byte-for-byte 一致?"
+          prompt={
+            <>
+              把一份 <code>SimConfig</code> 經 <code>fromPartial()</code> 建成 <M>{'cfg_1'}</M>,
+              模擬第 <M>{'k'}</M> 拍;再對 <M>{'cfg_1'}</M> 本身跑一次 <code>fromPartial()</code>{' '}
+              (模擬 JSON round-trip)得到 <M>{'cfg_2'}</M>,重新模擬同一拍。比較
+              <M>{'R_{INJ}'}</M>(整數)與 <M>{'e_{FB,abs}'}</M>(float)是否完全相同。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 3, max: 3.25, step: 0.0001 },
+            { key: 'k', label: <M>{'k'}</M>, def: 5, min: 0, max: 500, step: 1 },
+            { key: 'quantizerCode', label: 'quantizer(0=floor,1=nearest)', def: 1, min: 0, max: 1, step: 1 },
+          ]}
+          compute={(v) => {
+            const k = Math.max(0, Math.round(v.k));
+            const quantizer = v.quantizerCode < 0.5 ? 'floor' : 'nearest';
+            const cfg1 = fromPartial({ n_div: v.N, quantizer, n_cycles: k + 1 });
+            const res1 = simulate(cfg1);
+            const cfg2 = fromPartial(cfg1); // round-trip through fromPartial (to_dict/from_dict mirror)
+            const res2 = simulate(cfg2);
+            const rInj1 = res1.data.R_INJ[k];
+            const rInj2 = res2.data.R_INJ[k];
+            const eFb1 = res1.data.e_FB_abs[k];
+            const eFb2 = res2.data.e_FB_abs[k];
+            const diffInt = Math.abs(rInj1 - rInj2);
+            const diffFloat = Math.abs(eFb1 - eFb2);
+            const pass = diffInt === 0 && diffFloat === 0;
+            return {
+              steps: [
+                { label: <><M>{'cfg_1'}</M>:<code>simulate()</code> 的 <M>{'R_{INJ}[k]'}</M></>, value: fmt(rInj1, 8) },
+                { label: <><M>{'cfg_2'}</M>(round-trip):<M>{'R_{INJ}[k]'}</M></>, value: fmt(rInj2, 8) },
+                { label: <><M>{'|R_{INJ,1}-R_{INJ,2}|'}</M></>, value: fmt(diffInt, 6) },
+                { label: <><M>{'cfg_1'}</M> 的 <M>{'e_{FB,abs}[k]'}</M></>, value: fmt(eFb1, 10, 'cyc') },
+                { label: <><M>{'cfg_2'}</M> 的 <M>{'e_{FB,abs}[k]'}</M></>, value: fmt(eFb2, 10, 'cyc') },
+                { label: <><M>{'|e_{FB,1}-e_{FB,2}|'}</M></>, value: fmt(diffFloat, 6) },
+              ],
+              answer: (
+                <>
+                  {pass ? 'byte-for-byte 一致' : '不一致(不應發生)'}:R_INJ diff ={' '}
+                  {fmt(diffInt, 6)},e_FB_abs diff = {fmt(diffFloat, 6)}
+                </>
+              ),
+              warn: pass ? undefined : 'round-trip 前後結果不同 —— 代表 fromPartial 不是純函式,需回報 bug',
+            };
+          }}
+        />
       </SectionExample>
 
       <SectionFigure

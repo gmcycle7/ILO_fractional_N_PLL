@@ -36,6 +36,23 @@ inj_gate_mode == 'threshold').  A non-fired cycle applies NO phase kick
 (Delta_theta = 0; theta keeps accumulating detuning/noise); e_inj is still
 recorded as the error a pulse would have seen, and PRNG stream consumption
 is identical with or without gating.
+
+PLL loop co-simulation (spec section 14.1) [ASSUMPTION], loop_mode == 'pi':
+behavioral type-II PI loop; the PD samples the residual phase BEFORE the
+injection kick:
+
+    theta_minus[k] = theta_plus[k-1] + (2*pi*Delta_f*T_ref + u_loop[k])
+                     + w_vco[k]
+    pd_e[k]        = wrapRadians(theta_minus[k])
+    u_loop[0] = 0;  u_loop[k+1] = u_loop[k] - loop_ki * pd_e[k]
+    theta_plus[k]  = wrapRadians(theta_minus[k] - loop_kp*pd_e[k]
+                                 + Delta_theta[k])
+
+The injection kick is unchanged (same e_inj formula, gating, PRNG draws)
+and is applied after the proportional kick (summed in the same wrap).
+loop_mode == 'off' keeps the section-14 recursion bit-identical
+(u_loop == 0, no proportional kick); pd_e is still recorded as the error
+the PD would observe.
 """
 
 import math
@@ -102,14 +119,18 @@ def run_dynamics(cfg, e_zc_hw_cycles: np.ndarray, streams: dict,
     e_inj = np.empty(n)
     delta_theta = np.empty(n)
     theta_plus = np.empty(n)
+    u_loop_arr = np.empty(n)
+    pd_e = np.empty(n)
 
     s_vw = streams.get("vco_w")
     s_rw = streams.get("vco_rw")
     s_ref = streams.get("ref")
     s_pulse = streams.get("pulse")
 
+    loop_pi = cfg.loop_mode == "pi"
     tp_prev = 0.0
     rw = 0.0
+    u_loop = 0.0
     for k in range(n):
         w = 0.0
         if cfg.sigma_vco_w_rad > 0.0 and s_vw is not None:
@@ -117,7 +138,11 @@ def run_dynamics(cfg, e_zc_hw_cycles: np.ndarray, streams: dict,
         if cfg.sigma_vco_rw_rad > 0.0 and s_rw is not None:
             rw += cfg.sigma_vco_rw_rad * s_rw.gauss()
             w += rw
-        tm = tp_prev + a + w
+        if loop_pi:
+            tm = tp_prev + a + u_loop + w
+        else:
+            tm = tp_prev + a + w
+        pd = wrap_radians(tm)   # behavioral PD, before any kick (section 14.1)
         eps_rand = 0.0
         if cfg.sigma_ref_s > 0.0 and s_ref is not None:
             eps_rand += two_pi * (cfg.sigma_ref_s * s_ref.gauss()) / t_vco
@@ -128,13 +153,20 @@ def run_dynamics(cfg, e_zc_hw_cycles: np.ndarray, streams: dict,
             dth = 0.0   # gated out: no phase kick this cycle
         else:
             dth = _delta_theta(cfg.inj_model, cfg.k_inj, e, lut_e, lut_d)
-        tp = wrap_radians(tm + dth)
+        if loop_pi:
+            tp = wrap_radians(tm - cfg.loop_kp * pd + dth)
+        else:
+            tp = wrap_radians(tm + dth)
 
         theta_minus[k] = tm
         e_inj[k] = e
         delta_theta[k] = dth
         theta_plus[k] = tp
+        u_loop_arr[k] = u_loop
+        pd_e[k] = pd
         tp_prev = tp
+        if loop_pi:
+            u_loop = u_loop - cfg.loop_ki * pd
 
     return {
         "theta_minus": theta_minus,
@@ -143,4 +175,6 @@ def run_dynamics(cfg, e_zc_hw_cycles: np.ndarray, streams: dict,
         "delta_theta": delta_theta,
         "theta_plus": theta_plus,
         "e_ZC_total": e_inj / two_pi,   # cycles
+        "u_loop": u_loop_arr,
+        "pd_e": pd_e,
     }

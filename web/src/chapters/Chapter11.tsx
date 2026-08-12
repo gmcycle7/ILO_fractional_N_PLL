@@ -24,10 +24,11 @@ import {
 import EChart from '../components/EChart';
 import EpistemicTag from '../components/EpistemicTag';
 import Callout from '../components/Callout';
+import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { M, MathBlock } from '../components/Math';
 import { ParamPanel, Slider, SelectControl, PresetButtons } from '../components/controls';
 import UnitSwitch, { useUnit } from '../components/UnitSwitch';
-import { makeLineOption } from '../lib/chartOptions';
+import { makeLineOption, makeMarkLine } from '../lib/chartOptions';
 import { useChartTheme } from '../lib/useChartTheme';
 import {
   phaseAxisLabel,
@@ -41,6 +42,7 @@ import { chapterById } from './index';
 import {
   simulate,
   replaceConfig,
+  fromPartial,
   getPreset,
   presetConfigs,
   makeQuantizer,
@@ -53,11 +55,25 @@ import {
   mean,
   peakToPeak,
   cyclesToRadians,
+  lmsQncStep,
+  wrap01,
 } from '../model';
 import type { Quantizer, SimResult, Spur } from '../model';
 
 const meta = chapterById(11)!;
 const NC = 1024; // power of 2 -> full length used by the Hann periodogram
+
+// --- taxonomy (3): explicit QNC actuator (MODEL_SPEC section 7.2) ---
+const QNC_NC = 512; // spec section 7.2 / Test 18 measurement length
+const QNC_N_DIV = 3.13;
+/** equivalence bound of section 7.2: 1/512 + 1/256 cycle, expressed in LSB */
+const QNC_BOUND_LSB = (1 / 512 + 1 / 256) * 256; // = 1.5 LSB
+const HALF_LSB = 0.5; // LSB
+// LMS gain-calibration demo (section 7.2 lms_qnc_step)
+const LMS_MU = 0.02; // step size
+const LMS_BLOCK = 64; // cycles consumed per beat (plant frozen inside a beat)
+const LMS_BEATS = 20;
+const LMS_G0 = 0.95; // starting cancellation-DTC gain
 
 function toXY(ys: ArrayLike<number>, count?: number): [number, number][] {
   const n = count === undefined ? ys.length : Math.min(count, ys.length);
@@ -66,6 +82,26 @@ function toXY(ys: ArrayLike<number>, count?: number): [number, number][] {
     out.push([k, ys[k]]);
   }
   return out;
+}
+
+/** attach a markLine to series[idx] of an option built by makeLineOption */
+function withMarkLine(
+  option: ReturnType<typeof makeLineOption>,
+  idx: number,
+  ml: Record<string, unknown>,
+): ReturnType<typeof makeLineOption> {
+  const s = (option as unknown as { series?: Record<string, unknown>[] }).series;
+  if (s && s[idx]) s[idx].markLine = ml;
+  return option;
+}
+
+function maxAbs(x: ArrayLike<number>): number {
+  let m = 0;
+  for (let i = 0; i < x.length; i++) {
+    const a = Math.abs(x[i]);
+    if (a > m) m = a;
+  }
+  return m;
 }
 
 const QUANT_OPTIONS: { value: Quantizer; label: string }[] = [
@@ -177,6 +213,132 @@ export default function Chapter11() {
     [gateThr],
   );
 
+  // taxonomy (3): actuator_mode='qnc' — cancellation-DTC gain sweep + LMS demo
+  const [qncGain, setQncGain] = useState(0.98);
+  const [lmsBeat, setLmsBeat] = useState(0);
+  const [lmsPlaying, setLmsPlaying] = useState(false);
+  const qncBase = useMemo(
+    () =>
+      fromPartial({
+        n_div: QNC_N_DIV,
+        quantizer: 'nearest',
+        actuator_mode: 'qnc',
+        n_cycles: QNC_NC,
+      }),
+    [],
+  );
+  const qncFull = useMemo(
+    () => simulate(fromPartial({ n_div: QNC_N_DIV, quantizer: 'nearest', n_cycles: QNC_NC })),
+    [],
+  );
+  const qncSim = useMemo(
+    () => simulate(replaceConfig(qncBase, { qnc_gain: qncGain })),
+    [qncBase, qncGain],
+  );
+
+  // chapter-local LMS iteration over the exported lms_qnc_step helper:
+  // beat i = one simulation at the current gain (plant frozen) + LMS_BLOCK
+  // per-cycle updates fed by that beat's (e_FB_abs, u_FB_digital) pairs.
+  const lmsRun = useMemo(() => {
+    const beats: {
+      i: number;
+      gain: number;
+      peakLsb: number;
+      rmsLsb: number;
+      pts: [number, number][];
+    }[] = [];
+    let gain = LMS_G0;
+    for (let i = 0; i < LMS_BEATS; i++) {
+      const res = simulate(replaceConfig(qncBase, { qnc_gain: gain }));
+      const e = res.data.e_FB_abs;
+      const u = res.data.u_FB_digital;
+      const pts: [number, number][] = [];
+      for (let k = 0; k < LMS_BLOCK; k++) {
+        pts.push([k, e[k] * res.g]);
+      }
+      beats.push({
+        i,
+        gain,
+        peakLsb: maxAbs(e) * res.g,
+        rmsLsb: rms(e) * res.g,
+        pts,
+      });
+      let next = gain;
+      for (let k = 0; k < LMS_BLOCK; k++) {
+        next = lmsQncStep(next, LMS_MU, e[k], u[k]);
+      }
+      gain = next;
+    }
+    return beats;
+  }, [qncBase]);
+
+  useEffect(() => {
+    if (!lmsPlaying) return undefined;
+    const id = window.setInterval(() => {
+      setLmsBeat((b) => (b + 1) % LMS_BEATS);
+    }, 700);
+    return () => window.clearInterval(id);
+  }, [lmsPlaying]);
+
+  const qncStats = useMemo(() => {
+    const e = qncSim.data.e_FB_abs;
+    const g = qncSim.g;
+    let over = 0;
+    for (let k = 0; k < e.length; k++) {
+      if (Math.abs(e[k]) * g > HALF_LSB) over += 1;
+    }
+    const rows: {
+      k: number;
+      s: number;
+      y: number;
+      r: number;
+      w: number;
+      raw: number;
+      code: number;
+      aFb: number;
+      eLsb: number;
+    }[] = [];
+    for (let k = 0; k < 8; k++) {
+      const s = qncSim.data.s_ideal[k];
+      const y = qncSim.data.dsm_out[k];
+      const r = s - y;
+      const w = wrap01(r);
+      rows.push({
+        k,
+        s,
+        y,
+        r,
+        w,
+        raw: w * g * qncGain,
+        code: qncSim.data.R_FB[k],
+        aFb: qncSim.data.A_FB[k],
+        eLsb: e[k] * g,
+      });
+    }
+    return {
+      peakLsb: maxAbs(e) * g,
+      peakCycles: maxAbs(e),
+      rmsLsb: rms(e) * g,
+      over,
+      ezcRms: rms(qncSim.data.e_ZC_hw),
+      pairMax: maxAbs(qncSim.data.e_pair_digital),
+      fullPeakLsb: maxAbs(qncFull.data.e_FB_abs) * qncFull.g,
+      fullRmsLsb: rms(qncFull.data.e_FB_abs) * qncFull.g,
+      lsbS: qncSim.t_vco_s / qncSim.g,
+      rows,
+    };
+  }, [qncSim, qncFull, qncGain]);
+
+  const lmsStats = useMemo(() => {
+    let firstInBound = -1;
+    let first1e3 = -1;
+    for (const b of lmsRun) {
+      if (firstInBound < 0 && b.peakLsb <= QNC_BOUND_LSB) firstInBound = b.i;
+      if (first1e3 < 0 && Math.abs(1 - b.gain) < 1e-3) first1e3 = b.i;
+    }
+    return { firstInBound, first1e3, last: lmsRun[lmsRun.length - 1] };
+  }, [lmsRun]);
+
   const taxStats = useMemo(() => {
     const nIntSet = (r: SimResult): string => {
       const s = new Set<number>();
@@ -208,8 +370,23 @@ export default function Chapter11() {
   }, [exp22Sims, exp21Sims, gatedSim]);
 
   useEffect(() => {
-    setStatus('done', `exp07/08: ${NC} cycles ×2, exp09: 256 ×2, exp21/22: 512 ×7`);
-  }, [simNearest, simSel, pairSims, exp21Sims, exp22Sims, gatedSim, setStatus]);
+    setStatus(
+      'done',
+      `exp07/08: ${NC} cycles ×2, exp09: 256 ×2, exp21/22: 512 ×7, ` +
+        `qnc: 512 ×${LMS_BEATS + 2}`,
+    );
+  }, [
+    simNearest,
+    simSel,
+    pairSims,
+    exp21Sims,
+    exp22Sims,
+    gatedSim,
+    qncSim,
+    qncFull,
+    lmsRun,
+    setStatus,
+  ]);
 
   const tVco = simNearest.t_vco_s;
   const g = simNearest.g;
@@ -410,6 +587,151 @@ export default function Chapter11() {
     [exp21Sims, gatedSim, gateThr, ct],
   );
 
+  // taxonomy (3) 圖 A:e_FB_abs(LSB)vs qnc_gain slider,對照 full actuator
+  const optQncGain = useMemo(() => {
+    const mk = (res: SimResult): [number, number][] => {
+      const e = res.data.e_FB_abs;
+      const pts: [number, number][] = [];
+      for (let k = 0; k < Math.min(96, e.length); k++) {
+        pts.push([k, e[k] * res.g]);
+      }
+      return pts;
+    };
+    const opt = makeLineOption({
+      xLabel: 'k (reference cycle)',
+      yLabel: 'e_FB_abs (LSB)',
+      series: [
+        {
+          name: 'full actuator(nearest)',
+          data: mk(qncFull),
+          step: 'middle',
+          showSymbol: false,
+          color: ct.good,
+          width: 2.2,
+        },
+        {
+          name: `qnc,gain = ${trimNumber(qncGain, 5)}`,
+          data: mk(qncSim),
+          step: 'middle',
+          showSymbol: false,
+          color: ct.warn,
+        },
+      ],
+      yMin: -26,
+      yMax: 26,
+    });
+    return withMarkLine(
+      opt,
+      0,
+      makeMarkLine([
+        { y: QNC_BOUND_LSB, label: '+1-LSB 等效界' },
+        { y: -QNC_BOUND_LSB, label: '−1-LSB 等效界' },
+      ]),
+    );
+  }, [qncFull, qncSim, qncGain, ct]);
+
+  // taxonomy (3) 圖 B1:LMS gain 收斂曲線(逐 beat 揭露)
+  const optLmsGain = useMemo(() => {
+    const pts: [number, number][] = [];
+    for (let i = 0; i <= lmsBeat; i++) {
+      pts.push([lmsRun[i].i, lmsRun[i].gain]);
+    }
+    const opt = makeLineOption({
+      title: 'qnc_gain[i]',
+      xLabel: 'LMS beat i',
+      yLabel: 'qnc_gain',
+      series: [
+        {
+          name: 'gain',
+          data: pts,
+          showSymbol: true,
+          symbolSize: 5,
+          color: ct.accent,
+          width: 2.2,
+        },
+      ],
+      xMin: 0,
+      xMax: LMS_BEATS - 1,
+      yMin: 0.945,
+      yMax: 1.005,
+      zoom: false,
+      legend: false,
+    });
+    return withMarkLine(opt, 0, makeMarkLine([{ y: 1, label: 'gain = 1' }]));
+  }, [lmsRun, lmsBeat, ct]);
+
+  // taxonomy (3) 圖 B2:residual peak / rms(LSB)vs beat
+  const optLmsResidual = useMemo(() => {
+    const pk: [number, number][] = [];
+    const rm: [number, number][] = [];
+    for (let i = 0; i <= lmsBeat; i++) {
+      pk.push([lmsRun[i].i, lmsRun[i].peakLsb]);
+      rm.push([lmsRun[i].i, lmsRun[i].rmsLsb]);
+    }
+    const opt = makeLineOption({
+      title: 'residual |e_FB_abs|',
+      xLabel: 'LMS beat i',
+      yLabel: 'e_FB_abs (LSB)',
+      series: [
+        { name: 'peak', data: pk, showSymbol: true, symbolSize: 5, color: ct.bad, width: 2.2 },
+        { name: 'rms', data: rm, showSymbol: true, symbolSize: 4, color: ct.accent },
+      ],
+      xMin: 0,
+      xMax: LMS_BEATS - 1,
+      yMin: 0,
+      yMax: 13.5,
+      zoom: false,
+    });
+    return withMarkLine(
+      opt,
+      0,
+      makeMarkLine([
+        { y: QNC_BOUND_LSB, label: '1-LSB 等效界 1.5' },
+        { y: qncStats.fullPeakLsb, label: 'gain=1 底線' },
+      ]),
+    );
+  }, [lmsRun, lmsBeat, qncStats, ct]);
+
+  // taxonomy (3) 圖 B3:LMS block 的 e_FB_abs 波形(當前 beat)vs gain=1 參考
+  const optLmsWave = useMemo(() => {
+    const ref: [number, number][] = [];
+    for (let k = 0; k < LMS_BLOCK; k++) {
+      ref.push([k, qncFull.data.e_FB_abs[k] * qncFull.g]);
+    }
+    const opt = makeLineOption({
+      xLabel: `k (LMS block:beat 內取前 ${LMS_BLOCK} 拍)`,
+      yLabel: 'e_FB_abs (LSB)',
+      series: [
+        {
+          name: 'gain = 1 參考(= full actuator)',
+          data: ref,
+          step: 'middle',
+          showSymbol: false,
+          color: ct.good,
+          width: 2.2,
+        },
+        {
+          name: `beat ${lmsBeat}(gain = ${trimNumber(lmsRun[lmsBeat].gain, 8)})`,
+          data: lmsRun[lmsBeat].pts,
+          step: 'middle',
+          showSymbol: false,
+          color: ct.warn,
+        },
+      ],
+      yMin: -13.5,
+      yMax: 3,
+      zoom: false,
+    });
+    return withMarkLine(
+      opt,
+      0,
+      makeMarkLine([
+        { y: QNC_BOUND_LSB, label: '+1-LSB 等效界' },
+        { y: -QNC_BOUND_LSB, label: '−1-LSB 等效界' },
+      ]),
+    );
+  }, [lmsRun, lmsBeat, qncFull, ct]);
+
   const spurRow = (s: Spur, i: number, tag: string) => (
     <tr key={`${tag}${i}`}>
       <td>{tag}</td>
@@ -439,6 +761,12 @@ export default function Chapter11() {
           <li>
             用了 DSM 之後,shared(mode D)與 independent(mode B)的 pair error
             差異還存在嗎?(experiment 9)<EpistemicTag kind="EXPERIMENT" />
+          </li>
+          <li>
+            把 DSM 移回整數 cycle、改用一顆 cancellation DTC 補殘量(QNC,
+            <code>actuator_mode=&apos;qnc&apos;</code>)之後,per-edge 誤差變成
+            誰的函數?gain 差 2% 會怎樣?能不能用 LMS 自己校回來?
+            <EpistemicTag kind="EXPERIMENT" />
           </li>
         </ul>
       </SectionQuestion>
@@ -548,6 +876,145 @@ export default function Chapter11() {
           full-chain 的 exp07/exp08 輸入逐拍累積 0.3 LSB,誤差因此是 0.1-LSB 階梯的
           多階序列(nearest:十階 ±0.5 LSB;ef1:峰值 ±0.7 LSB),不是 −0.3/+0.7 兩值。
         </p>
+
+        <ExampleProblem
+          index={1}
+          tag="EXACT"
+          title="固定殘量下,nearest 與 ef1 在第 k 拍的瞬時誤差"
+          prompt={
+            <>
+              輸入為常數殘量 <M>{'u[k]=u'}</M>(單位 LSB)。nearest 每拍給同一個{' '}
+              <M>{'y=\\lfloor u+0.5\\rfloor'}</M>,誤差恆定;ef1 則帶狀態遞迴{' '}
+              <M>{'v[k]=u+e[k-1],\\;y[k]=\\lfloor v[k]\\rfloor,\\;e[k]=v[k]-y[k]'}</M>,
+              從 k=0 跑到指定拍數,取第 k 拍的瞬時誤差 <M>{'y[k]-u'}</M> 比較兩者。
+            </>
+          }
+          inputs={[
+            { key: 'frac', label: <M>{'u'}</M>, def: 0.3, min: 0, max: 1, step: 0.01, unit: 'LSB' },
+            { key: 'k', label: <M>{'k'}</M>, def: 3, min: 0, max: 127, step: 1 },
+          ]}
+          compute={(v) => {
+            const frac = v.frac;
+            const k = Math.max(0, Math.min(127, Math.round(v.k)));
+            const qn = makeQuantizer('nearest');
+            const qe = makeQuantizer('ef1');
+            const yN = qn.quantize(frac);
+            let y = 0;
+            for (let i = 0; i <= k; i++) {
+              y = qe.quantize(frac);
+            }
+            const errN = yN - frac;
+            const errE = y - frac;
+            return {
+              steps: [
+                { label: <>nearest:<M>{'y=\\lfloor u+0.5\\rfloor'}</M></>, value: `${yN}` },
+                { label: <>nearest 誤差 <M>{'y-u'}</M>(對任何 k 皆同)</>, value: fmt(errN, 6, 'LSB') },
+                { label: <>ef1 跑 {k + 1} 拍後 <M>{'y[k]=\\lfloor v[k]\\rfloor'}</M></>, value: `${y}` },
+                { label: <>ef1 瞬時誤差 <M>{'y[k]-u'}</M></>, value: fmt(errE, 6, 'LSB') },
+              ],
+              answer: (
+                <>
+                  nearest 固定誤差 = {fmt(errN, 4, 'LSB')};ef1 在 k={k} 的瞬時誤差 ={' '}
+                  {fmt(errE, 4, 'LSB')}(carry 拍峰值可達 −u+1)
+                </>
+              ),
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={2}
+          tag="EXACT"
+          title="MASH 1-1 二階 shaping:第 k 拍的輸出與內部 state"
+          prompt={
+            <>
+              固定輸入 <M>{'u'}</M> 餵給 <code>mash11</code> quantizer(第一級 accumulator{' '}
+              <M>{'acc_1'}</M>、第二級 <M>{'acc_2'}</M>,輸出{' '}
+              <M>{'y=M+c_1+(c_2-c_2^{prev})'}</M>),跑到第 <M>{'k'}</M> 拍,讀出 carry 前後的{' '}
+              <M>{'acc_1'}</M>(即 <code>dsm_state</code>)與輸出 <M>{'y[k]'}</M>。與上例 ef1
+              對照:同輸入下兩者的 carry 時機不同(二階 vs 一階 shaping)。
+            </>
+          }
+          inputs={[
+            { key: 'u', label: <M>{'u'}</M>, def: 0.3, min: -4, max: 4, step: 0.01, unit: 'LSB' },
+            { key: 'k', label: <M>{'k'}</M>, def: 8, min: 0, max: 127, step: 1 },
+          ]}
+          compute={(v) => {
+            const u = v.u;
+            const k = Math.max(0, Math.min(127, Math.round(v.k)));
+            const qm = makeQuantizer('mash11');
+            let y = 0;
+            let stateBefore = qm.state;
+            for (let i = 0; i <= k; i++) {
+              stateBefore = qm.state;
+              y = qm.quantize(u);
+            }
+            const stateAfter = qm.state;
+            const err = y - u;
+            return {
+              steps: [
+                { label: <>第 k 拍前 <M>{'acc_1'}</M></>, value: fmt(stateBefore, 6, 'LSB') },
+                { label: <><M>{'y[k]'}</M>(mash11 輸出)</>, value: `${y}` },
+                { label: <>第 k 拍後 <M>{'acc_1'}</M>(= dsm_state[k])</>, value: fmt(stateAfter, 6, 'LSB') },
+                { label: <>瞬時誤差 <M>{'y[k]-u'}</M></>, value: fmt(err, 6, 'LSB') },
+              ],
+              answer: (
+                <>
+                  mash11 在 k={k} 的輸出 <M>{'y[k]'}</M> = {y},瞬時誤差 = {fmt(err, 4, 'LSB')}
+                  (預設 u=0.3、k=8 時 ef1 該拍誤差為 −0.3,mash11 卻已進位為 +0.7 —
+                  二階 shaping 的 carry pattern 與一階不同)
+                </>
+              ),
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={3}
+          tag="EXACT"
+          title="Telescoping 平均界:N 拍平均誤差 < 1/N(多步驟 error budget)"
+          prompt={
+            <>
+              固定殘量 <M>{'u'}</M> 跑 <M>{'N_{win}'}</M> 拍 ef1,累加每拍瞬時誤差{' '}
+              <M>{'\\sum(y[k]-u)'}</M>,除以 <M>{'N_{win}'}</M> 得平均誤差。理論界(telescoping
+              sum)為 <M>{'\\left|\\dfrac{e[-1]-e[N_{win}-1]}{N_{win}}\\right| < \\dfrac{1}{N_{win}}'}</M>
+              (因 <M>{'e\\in[0,1)'}</M>)。驗證任意 <M>{'N_{win}'}</M> 下平均誤差確實被此界限住。
+            </>
+          }
+          inputs={[
+            { key: 'frac', label: <M>{'u'}</M>, def: 0.3, min: 0, max: 1, step: 0.01, unit: 'LSB' },
+            { key: 'nWin', label: <M>{'N_{win}'}</M>, def: 45, min: 1, max: 128, step: 1 },
+          ]}
+          compute={(v) => {
+            const frac = v.frac;
+            const nWin = Math.max(1, Math.min(128, Math.round(v.nWin)));
+            const qe = makeQuantizer('ef1');
+            let sum = 0;
+            for (let i = 0; i < nWin; i++) {
+              const y = qe.quantize(frac);
+              sum += y - frac;
+            }
+            const meanErr = sum / nWin;
+            const bound = 1 / nWin;
+            const within = Math.abs(meanErr) < bound + 1e-9;
+            return {
+              steps: [
+                { label: <><M>{'\\sum_{k=0}^{N_{win}-1}(y[k]-u)'}</M></>, value: fmt(sum, 6, 'LSB') },
+                { label: <>平均誤差 <M>{'\\text{mean}=\\sum/N_{win}'}</M></>, value: fmt(meanErr, 6, 'LSB') },
+                { label: <>理論界 <M>{'1/N_{win}'}</M></>, value: fmt(bound, 6, 'LSB') },
+                { label: <><M>{'|\\text{mean}| < 1/N_{win}'}</M> ?</>, value: within ? '成立' : '不成立' },
+              ],
+              answer: (
+                <>
+                  平均誤差 = {fmt(meanErr, 6, 'LSB')},界 = ±{fmt(bound, 6, 'LSB')} —{' '}
+                  {within ? '確認界限成立' : '界限被違反(不應發生)'}(telescoping identity
+                  保證 <M>{'N_{win}\\to\\infty'}</M> 時平均 → 0)
+                </>
+              ),
+              warn: within ? undefined : 'telescoping 平均界被違反 — 檢查 quantizer 狀態初始化',
+            };
+          }}
+        />
       </SectionExample>
 
       <SectionFigure
@@ -756,7 +1223,7 @@ export default function Chapter11() {
       </SectionFigure>
 
       <SectionFigure
-        title="DSM 常見用法(2)(3)(4)— DSM-only + injection(experiment 21)、DTC-assisted QNC、phase-domain DSM"
+        title="DSM 常見用法(2)— DSM-only(無 DTC)直接配 injection(experiment 21)"
         caption={
           <span>
             exp21:N=3.13、ef1、sin injection(K=0.4、Δf=1 MHz、σ_vco_w=0.02
@@ -826,19 +1293,349 @@ export default function Chapter11() {
             </tbody>
           </table>
         </div>
+      </SectionFigure>
+
+      <SectionFigure
+        title="DSM 常見用法(3)— DTC-assisted QNC:actuator_mode='qnc' 的等效性與 gain error"
+        caption={
+          <span>
+            x 軸:拍 k(前 96 拍);y 軸:<M>{'e_{FB,abs}'}</M>(LSB,1 LSB ={' '}
+            {formatSiTime(qncStats.lsbS)} @ N = {QNC_N_DIV})。綠:full actuator
+            (nearest)基準;橘:<code>actuator_mode=&apos;qnc&apos;</code> 於
+            slider 指定的 <code>qnc_gain</code>。虛線為 §7.2 的 1-LSB 等效界
+            (<M>{'1/512+1/256'}</M> cycle = {QNC_BOUND_LSB} LSB)。N = {QNC_N_DIV}、
+            nearest、{QNC_NC} cycles、seed 12345、無 analog 非理想性。
+            <EpistemicTag kind="EXPERIMENT" />
+          </span>
+        }
+      >
         <p>
           <b>(3) DTC-assisted quantization-noise cancellation(QNC)— 是什麼:</b>
-          現代 fractional-N 的主流中間解:DSM 照樣調變 divider,但把 DSM 的
-          accumulated residue 送給一顆 cancellation DTC,在 phase detector 之前把
-          量化誤差抵消掉。<b>對本架構的意義:</b>本模型的 full actuator(shared
-          final code 驅動 PMUX+DTC)從 injection 視角看<b>就是</b> QNC:同一份
-          accumulated state,QNC 用它在 PD 前抵消誤差,本架構用它把 injection pulse
-          放到正確的 sub-cycle 位置 — exp21a 的 e_ZC_hw ≤{' '}
-          {trimNumber(Math.max(...Array.from(exp21Sims[0].data.e_ZC_hw).map(Math.abs)), 5)}{' '}
-          cycle 就是 cancellation 成功的量。<b>設計指引:</b>預算允許一顆 DTC 時,
-          這是 (1)(2) 與理想 fractional actuator 之間的自然折衷;需要 Ch15 的
-          gain/INL calibration 配套。<EpistemicTag kind="INFERENCE" />
+          現代 fractional-N 的主流中間解:DSM 照樣以<b>整數 cycle</b> 調變 divider,
+          但把 accumulated sub-cycle residue 送給一顆 <b>cancellation DTC</b>,在
+          phase detector 之前把量化誤差抵消掉。本模型有一個<b>顯式</b>的
+          actuator mode 對應它(MODEL_SPEC §7.2):
+          <code>actuator_mode=&apos;qnc&apos;</code>。
         </p>
+        <MathBlock>
+          {
+            'y[k]=Q\\!\\left(A_{ideal}[k]/G\\right),\\qquad r[k]=s_{ideal}[k]-y[k]'
+          }
+        </MathBlock>
+        <MathBlock>
+          {
+            'code[k]=\\mathrm{clamp}\\!\\left(q_{nearest}\\!\\left(\\operatorname{wrap01}(r[k])\\cdot G\\cdot g_{qnc}\\right),0,G-1\\right)'
+          }
+        </MathBlock>
+        <MathBlock>{'A_{FB}[k]=y[k]\\,G+code[k],\\qquad R_{FB}[k]=code[k]'}</MathBlock>
+        <p>
+          三件事同時發生:(a) divider 只收整數指令(<code>dsm_out</code> = y,與{' '}
+          <code>dsm_only</code> 完全相同的 quantization granularity);(b)
+          cancellation DTC 收<b>累積</b>殘量 <M>{'r=s_{ideal}-y'}</M>(不是每拍的
+          瞬時 DSM 輸出 — 這正是 Ch9 的主題),乘上 gain knob{' '}
+          <M>{'g_{qnc}'}</M>(config 欄位 <code>qnc_gain</code>,預設 1.0)後量化為
+          fine code;(c) <M>{'R_{FB}=code'}</M> 照 §4 decode 成 m/c,injection 側
+          <b>一律</b>取 modular reverse <M>{'R_{INJ}=(R_{zero}-R_{FB})\\bmod G'}</M>
+          (不論 <code>arch_mode</code>),故 <M>{'e_{pair,digital}\\equiv 0'}</M>{' '}
+          在 qnc 模式恆成立(下表實測 max = {qncStats.pairMax})
+          <EpistemicTag kind="EXACT" />。
+        </p>
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+          <div style={{ flex: '1 1 260px', minWidth: 240 }}>
+            <Slider
+              label="qnc_gain(cancellation DTC gain)"
+              value={qncGain}
+              min={0.9}
+              max={1.1}
+              step={0.005}
+              fmt={(v) => trimNumber(v, 5)}
+              onChange={setQncGain}
+            />
+          </div>
+          <PresetButtons
+            label="gain preset"
+            presets={[0.95, 0.98, 0.99, 1.0, 1.02].map((v) => ({
+              label: String(v),
+              onClick: () => setQncGain(v),
+            }))}
+          />
+        </div>
+        <EChart option={optQncGain} height={300} />
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, marginTop: 8 }}>
+          <div style={{ flex: '1 1 320px', overflowX: 'auto' }}>
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>metric({QNC_NC} cycles)</th>
+                  <th>qnc @ gain {trimNumber(qncGain, 5)}</th>
+                  <th>full actuator</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>max |e_FB_abs| (LSB)</td>
+                  <td>{trimNumber(qncStats.peakLsb, 5)}</td>
+                  <td>{trimNumber(qncStats.fullPeakLsb, 5)}</td>
+                </tr>
+                <tr>
+                  <td>max |e_FB_abs| (cycle / 時間)</td>
+                  <td>
+                    {trimNumber(qncStats.peakCycles, 6)} /{' '}
+                    {formatSiTime(qncStats.peakCycles * qncSim.t_vco_s)}
+                  </td>
+                  <td>—</td>
+                </tr>
+                <tr>
+                  <td>rms |e_FB_abs| (LSB)</td>
+                  <td>{trimNumber(qncStats.rmsLsb, 5)}</td>
+                  <td>{trimNumber(qncStats.fullRmsLsb, 5)}</td>
+                </tr>
+                <tr>
+                  <td>超出 half-LSB 的拍數</td>
+                  <td>
+                    {qncStats.over} / {QNC_NC}
+                  </td>
+                  <td>0 / {QNC_NC}</td>
+                </tr>
+                <tr>
+                  <td>e_ZC_hw rms (cycle)</td>
+                  <td>{trimNumber(qncStats.ezcRms, 6)}</td>
+                  <td>{trimNumber(rms(qncFull.data.e_ZC_hw), 6)}</td>
+                </tr>
+                <tr>
+                  <td>max |e_pair_digital|</td>
+                  <td>{qncStats.pairMax}</td>
+                  <td>0</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div style={{ flex: '1 1 380px', overflowX: 'auto' }}>
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>k</th>
+                  <th>s_ideal</th>
+                  <th>y</th>
+                  <th>r = s−y</th>
+                  <th>wrap01(r)</th>
+                  <th>×G×gain</th>
+                  <th>code</th>
+                  <th>A_FB</th>
+                  <th>e (LSB)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {qncStats.rows.map((r) => (
+                  <tr key={r.k}>
+                    <td>{r.k}</td>
+                    <td>{trimNumber(r.s, 5)}</td>
+                    <td>{r.y}</td>
+                    <td>{trimNumber(r.r, 4)}</td>
+                    <td>{trimNumber(r.w, 4)}</td>
+                    <td>{trimNumber(r.raw, 6)}</td>
+                    <td>{r.code}</td>
+                    <td>{r.aFb}</td>
+                    <td>{trimNumber(r.eLsb, 4)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <p>
+          <b>gain = 1 的等效性 [EXACT bound + EXPERIMENT]:</b>§7.2 保證{' '}
+          <M>{'\\max|e_{FB,abs}|\\le 1/512+1/256'}</M> cycle({QNC_BOUND_LSB} LSB);
+          N = {QNC_N_DIV}、nearest、{QNC_NC} cycles 實測 max = 0.001875 cycle
+          = 0.48 LSB,與 full actuator 同 config 的 peak <b>完全相同</b>,而且
+          <b>逐拍相同</b>(per-cycle max 差為 0;R_FB 兩者逐拍相等)
+          <EpistemicTag kind="EXPERIMENT" />。差別只在 <M>{'A_{FB}'}</M> 可能相差
+          整數個 cycle(實測差值 ∈ {'{0, 256}'} fine LSB,即 0 或 1 個 T_vco):上表
+          k = 4 就是這種情形 — <M>{'s_{ideal}=12.52'}</M> 被 nearest 收到 y = 13,
+          殘量 r = −0.48 由 wrap01 折成 0.52,code = 133,feedback edge 整整晚一個
+          VCO cycle,但 <b>timing mod T_vco 一致</b>(e_FB_abs 以 wrapCycles 度量,
+          僅 −0.12 LSB)<EpistemicTag kind="EXACT" />。
+        </p>
+        <p>
+          <b>一個容易被忽略的推論:</b>gain = 1 時 <M>{'e_{FB,abs}'}</M> 對
+          divider quantizer <b>完全不敏感</b> — nearest / ef1 / mash11 三者的
+          e_FB_abs 序列逐拍相同(peak 0.48 LSB、rms 0.288146 LSB)
+          <EpistemicTag kind="EXPERIMENT" />,因為 cancellation DTC 補的是{' '}
+          <M>{'s_{ideal}-y'}</M>,把 y 的選擇整個抵銷掉(對照 full actuator + ef1:
+          peak 0.76、rms 0.4655 LSB)。代價轉移到 divider 的瞬時除數:n_int 集合由
+          nearest 的 {'{3,4}'} 擴為 ef1 的 {'{2,3,4}'}、mash11 的 {'{0,…,6}'}
+          (後者含 13/512 拍的 n_int = 0,即一個 VCO cycle 內要出兩個 feedback
+          edge — 對 /3-/4 divider 不可實現,見 Limitation)
+          <EpistemicTag kind="EXPERIMENT" />。
+        </p>
+        <p>
+          <b>gain ≠ 1 的 code-dependent residual [EXPERIMENT]:</b>cancellation 不
+          完全時殘差 ≈ <M>{'\\operatorname{wrap01}(r)\\,(1-g_{qnc})'}</M> — 誤差
+          大小<b>隨 DTC code 線性成長</b>,不是固定偏移。實測(N = {QNC_N_DIV}、
+          nearest、{QNC_NC} cycles):gain = 0.98 → max |e_FB_abs| = 0.02125 cycle
+          = 5.44 LSB,444/512 拍超出 half-LSB;gain = 0.95 → 0.0503125 cycle
+          = 12.88 LSB(rms 7.3155 LSB)。把 slider 拉到 0.98 看橘線的鋸齒<b>斜率</b>
+          就是 <M>{'1-g_{qnc}'}</M>。更關鍵的是:injection 側取的是同一份被縮放
+          過的 code,所以 <M>{'e_{ZC,hw}'}</M> 的 rms 與 <M>{'e_{FB,abs}'}</M>{' '}
+          的 rms(換算 cycle 後)<b>完全相等</b> — 誤差原封不動傳到 injection 落點
+          (0.98:0.0114749 cycle,對照 gain = 1 的 0.00112557 cycle,×10.2),
+          而 <M>{'e_{pair,digital}'}</M> 仍恆為 0 —
+          <b>shared code 只保證兩路一致,不保證兩路正確</b>(Ch8 的同一課)
+          <EpistemicTag kind="EXPERIMENT" />。
+        </p>
+        <p>
+          <b>設計指引:</b>預算允許一顆 DTC 時,QNC 是 (1)(2) 與理想 fractional
+          actuator 之間的自然折衷;本架構的 full actuator 與 QNC 用的是<b>同一份</b>
+          accumulated state — QNC 用它在 PD 前抵消誤差,reverse injection 用它把
+          pulse 放到正確的 sub-cycle 位置(exp21a 的 e_ZC_hw ≤{' '}
+          {trimNumber(Math.max(...Array.from(exp21Sims[0].data.e_ZC_hw).map(Math.abs)), 5)}{' '}
+          cycle 即 cancellation 成功的量)。但 gain 必須<b>校準</b>:上圖顯示 2%
+          gain error 就足以讓逐拍誤差放大一個數量級,這正是下一節 LMS demo 的動機。
+          <EpistemicTag kind="INFERENCE" />
+        </p>
+      </SectionFigure>
+
+      <SectionFigure
+        title="DSM 常見用法(3b)— QNC cancellation-DTC gain 的 LMS 自校正(chapter-local 迭代)"
+        caption={
+          <span>
+            上左:<code>qnc_gain</code> 隨 LMS beat 收斂(虛線 gain = 1);上右:
+            該 beat 的 residual peak / rms(LSB,虛線為 1-LSB 等效界與 gain = 1
+            底線);下:該 beat 前 {LMS_BLOCK} 拍的 <M>{'e_{FB,abs}'}</M> 波形與
+            gain = 1 參考曲線(= full actuator)重疊過程(窄螢幕下三張縱向堆疊)。
+            每個 beat = 一次{' '}
+            <code>simulate()</code>(plant 在 beat 內凍結)+ {LMS_BLOCK} 次
+            per-cycle <code>lmsQncStep</code> 更新;μ = {LMS_MU}、起始 gain ={' '}
+            {LMS_G0}、N = {QNC_N_DIV}、nearest、{QNC_NC} cycles、seed 12345。
+            <EpistemicTag kind="EXPERIMENT" />
+          </span>
+        }
+      >
+        <p>
+          gain 校準在硬體上是<b>背景 LMS</b>:用觀測到的 timing error 與 DTC 命令
+          residue 的相關性去修 gain。model 匯出的 pure helper(§7.2、兩語言 float64
+          逐位一致)只有一行:
+        </p>
+        <MathBlock>
+          {'g_{qnc}\\leftarrow g_{qnc}-\\mu\\,e[k]\\,r[k]\\qquad(\\text{求值順序 } g-((\\mu e)r))'}
+        </MathBlock>
+        <p>
+          本節的迭代由章節端組裝(model 不含 adaptive loop):<M>{'e[k]'}</M> 取{' '}
+          <code>e_FB_abs</code>(cycles)、<M>{'r[k]'}</M> 取{' '}
+          <code>u_FB_digital</code> = <M>{'R_{FB}/G'}</M>(DTC 實際被命令的
+          residue)。收斂方向可手推:gain 偏低時{' '}
+          <M>{'e\\approx-(1-g_{qnc})\\,r<0'}</M>,故{' '}
+          <M>{'-\\mu e r>0'}</M>、gain 上升;到 <M>{'g_{qnc}=1'}</M> 時 e 只剩
+          ±half-LSB 的量化抖動,梯度平均為零 → 停在 gain ≈ 1 附近的 gradient
+          noise floor <EpistemicTag kind="INFERENCE" />。
+        </p>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
+          <div style={{ flex: '1 1 300px', minWidth: 280 }}>
+            <EChart option={optLmsGain} height={250} />
+          </div>
+          <div style={{ flex: '1 1 300px', minWidth: 280 }}>
+            <EChart option={optLmsResidual} height={250} />
+          </div>
+        </div>
+        <EChart option={optLmsWave} height={280} />
+        <div
+          style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center', flexWrap: 'wrap' }}
+        >
+          <button type="button" className="preset-button" onClick={() => setLmsPlaying((p) => !p)}>
+            {lmsPlaying ? 'Pause' : 'Play'}
+          </button>
+          <button
+            type="button"
+            className="preset-button"
+            onClick={() => {
+              setLmsPlaying(false);
+              setLmsBeat((b) => (b + 1) % LMS_BEATS);
+            }}
+          >
+            Step +1
+          </button>
+          <button
+            type="button"
+            className="preset-button"
+            onClick={() => {
+              setLmsPlaying(false);
+              setLmsBeat(0);
+            }}
+          >
+            Reset i=0
+          </button>
+          <div style={{ flex: '1 1 240px', minWidth: 220 }}>
+            <Slider
+              label="LMS beat i"
+              value={lmsBeat}
+              min={0}
+              max={LMS_BEATS - 1}
+              step={1}
+              fmt={(v) => String(Math.round(v))}
+              onChange={(v) => {
+                setLmsPlaying(false);
+                setLmsBeat(Math.round(v));
+              }}
+            />
+          </div>
+        </div>
+        <div style={{ overflowX: 'auto', marginTop: 8 }}>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>beat i</th>
+                <th>qnc_gain</th>
+                <th>1 − gain</th>
+                <th>peak |e_FB_abs| (LSB)</th>
+                <th>rms |e_FB_abs| (LSB)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {lmsRun.slice(0, lmsBeat + 1).map((b) => (
+                <tr key={b.i} style={b.i === lmsBeat ? { fontWeight: 600 } : undefined}>
+                  <td>{b.i}</td>
+                  <td>{trimNumber(b.gain, 9)}</td>
+                  <td>{b.gain === 1 ? '0' : (1 - b.gain).toExponential(3)}</td>
+                  <td>{trimNumber(b.peakLsb, 4)}</td>
+                  <td>{trimNumber(b.rmsLsb, 5)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p>
+          實測收斂節奏(μ = {LMS_MU}、{LMS_BLOCK} 拍/beat、起始 gain = {LMS_G0}):
+          beat 0 的 peak = 12.88 LSB;<b>beat {lmsStats.firstInBound}</b> 首度回到
+          §7.2 的 1-LSB 等效界內(peak 1.44 LSB);<b>beat {lmsStats.first1e3}</b>{' '}
+          達 <M>{'|1-g_{qnc}|<10^{-3}'}</M>(gain 0.99927、peak 0.64 LSB);beat 10
+          之後 peak 停在 0.52 LSB、rms 落在 0.2895–0.2902 LSB — 相對 gain = 1 的
+          底線(0.48 / 0.288146 LSB)只差 0.04 LSB / 0.5%,rms 全程降幅
+          7.3155 → 0.2895 LSB(×25.3)。最終 beat {LMS_BEATS - 1} 的 gain ={' '}
+          {trimNumber(lmsStats.last.gain, 9)}(距 1 約{' '}
+          {(1 - lmsStats.last.gain).toExponential(2)})
+          <EpistemicTag kind="EXPERIMENT" />。
+        </p>
+        <p>
+          <b>兩個工程重點:</b>(a) 殘餘 gain error 不會被 LMS 磨到 0 — 停在
+          gradient noise floor,因為誤差訊號本身有 ±half-LSB 的量化底噪;把 μ 再
+          調大只會讓 gain 在 1 附近抖得更凶(章節端實測 μ = 0.05 於同樣 block 長度
+          在第 2 個 beat 就過衝到 1.00021 並持續振盪)<EpistemicTag kind="EXPERIMENT" />。
+          (b) 收斂與否看的是 <M>{'e\\cdot r'}</M> 的相關性:此處 e、r 都是
+          scheduler 自身可算的量,不需要額外的相位量測硬體 — 但真實晶片的 e 要
+          從 PD/TDC 讀回,量測雜訊會直接抬高上述 noise floor(Ch15)。
+          <EpistemicTag kind="INFERENCE" />
+        </p>
+      </SectionFigure>
+
+      <SectionFigure
+        title="DSM 常見用法(4)— phase-domain DSM 作用在 final code 與 dithering"
+        caption={
+          <span>
+            本節無新圖:對應的量測就是本章前半的圖 #16 / #17(histogram、PSD)與
+            上面 exp22 的階數表。<EpistemicTag kind="EXPERIMENT" />
+          </span>
+        }
+      >
         <p>
           <b>(4) phase-domain DSM 作用在 final code(本模型的 ef1 / mash11 /
           mash111 選項)與 dithering — 是什麼:</b>本章前半的主角:quantizer 作用在
@@ -851,6 +1648,13 @@ export default function Chapter11() {
           「nearest 的有界誤差 + spur」vs「DSM 的 shaped noise + 更大 peak」由 Ch16
           頻譜規格決定 — 這正是本章 takeaway 的能力邊界清單。
           <EpistemicTag kind="INFERENCE" />
+        </p>
+        <p>
+          與 (3) 的對照值得記住:(4) 把 DSM 放在 fine code 上,per-edge 誤差<b>直接</b>
+          承受 shaping 的峰值放大;(3) 把 DSM 放回整數 cycle、再由 cancellation DTC
+          補回 sub-cycle 殘量,per-edge 誤差則<b>與 quantizer 階數無關</b>(上節實測
+          三種 quantizer 逐拍相同),代價改由 divider 的瞬時除數範圍承擔。兩者都
+          維持 <M>{'e_{pair,digital}\\equiv 0'}</M>。<EpistemicTag kind="INFERENCE" />
         </p>
       </SectionFigure>
 
@@ -888,6 +1692,48 @@ export function triangularDither(ditherAmpLsb: number, stream: Mulberry32): numb
         <p>
           與 MODEL_SPEC §6 item 4 / 6 逐行對應;Python golden model 為逐位一致的
           鏡像實作(dsm_first_order.py)。
+        </p>
+      </SectionCode>
+
+      <SectionCode
+        title="web/src/model/feedbackScheduler.ts — 真實碼節錄:qnc actuator 與 LMS helper"
+        language="typescript"
+        code={`const dsmOnly = cfg.actuator_mode === 'dsm_only';
+const qnc = cfg.actuator_mode === 'qnc';
+const integerCycle = dsmOnly || qnc;
+
+for (let k = 0; k < n; k++) {
+  let u = integerCycle ? aIdealArr[k] / g : aIdealArr[k];
+  if (useDither && ditherStream !== null) {
+    u += cfg.dither_amp_lsb * (ditherStream.next() + ditherStream.next() - 1.0);
+  }
+  const y = q.quantize(u);
+  if (qnc) {
+    const r = sIdealArr[k] - y; // accumulated sub-cycle residue (cycles)
+    let code = qNearest(wrap01(r) * g * cfg.qnc_gain);
+    if (code < 0) {
+      code = 0;
+    } else if (code > g - 1) {
+      code = g - 1;
+    }
+    aFb[k] = y * g + code;
+  } else {
+    aFb[k] = dsmOnly ? y * g : y;
+  }
+  dsmOut[k] = y;
+  dsmState[k] = q.state;
+}
+
+export function lmsQncStep(gain: number, mu: number, e: number, r: number): number {
+  return gain - mu * e * r;
+}`}
+      >
+        <p>
+          與 MODEL_SPEC §7.2 逐行對應;Python 鏡像為{' '}
+          <code>feedback_scheduler.run_feedback</code> /{' '}
+          <code>lms_qnc_step</code>。乘法求值順序{' '}
+          <M>{'(\\operatorname{wrap01}(r)\\cdot G)\\cdot g_{qnc}'}</M> 與{' '}
+          <M>{'g-((\\mu e)r)'}</M> 是契約的一部分(兩語言 float64 逐位一致)。
         </p>
       </SectionCode>
 
@@ -951,6 +1797,62 @@ export function triangularDither(ditherAmpLsb: number, stream: Mulberry32): numb
               </span>
             ),
           },
+          {
+            code: 'let u = integerCycle ? aIdealArr[k] / g : aIdealArr[k];',
+            explain: (
+              <span>
+                qnc 與 dsm_only 共用這一行:quantizer 的輸入除以 G,LSB 從
+                1/256 cycle 變成 <b>1 個 VCO cycle</b>。dither amplitude 的單位也
+                跟著變(§6 item 7)。
+              </span>
+            ),
+          },
+          {
+            code: 'const r = sIdealArr[k] - y; // accumulated sub-cycle residue',
+            explain: (
+              <span>
+                cancellation DTC 的輸入是<b>累積</b>殘量 —{' '}
+                <M>{'s_{ideal}'}</M> 減去 divider 實際走掉的整數 cycle 數,而不是
+                DSM 的瞬時輸出 <M>{'q_N[k]=N-n[k]'}</M>。Ch9 的核心結論在這一行
+                具象化:少了 accumulator state 就補不出這個數。
+              </span>
+            ),
+          },
+          {
+            code: 'let code = qNearest(wrap01(r) * g * cfg.qnc_gain);',
+            explain: (
+              <span>
+                wrap01 讓 r 為負(nearest 讓 divider 早走一步,實測 512 拍中有
+                254 拍如此)時折回 [0,1) — 代價是 feedback edge 落在<b>下一個</b>
+                整數 cycle,timing mod T_vco 不變。<code>qnc_gain</code> 是唯一的
+                類比 gain knob:偏離 1 時殘差 ≈{' '}
+                <M>{'\\operatorname{wrap01}(r)(1-g_{qnc})'}</M>,隨 code 線性成長。
+                <EpistemicTag kind="EXPERIMENT" />
+              </span>
+            ),
+          },
+          {
+            code: 'if (code > g - 1) { code = g - 1; }',
+            explain: (
+              <span>
+                clamp 到 [0, G−1] 保證 <M>{'R_{FB}=code'}</M> 合法(m/c decode
+                不越界)。這個邊界正是 §7.2 等效界裡 1/256 那一項的來源:r 極接近
+                整數 cycle 時 clamp 會少補 1 個 fine LSB(N = {QNC_N_DIV} 的
+                {QNC_NC} 拍中未觸發)。<EpistemicTag kind="EXACT" />
+              </span>
+            ),
+          },
+          {
+            code: 'return gain - mu * e * r;',
+            explain: (
+              <span>
+                LMS 單步:梯度即 <M>{'e\\cdot r'}</M>。gain 偏低 → e 與 r 反號 →
+                更新為正 → gain 上升。求值順序固定為{' '}
+                <M>{'g-((\\mu e)r)'}</M> 以維持跨語言 bit-identity;model 本身
+                <b>不</b>含 adaptive loop,迭代由章節端組裝(上面 (3b) 圖)。
+              </span>
+            ),
+          },
         ]}
       />
 
@@ -979,6 +1881,25 @@ export function triangularDither(ditherAmpLsb: number, stream: Mulberry32): numb
             「平均準、瞬時差」量化呈現;mode D 的 e_pair rms 恆 0,mode B 非零
             (exp09,Test 13)。
           </li>
+          <li>
+            QNC 圖((3)):把 <code>qnc_gain</code> 從 1.0 往兩側拉,看橘線由
+            貼齊綠線(full actuator)變成<b>鋸齒斜面</b> — 斜率即{' '}
+            <M>{'1-g_{qnc}'}</M>,且每個週期的最大偏差落在 wrap01(r) 最接近 1 的
+            拍上(code-dependent,不是 DC offset);metrics 表的「超出 half-LSB
+            的拍數」在 gain = 1 時為 0、gain = 0.98 時為 444/512。
+          </li>
+          <li>
+            QNC 圖 metrics 表:<code>e_ZC_hw rms</code> 與{' '}
+            <code>e_FB_abs rms</code>(換算 cycle 後)逐拍相等,但{' '}
+            <code>max |e_pair_digital|</code> 永遠是 0 — 這是「一致 ≠ 正確」最
+            乾淨的示範。
+          </li>
+          <li>
+            LMS 圖((3b)):按 Play,左圖 gain 由 {LMS_G0} 單調爬向 1(前 5 個
+            beat 走完九成),中圖 peak/rms 同步塌下來並停在 gain = 1 底線上方一點
+            (gradient noise floor),下圖橘色波形逐 beat 收斂到綠色參考曲線 —
+            beat {lmsStats.firstInBound} 之後肉眼已經分不出兩者。
+          </li>
         </ul>
       </SectionObserve>
 
@@ -989,6 +1910,16 @@ export function triangularDither(ditherAmpLsb: number, stream: Mulberry32): numb
             0.7 LSB、RMS 也變大。對 injection 而言每一拍的 zero-crossing 對準精度
             才是物理量(Ch14 的 shorting energy ∝ 瞬時誤差平方),「平均準」不能
             替代「逐拍準」。<EpistemicTag kind="EXACT" />
+          </p>
+        </Callout>
+        <Callout type="warn" title="誤解:「QNC 的 cancellation DTC 只要位元夠多就準了」">
+          <p>
+            位元數決定<b>解析度底線</b>,gain 決定<b>斜率</b>。上面 (3) 的實測:
+            同一顆 6-bit DTC,<code>qnc_gain</code> = 1 時逐拍誤差 ≤ 0.48 LSB,
+            gain = 0.98 時 peak 變 5.44 LSB —— 誤差放大 11 倍而位元數一位沒少。
+            更麻煩的是它是 <b>code-dependent</b>(∝ wrap01(r)),在頻譜上就是與
+            fractional pattern 同頻的 spur,不是白噪。所以 QNC 一定要配 gain
+            calibration((3b) 的 LMS)。<EpistemicTag kind="EXPERIMENT" />
           </p>
         </Callout>
         <Callout type="warn" title="誤解:「DSM 可以合成 sub-LSB 的 delay,解析度等效變高」">
@@ -1053,8 +1984,13 @@ export function triangularDither(ditherAmpLsb: number, stream: Mulberry32): numb
           reverse injection,必拉 accumulated state + DTC(exp22:full actuator 下
           階數仍以 rms/peak 為代價);DSM-only + 每拍 injection 是主動有害的組合,
           threshold gating 只是部分補救(exp21:1.81 → 0.10 rad,fire rate 13%);
-          DTC-assisted QNC 與本架構的 full actuator 是同一個 accumulated state 的
-          兩種用法;phase-domain DSM 只在 mode D 的 quantize-once 前提下安全。
+          DTC-assisted QNC(<code>actuator_mode=&apos;qnc&apos;</code>)與本架構的
+          full actuator 是同一個 accumulated state 的兩種用法 — gain = 1 時逐拍
+          timing 完全等效(peak 0.48 LSB,且與 divider quantizer 階數無關),但
+          gain 是<b>第一級</b>校準目標:2% gain error 就把 peak 推到 5.44 LSB、
+          e_ZC_hw rms 惡化 10.2×,μ = {LMS_MU} 的 LMS 用{' '}
+          {lmsStats.first1e3} 個 beat(每 beat {LMS_BLOCK} 拍)把它收回 10⁻³ 以內;
+          phase-domain DSM 只在 mode D 的 quantize-once 前提下安全。
           <EpistemicTag kind="EXPERIMENT" /> per-edge 峰值放大(0.48 → 1.76 LSB)是否
           會威脅 injection lock 本身,見{' '}
           <a href={chapterHref('dsm-residual-injection-lock')}>Ch22 的失鎖邊界量測</a>
@@ -1074,6 +2010,20 @@ export function triangularDither(ditherAmpLsb: number, stream: Mulberry32): numb
             比較使用 §14 sin-map injection dynamics(APPROX、單一 seed 12345),
             且 dsm_only 的 mash11 / mash111 在 N ∈ (3, 3.25) 多數值會觸發 edge
             monotonicity assertion(§7.1),故 dsm_only 比較僅用 ef1。
+          </p>
+          <p>
+            QNC 一節((3)(3b))的額外限制:cancellation DTC 假設<b>ideal digital
+            mapping</b> — 只建模單一 gain 係數,INL/DNL/offset 與溫度漂移沿用 §10
+            的 analog 模型另行疊加(本節模擬未開),故實測的 0.48 LSB 底線是
+            digital-only 的樂觀值。qnc 模式下 A_FB 因含 fine code 而恆為嚴格遞增,
+            monotonicity assertion 不會 raise,但整數除數仍可能失控:mash11 +
+            qnc 在 N = {QNC_N_DIV} 實測 n_int ∈ {'{0,…,6}'}、其中 13/512 拍為 0
+            (一個 VCO cycle 內兩個 feedback edge),/3-/4 divider 無法實現 —
+            模型不會替你擋下這種 config。(3b) 的 LMS 為<b>章節端</b>迭代:plant
+            在每個 beat 內凍結(block LMS),誤差訊號直接取模型內部的 e_FB_abs
+            (等於假設一個無雜訊、無延遲的 timing 觀測器),真實 background
+            calibration 的收斂速度與 floor 會被 PD/TDC 量測雜訊與 loop latency
+            劣化;μ、block 長度與 beat 數皆為本頁選定值,不是硬體規格。
           </p>
         </Callout>
       </SectionLimitation>
@@ -1148,11 +2098,35 @@ export function triangularDither(ditherAmpLsb: number, stream: Mulberry32): numb
             onClick: () => setGateThr(t),
           }))}
         />
+        <Slider
+          label="qnc_gain(cancellation DTC gain,taxonomy 圖 (3))"
+          value={qncGain}
+          min={0.9}
+          max={1.1}
+          step={0.005}
+          fmt={(v) => trimNumber(v, 5)}
+          onChange={setQncGain}
+        />
+        <Slider
+          label={`LMS beat i(taxonomy 圖 (3b),0…${LMS_BEATS - 1})`}
+          value={lmsBeat}
+          min={0}
+          max={LMS_BEATS - 1}
+          step={1}
+          fmt={(v) => String(Math.round(v))}
+          onChange={(v) => {
+            setLmsPlaying(false);
+            setLmsBeat(Math.round(v));
+          }}
+        />
         <p style={{ fontSize: 12, opacity: 0.75 }}>
           baseline 恆為 exp07(nearest,無 dither);兩組皆 N = 3 + 32.3/256、mode
           D、{NC} cycles、seed 12345。exp09 對照(mode D vs B)固定 ef1、256 cycles。
           gate threshold slider 只影響 taxonomy 圖 (2) 的 dsm_only gated series
           (exp21c config、512 cycles);其餘 taxonomy 模擬固定為 exp21 / exp22。
+          qnc 兩節固定 N = {QNC_N_DIV}、nearest、{QNC_NC} cycles;LMS 軌跡
+          (μ = {LMS_MU}、{LMS_BLOCK} 拍/beat、{LMS_BEATS} beats)在載入時一次
+          算完,slider 與 Play 只是揭露既有 beat,不重算。
         </p>
       </ParamPanel>
     </ChapterShell>

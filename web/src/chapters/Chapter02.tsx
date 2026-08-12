@@ -25,6 +25,7 @@ import {
 } from '../components/ChapterShell';
 import EpistemicTag from '../components/EpistemicTag';
 import Callout from '../components/Callout';
+import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { M, MathBlock } from '../components/Math';
 import PhaseWheel from '../components/PhaseWheel';
 import EdgeTimeline from '../components/EdgeTimeline';
@@ -38,7 +39,20 @@ import { useChartTheme } from '../lib/useChartTheme';
 import { formatPhase, trimNumber } from '../lib/format';
 import { useSimStatus } from '../SimStatusContext';
 import { chapterById } from './index';
-import { simulate, fromPartial, wrap01, wrapCycles, qNearest } from '../model';
+import {
+  simulate,
+  fromPartial,
+  wrap01,
+  wrapCycles,
+  wrapRadians,
+  qNearest,
+  gFine,
+  sIdeal,
+  tVcoS,
+  cyclesToRadians,
+  cyclesToDegrees,
+  cyclesToTime,
+} from '../model';
 
 const meta = chapterById(2)!;
 
@@ -438,6 +452,154 @@ export default function Chapter02() {
           test vector 逐位比對必然失敗。qNearest = floor(u+0.5) 在兩語言完全一致,所以
           MODEL_SPEC 規定所有 nearest 量化只能用它。
         </p>
+
+        <ExampleProblem
+          index={1}
+          tag="EXACT"
+          title="位置 vs. 誤差:同一個相位差,wrap01 與 wrapCycles 兩種讀法"
+          prompt={
+            <>
+              相位偵測器量到 VCO 目前的絕對相位座標是 <M>{'s_{actual}'}</M>(cycles),理想軌跡
+              在同一時刻是 <M>{'s_{ideal}'}</M>。§2 規定誤差一律{' '}
+              <M>{'e=\\text{actual}-\\text{ideal}'}</M>,並以{' '}
+              <M>{'\\operatorname{wrapCycles}'}</M> 取帶符號最短表示;若誤用{' '}
+              <M>{'\\operatorname{wrap01}'}</M> 會把「早」讀成「晚」。給定{' '}
+              <M>{'s_{actual}, s_{ideal}'}</M>,分別算兩種讀法。
+            </>
+          }
+          inputs={[
+            { key: 'sActual', label: <M>{'s_{actual}'}</M>, def: 10.05, min: -100, max: 100, step: 0.01, unit: 'cyc' },
+            { key: 'sIdeal', label: <M>{'s_{ideal}'}</M>, def: 9.35, min: -100, max: 100, step: 0.01, unit: 'cyc' },
+          ]}
+          compute={(v) => {
+            const diff = v.sActual - v.sIdeal;
+            const eCorrect = wrapCycles(diff);
+            const eWrong = wrap01(diff);
+            return {
+              steps: [
+                { label: <M>{'\\text{actual}-\\text{ideal}'}</M>, value: fmt(diff, 8, 'cyc') },
+                {
+                  label: <>正確:<M>{'e=\\operatorname{wrapCycles}(\\text{diff})'}</M></>,
+                  value: fmt(eCorrect, 6, 'cyc'),
+                },
+                {
+                  label: <>誤用:<M>{'\\operatorname{wrap01}(\\text{diff})'}</M></>,
+                  value: fmt(eWrong, 6, 'cyc'),
+                },
+              ],
+              answer: (
+                <>
+                  正確誤差 <M>{'e'}</M> = {fmt(eCorrect, 6, 'cyc')} = {fmt(eCorrect * 360, 5, '°')}
+                  {eCorrect !== eWrong && (
+                    <> (若誤用 wrap01 會讀成 {fmt(eWrong, 6, 'cyc')},方向完全相反)</>
+                  )}
+                </>
+              ),
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={2}
+          tag="EXACT"
+          title="wrapRadians 與 wrapCycles 的等價換算(dynamics 介面)"
+          prompt={
+            <>
+              Injection dynamics 的相位運算在 radians 下進行。給兩個原始相位角{' '}
+              <M>{'\\theta_1, \\theta_2'}</M>,把差直接用{' '}
+              <M>{'\\operatorname{wrapRadians}'}</M> wrap 到 <M>{'(-\\pi,\\pi]'}</M>,
+              再與「先除以 <M>{'2\\pi'}</M> 用 <M>{'\\operatorname{wrapCycles}'}</M>、乘回{' '}
+              <M>{'2\\pi'}</M>」這條路徑核對是否等價 — 這是{' '}
+              <M>{'\\operatorname{wrapRadians}(t)=2\\pi\\operatorname{wrapCycles}(t/2\\pi)'}</M>{' '}
+              的直接驗證。
+            </>
+          }
+          inputs={[
+            { key: 'theta1', label: <M>{'\\theta_1'}</M>, def: 7.0, min: -50, max: 50, step: 0.1, unit: 'rad' },
+            { key: 'theta2', label: <M>{'\\theta_2'}</M>, def: 1.5, min: -50, max: 50, step: 0.1, unit: 'rad' },
+          ]}
+          compute={(v) => {
+            const raw = v.theta1 - v.theta2;
+            const wrappedDirect = wrapRadians(raw);
+            const cyc = wrapCycles(raw / (2 * Math.PI));
+            const wrappedViaCycles = cyclesToRadians(cyc);
+            const deg = cyclesToDegrees(cyc);
+            const consistent = Math.abs(wrappedDirect - wrappedViaCycles) < 1e-9;
+            return {
+              steps: [
+                { label: <M>{'\\theta_1-\\theta_2'}</M>, value: fmt(raw, 8, 'rad') },
+                { label: <M>{'\\operatorname{wrapRadians}(\\theta_1-\\theta_2)'}</M>, value: fmt(wrappedDirect, 6, 'rad') },
+                { label: <M>{'\\operatorname{wrapCycles}((\\theta_1-\\theta_2)/2\\pi)'}</M>, value: fmt(cyc, 6, 'cyc') },
+                { label: <>換算回 rad(<M>{'2\\pi\\cdot\\text{cyc}'}</M>)</>, value: fmt(wrappedViaCycles, 6, 'rad') },
+                { label: <>換算成度</>, value: fmt(deg, 6, '°') },
+              ],
+              answer: (
+                <>
+                  wrapped 相位差 = {fmt(wrappedDirect, 6, 'rad')} = {fmt(deg, 5, '°')},
+                  兩條路徑{consistent ? '一致' : '不一致(異常)'}
+                </>
+              ),
+              warn: consistent ? undefined : 'wrapRadians 與 wrapCycles 換算不一致(不應發生)',
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={3}
+          tag="EXACT"
+          title="N 拍內 half-up 量化殘差的上界(quantization error budget)"
+          prompt={
+            <>
+              Feedback path 每拍以 <M>{'\\operatorname{qNearest}'}</M> 對{' '}
+              <M>{'A_{ideal}=G\\,s_{ideal}'}</M> 做 half-up 量化,依定義殘差{' '}
+              <M>{'|A_{ideal}-\\operatorname{qNearest}(A_{ideal})|'}</M> 恆{' '}
+              <M>{'\\le 0.5'}</M> LSB。給定 <M>{'N, s_0'}</M> 與拍數 <M>{'n'}</M>(≤128),
+              掃過 <M>{'k=0..n-1'}</M>,找出這個視窗內最大殘差(LSB、度、時間)與偏差超過
+              0.49 LSB(接近邊界)的拍數。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 3, max: 3.25, step: 0.001 },
+            { key: 's0', label: <M>{'s_0'}</M>, def: 0, min: -50, max: 50, step: 0.01, unit: 'cyc' },
+            { key: 'n', label: <M>{'n'}</M>, def: 32, min: 2, max: 128, step: 1, unit: 'cyc' },
+          ]}
+          compute={(v) => {
+            const nCyc = Math.max(2, Math.min(128, Math.round(v.n)));
+            const g = gFine();
+            const s = sIdeal(nCyc, v.N, v.s0);
+            const tv = tVcoS(v.N);
+            let maxAbs = 0;
+            let nearTie = 0;
+            for (let k = 0; k < nCyc; k++) {
+              const aIdeal = g * s[k];
+              const resid = aIdeal - qNearest(aIdeal);
+              const a = Math.abs(resid);
+              if (a > maxAbs) maxAbs = a;
+              if (a > 0.49) nearTie++;
+            }
+            const maxCyc = maxAbs / g;
+            const maxDeg = cyclesToDegrees(maxCyc);
+            const maxTimeS = cyclesToTime(maxCyc, tv);
+            return {
+              steps: [
+                { label: <M>{'G'}</M>, value: fmt(g, 6, 'LSB/cyc') },
+                { label: <>掃描視窗</>, value: `k = 0..${nCyc - 1}` },
+                { label: <>最大殘差(LSB)</>, value: fmt(maxAbs, 6, 'LSB') },
+                { label: <>最大殘差(角度)</>, value: fmt(maxDeg, 6, '°') },
+                { label: <>最大殘差(時間)</>, value: fmt(maxTimeS * 1e15, 6, 'fs') },
+                { label: <>接近邊界(&gt;0.49 LSB)的拍數</>, value: fmt(nearTie, 4) },
+              ],
+              answer: (
+                <>
+                  最大殘差 = {fmt(maxAbs, 6, 'LSB')}({fmt(maxDeg, 5, '°')}、
+                  {fmt(maxTimeS * 1e15, 5, 'fs')}),理論上界 0.5 LSB;{nearTie} / {nCyc} 拍落在邊界
+                  附近
+                </>
+              ),
+              warn: maxAbs > 0.5 + 1e-9 ? '殘差超出理論上界(不應發生,檢查量化器)' : undefined,
+            };
+          }}
+        />
       </SectionExample>
 
       <SectionFigure

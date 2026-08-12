@@ -25,6 +25,7 @@ import {
 import EChart from '../components/EChart';
 import EpistemicTag from '../components/EpistemicTag';
 import Callout from '../components/Callout';
+import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { M, MathBlock } from '../components/Math';
 import { ParamPanel, Slider, PresetButtons, SelectControl } from '../components/controls';
 import UnitSwitch, { useUnit } from '../components/UnitSwitch';
@@ -35,7 +36,16 @@ import { phaseAxisLabel, makePhaseTickFormatter, trimNumber } from '../lib/forma
 import { useSimStatus } from '../SimStatusContext';
 import { chapterHref } from '../lib/router';
 import { chapterById } from './index';
-import { simulate, fromPartial, configTVcoS } from '../model';
+import {
+  simulate,
+  fromPartial,
+  configTVcoS,
+  configG,
+  qFloor,
+  qNearest,
+  wrapCycles,
+  pymod,
+} from '../model';
 import type { Quantizer } from '../model';
 
 const meta = chapterById(4)!;
@@ -336,6 +346,186 @@ export default function Chapter04() {
           0.91 wrap 到 0.04 的那一拍。下方 DebugTable 的模擬值應與本表逐格相同。
           <EpistemicTag kind="EXACT" />
         </p>
+
+        <ExampleProblem
+          index={1}
+          tag="EXACT"
+          title="A_ideal → A_FB 量化與三層 decode"
+          prompt={
+            <>
+              取 <M>{'N'}</M>、<M>{'s_0'}</M>、拍數 <M>{'k'}</M>,先算 high-resolution ideal fine
+              code <M>{'A_{ideal}[k] = G\\,s_{ideal}[k]'}</M>,再用 nearest quantizer 量化成整數{' '}
+              <M>{'A_{FB}[k]'}</M>,最後 decode 出 /3-/4 的 <M>{'I_{FB}'}</M>、PMUX 的{' '}
+              <M>{'m_{FB}'}</M> 與 DTC 的 <M>{'c_{FB}'}</M>。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 2, max: 8, step: 0.001 },
+            {
+              key: 's0',
+              label: <M>{'s_0'}</M>,
+              def: 0,
+              min: -50,
+              max: 50,
+              step: 0.01,
+              unit: 'cyc',
+            },
+            { key: 'k', label: <M>{'k'}</M>, def: 2, min: 0, max: 1023, step: 1 },
+          ]}
+          compute={(v) => {
+            const cfg = fromPartial({ n_div: v.N });
+            const G = configG(cfg);
+            const sIdealK = v.s0 + v.k * v.N;
+            const aIdeal = G * sIdealK;
+            const aFb = qNearest(aIdeal);
+            const iFb = qFloor(aFb / G);
+            const rFb = pymod(aFb, G);
+            const mFb = qFloor(rFb / 64);
+            const cFb = pymod(rFb, 64);
+            return {
+              steps: [
+                { label: <M>{'A_{ideal}[k] = G\\,s_{ideal}[k]'}</M>, value: fmt(aIdeal, 8) },
+                { label: <M>{'A_{FB}[k] = \\operatorname{qNearest}(A_{ideal}[k])'}</M>, value: `${aFb}` },
+                { label: <M>{'I_{FB}[k] = \\lfloor A_{FB}/G \\rfloor'}</M>, value: `${iFb} cyc` },
+                { label: <M>{'R_{FB}[k] = A_{FB} \\bmod G'}</M>, value: `${rFb} LSB` },
+                { label: <M>{'m_{FB}[k] = \\lfloor R_{FB}/64 \\rfloor'}</M>, value: `${mFb}` },
+                { label: <M>{'c_{FB}[k] = R_{FB} \\bmod 64'}</M>, value: `${cFb}` },
+              ],
+              answer: (
+                <>
+                  A_FB = {aFb} → I = {iFb}, m = {mFb}, c = {cFb}
+                </>
+              ),
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={2}
+          tag="EXACT"
+          title="n_int = I[k+1] − I[k] 與 PMUX wrap 補償"
+          prompt={
+            <>
+              取相鄰兩拍 k 與 k+1,各自量化出 <M>{'A_{FB}'}</M> 並 decode 出{' '}
+              <M>{'I_{FB}'}</M>、<M>{'m_{FB}'}</M>。divider 指令{' '}
+              <M>{'n_{int}[k] = I_{FB}[k+1] - I_{FB}[k]'}</M> 若為 4,代表 <M>{'m_{FB}'}</M> 那拍
+              從 3 wrap 回 0——兩者是同一個 <M>{'A_{FB}'}</M> 進位的兩面。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 2, max: 8, step: 0.001 },
+            {
+              key: 's0',
+              label: <M>{'s_0'}</M>,
+              def: 0,
+              min: -50,
+              max: 50,
+              step: 0.01,
+              unit: 'cyc',
+            },
+            { key: 'k', label: <M>{'k'}</M>, def: 7, min: 0, max: 1022, step: 1 },
+          ]}
+          compute={(v) => {
+            const cfg = fromPartial({ n_div: v.N });
+            const G = configG(cfg);
+            const decode = (kk: number) => {
+              const sK = v.s0 + kk * v.N;
+              const aIdeal = G * sK;
+              const aFb = qNearest(aIdeal);
+              const iFb = qFloor(aFb / G);
+              const rFb = pymod(aFb, G);
+              const mFb = qFloor(rFb / 64);
+              return { aIdeal, aFb, iFb, rFb, mFb };
+            };
+            const d0 = decode(v.k);
+            const d1 = decode(v.k + 1);
+            const nInt = d1.iFb - d0.iFb;
+            const wraps = d1.mFb < d0.mFb;
+            return {
+              steps: [
+                { label: <M>{'A_{FB}[k]'}</M>, value: `${d0.aFb} (I=${d0.iFb}, m=${d0.mFb})` },
+                {
+                  label: <M>{'A_{FB}[k+1]'}</M>,
+                  value: `${d1.aFb} (I=${d1.iFb}, m=${d1.mFb})`,
+                },
+                { label: <M>{'n_{int}[k] = I_{FB}[k+1] - I_{FB}[k]'}</M>, value: `${nInt} cyc` },
+              ],
+              answer: (
+                <>
+                  n_int = {nInt}{wraps ? '(PMUX 3→0 wrap,divider 多補 1 個 VCO cycle)' : ''}
+                </>
+              ),
+              warn: nInt < 2 || nInt > 5 ? `n_int = ${nInt} 落在正常操作範圍 {2..5} 之外` : undefined,
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={3}
+          tag="EXACT"
+          title="feedback edge 絕對誤差換算成時間"
+          prompt={
+            <>
+              量化把理想相位 <M>{'s_{ideal}[k]'}</M> 捨入成 <M>{'s_{FB,actual}[k] = A_{FB}/G'}</M>,
+              誤差 <M>{'e_{FB,abs}[k] = \\operatorname{wrapCycles}(s_{FB,actual} - s_{ideal})'}</M>{' '}
+              換算成秒就是這一拍 PD 輸入端看到的絕對時間誤差。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 2, max: 8, step: 0.001 },
+            {
+              key: 's0',
+              label: <M>{'s_0'}</M>,
+              def: 0,
+              min: -50,
+              max: 50,
+              step: 0.01,
+              unit: 'cyc',
+            },
+            { key: 'k', label: <M>{'k'}</M>, def: 5, min: 0, max: 1023, step: 1 },
+            {
+              key: 'fref',
+              label: <M>{'f_{ref}'}</M>,
+              def: 4,
+              min: 0.1,
+              max: 20,
+              step: 0.1,
+              unit: 'GHz',
+            },
+          ]}
+          compute={(v) => {
+            const cfg = fromPartial({ n_div: v.N, f_ref_hz: v.fref * 1e9 });
+            const G = configG(cfg);
+            const sIdealK = v.s0 + v.k * v.N;
+            const aIdeal = G * sIdealK;
+            const aFb = qNearest(aIdeal);
+            const sFbActual = aFb / G;
+            const eAbs = wrapCycles(sFbActual - sIdealK);
+            const tVcoPs = configTVcoS(cfg) * 1e12;
+            const eFs = eAbs * tVcoPs * 1000;
+            return {
+              steps: [
+                { label: <M>{'s_{ideal}[k]'}</M>, value: fmt(sIdealK, 8, 'cyc') },
+                { label: <M>{'A_{FB}[k] = \\operatorname{qNearest}(G\\,s_{ideal}[k])'}</M>, value: `${aFb}` },
+                { label: <M>{'s_{FB,actual}[k] = A_{FB}/G'}</M>, value: fmt(sFbActual, 8, 'cyc') },
+                {
+                  label: <M>{'e_{FB,abs}[k] = \\operatorname{wrapCycles}(s_{FB,actual} - s_{ideal})'}</M>,
+                  value: fmt(eAbs, 6, 'cyc'),
+                },
+                { label: <M>{'T_{vco}'}</M>, value: fmt(tVcoPs, 6, 'ps') },
+              ],
+              answer: (
+                <>
+                  <M>{'e_{FB,abs}[k]'}</M> = {fmt(eAbs, 6, 'cyc')} = {fmt(eFs, 5, 'fs')}
+                </>
+              ),
+              warn:
+                Math.abs(eAbs) > 1 / 512
+                  ? `超出 half-LSB(1/512 cyc)界線,請確認 quantizer 假設`
+                  : undefined,
+            };
+          }}
+        />
       </SectionExample>
 
       <SectionFigure

@@ -36,6 +36,7 @@ import EpistemicTag from '../components/EpistemicTag';
 import Callout from '../components/Callout';
 import DebugTable from '../components/DebugTable';
 import SimVeil from '../components/SimVeil';
+import ExampleProblem, { fmt as exFmt } from '../components/ExampleProblem';
 import { M, MathBlock } from '../components/Math';
 import { ParamPanel, Slider, SelectControl, PresetButtons } from '../components/controls';
 import { makeLineOption, baseAxis, baseTooltip, baseToolbox, makeMarkLine } from '../lib/chartOptions';
@@ -49,11 +50,16 @@ import {
   simulate,
   fromPartial,
   runDynamics,
+  sinFixedPointRad,
   makeAllStreams,
   aIdeal,
   makeQuantizer,
   wrapCycles,
   wrapRadians,
+  qNearest,
+  cyclesToRadians,
+  cyclesToDegrees,
+  configTVcoS,
   periodogramPsd,
   fftMag,
   rms,
@@ -77,6 +83,10 @@ const R_STEPS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1];
 
 /** transfer 驗證的 tone index(N=1024;皆為偶數 → 後 512 拍 bin = m/2)。 */
 const TONE_MS = [4, 8, 16, 32, 64, 96, 128, 192, 256, 320, 384, 448];
+
+/** SectionExample 例二的短 transfer run:128 拍,丟前 64 拍暫態後分析 64 點(2 的冪)。 */
+const N_XFER = 128;
+const N_XFER_WIN = 64;
 
 const QUANT_OPTIONS: { value: Quantizer; label: string }[] = [
   { value: 'nearest', label: 'nearest(half-up)' },
@@ -912,6 +922,238 @@ export default function Chapter22() {
       </SectionMath>
 
       <SectionExample>
+        <p>
+          三個<b>可改數字</b>的例題,分別對應上兩節的三條式子:例一是 (a) 的單位橋
+          (LSB → rad → margin ratio),例二是 (b) 的 high-pass <M>{'H(z)'}</M>(公式 vs
+          128 拍 <code>runDynamics</code> 實測),例三是 (c)/(d) 的 lock margin 預算。所有
+          計算都走本頁 model(<code>cyclesToRadians</code> / <code>configTVcoS</code> /{' '}
+          <code>runDynamics</code> / <code>fftMag</code> / <code>sinFixedPointRad</code>),
+          換任何一組輸入都是重算,沒有寫死的答案。
+        </p>
+
+        <ExampleProblem
+          index={1}
+          tag="EXACT"
+          title="單位橋:peak LSB → rad → margin ratio"
+          prompt={
+            <>
+              量測到的 per-edge 峰值以 <b>fine LSB</b> 為單位(1 LSB = 1/<M>{'G'}</M> cycle),
+              但 sin map 的變數 <M>{'\\theta'}</M> 以 rad 計。依 (a) 式把峰值換成 rad 與度,
+              再對 lock-in basin 半寬 <M>{'\\pi'}</M> 求 margin ratio{' '}
+              <M>{'\\pi/\\varepsilon'}</M>,並用 <M>{'T_{vco}'}</M> 換成時間。預設是 N=3.13、
+              mode D、512 拍的 mash111 峰值 1.76 LSB。
+            </>
+          }
+          inputs={[
+            { key: 'peak', label: '峰值', def: 1.76, min: 0.001, max: 128, step: 0.01, unit: 'LSB' },
+            { key: 'G', label: <>fine 階數 <M>{'G'}</M></>, def: 256, min: 1, max: 256, step: 1 },
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 3, max: 3.25, step: 0.001 },
+            {
+              key: 'fref',
+              label: <M>{'f_{ref}'}</M>,
+              def: 4,
+              min: 0.5,
+              max: 20,
+              step: 0.1,
+              unit: 'GHz',
+            },
+          ]}
+          compute={(vv) => {
+            const g = qNearest(vv.G);
+            const cyc = vv.peak / g;
+            const rad = cyclesToRadians(cyc); // 2π · cycles
+            const deg = cyclesToDegrees(cyc); // 360 · cycles
+            const lsbRad = cyclesToRadians(1 / g);
+            const ratio = Math.PI / rad;
+            const tVcoPs = configTVcoS(fromPartial({ n_div: vv.N, f_ref_hz: vv.fref * 1e9 })) * 1e12;
+            return {
+              steps: [
+                { label: <>1 LSB = <M>{'2\\pi/G'}</M></>, value: `${exFmt(lsbRad, 6, 'rad')} = ${exFmt(360 / g, 6)}°` },
+                { label: <>峰值(cycle)</>, value: exFmt(cyc, 6, 'cyc') },
+                { label: <><M>{'\\varepsilon = 2\\pi \\cdot \\text{peak}/G'}</M></>, value: exFmt(rad, 6, 'rad') },
+                { label: <>同一峰值(度)</>, value: `${exFmt(deg, 6)}°` },
+                { label: <><M>{'T_{vco} = 1/(N f_{ref})'}</M></>, value: exFmt(tVcoPs, 6, 'ps') },
+                { label: <>峰值(時間)</>, value: exFmt(cyc * tVcoPs, 6, 'ps') },
+                { label: <>basin 半寬 <M>{'\\pi'}</M></>, value: exFmt(Math.PI, 6, 'rad') },
+              ],
+              answer: (
+                <>
+                  <M>{'\\varepsilon'}</M> = {exFmt(rad, 6, 'rad')}({exFmt(deg, 4)}° ={' '}
+                  {exFmt(cyc * tVcoPs, 6, 'ps')}),margin ratio <M>{'\\pi/\\varepsilon'}</M> ={' '}
+                  {exFmt(ratio, 6)}×
+                </>
+              ),
+              warn:
+                rad >= Math.PI
+                  ? '峰值已達或超過 basin 半寬 π —— margin 為零,單拍就可能跨過 unstable 點。'
+                  : ratio < 10
+                    ? `margin ratio 只有 ${exFmt(ratio, 3)}×:離「永遠安全」的 73–267× 區間很遠。`
+                    : undefined,
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={2}
+          tag="APPROX"
+          title="injection loop 的 high-pass |H|:公式 vs 128 拍實測"
+          prompt={
+            <>
+              依 (b) 式 <M>{'H(z) = (z-1)/(z-(1-K))'}</M>,在{' '}
+              <M>{'z = e^{j\\omega}'}</M>、<M>{'\\omega = 2\\pi m/128'}</M> 上求增益;同時把一個
+              振幅 <M>{'A'}</M>、每 128 拍 <M>{'m'}</M> 個週期的 scheduling error tone 餵進
+              model 的非線性 sin map(<code>runDynamics</code>,{N_XFER} 拍、丟前{' '}
+              {N_XFER - N_XFER_WIN} 拍暫態、對後 {N_XFER_WIN} 拍取 <code>fftMag</code>)量測
+              <M>{'|e_{inj}/\\varepsilon|'}</M> 對照。<M>{'m'}</M> 取偶數,對應{' '}
+              <M>{'f = m f_{ref}/128'}</M>(預設 m = 8 → 250 MHz)。
+            </>
+          }
+          inputs={[
+            { key: 'K', label: <M>{'K_{inj}'}</M>, def: 0.3, min: 0.01, max: 1, step: 0.01 },
+            { key: 'm', label: <>tone index <M>{'m'}</M></>, def: 8, min: 2, max: 62, step: 2 },
+            { key: 'amp', label: <>tone 振幅 <M>{'A'}</M></>, def: 0.01, min: 1e-4, max: 0.2, step: 0.001, unit: 'rad' },
+            {
+              key: 'fref',
+              label: <M>{'f_{ref}'}</M>,
+              def: 4,
+              min: 0.5,
+              max: 20,
+              step: 0.1,
+              unit: 'GHz',
+            },
+          ]}
+          compute={(vv) => {
+            const m = qNearest(vv.m);
+            const fRefHz = vv.fref * 1e9;
+            const w = (TWO_PI * m) / N_XFER;
+            const fHz = (m * fRefHz) / N_XFER;
+            // |H(e^{jw})| = |e^{jw} - 1| / |e^{jw} - (1-K)|
+            const hNum = Math.abs(2 * Math.sin(w / 2));
+            const hDen = Math.hypot(Math.cos(w) - (1 - vv.K), Math.sin(w));
+            const hFormula = hNum / hDen;
+            const hfLimit = 2 / (2 - vv.K);
+            // model 實測:sin map、無 detuning、無雜訊
+            const cfg = fromPartial({
+              f_ref_hz: fRefHz,
+              n_div: 3.13,
+              n_cycles: N_XFER,
+              inj_model: 'sin',
+              k_inj: vv.K,
+              delta_f_hz: 0,
+            });
+            const eZc = new Float64Array(N_XFER);
+            for (let k = 0; k < N_XFER; k++) {
+              eZc[k] = (vv.amp / TWO_PI) * Math.sin(w * k); // runDynamics 會乘回 2π
+            }
+            const res = runDynamics(cfg, eZc, makeAllStreams(cfg.seed));
+            const tail = N_XFER - N_XFER_WIN;
+            const magInj = fftMag(res.e_inj.slice(tail));
+            const magEps = fftMag(res.epsilon_hw.slice(tail));
+            const bin = qNearest(m / 2);
+            const meas = magInj[bin] / magEps[bin];
+            const relErr = Math.abs(meas / hFormula - 1);
+            return {
+              steps: [
+                { label: <><M>{'\\omega = 2\\pi m/128'}</M></>, value: exFmt(w, 6, 'rad/cyc') },
+                { label: <><M>{'f = m f_{ref}/128'}</M></>, value: exFmt(fHz / 1e6, 6, 'MHz') },
+                { label: <>分子 <M>{'|e^{j\\omega}-1| = 2|\\sin(\\omega/2)|'}</M></>, value: exFmt(hNum, 6) },
+                { label: <>分母 <M>{'|e^{j\\omega}-(1-K)|'}</M></>, value: exFmt(hDen, 6) },
+                { label: <>公式 <M>{'|H|'}</M></>, value: `${exFmt(hFormula, 6)} = ${exFmt(20 * Math.log10(hFormula), 4, 'dB')}` },
+                { label: <>量測 <M>{'|e_{inj}/\\varepsilon|'}</M>(bin {bin} / {N_XFER_WIN})</>, value: exFmt(meas, 6) },
+                { label: <>相對誤差</>, value: exFmt(relErr, 3) },
+                { label: <>高頻極限 <M>{'2/(2-K)'}</M></>, value: `${exFmt(hfLimit, 6)} = ${exFmt(20 * Math.log10(hfLimit), 4, 'dB')}` },
+              ],
+              answer: (
+                <>
+                  <M>{'|H|'}</M>({exFmt(fHz / 1e6, 4, 'MHz')}) = {exFmt(hFormula, 6)}(公式)vs{' '}
+                  {exFmt(meas, 6)}(量測),相對誤差 {exFmt(relErr, 2)}
+                </>
+              ),
+              warn:
+                m % 2 !== 0
+                  ? `m = ${m} 為奇數:${N_XFER_WIN} 點窗的 bin m/2 不是整數,量測值受 leakage 影響。`
+                  : relErr > 1e-3
+                    ? `量測與公式差 ${exFmt(relErr, 3)}:振幅 ${exFmt(vv.amp, 3)} rad 已大到 sin 的非線性顯著,線性化不再準。`
+                    : undefined,
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={3}
+          tag="APPROX"
+          title="lock margin 預算:單拍會被拉回還是往 slip 漂?"
+          prompt={
+            <>
+              依 (c)/(d):給定 <M>{'K_{inj}'}</M>、detuning 比例{' '}
+              <M>{'r = \\omega_0/K_{inj}'}</M>、actuator grid <M>{'G'}</M> 與該 quantizer 的
+              峰值(LSB),算 <M>{'\\theta_{ss} = \\arcsin r'}</M>、unstable 點{' '}
+              <M>{'\\pi - \\theta_{ss}'}</M>、margin <M>{'M(r) = \\pi - 2\\arcsin r'}</M>、
+              最壞單拍 <M>{'e_{inj} = \\theta_{ss} + \\varepsilon'}</M>,再看淨移動{' '}
+              <M>{'\\omega_0 - K\\sin(e_{inj})'}</M> 的正負,以及預測 onset{' '}
+              <M>{'r^{*} = \\sin((\\pi-\\varepsilon)/2)'}</M>。預設是 mash111 @ full DTC;
+              把 <M>{'G'}</M> 改 4、峰值改 0.6 就重現 ef1 @ PMUX 的 slip 案例。
+            </>
+          }
+          inputs={[
+            { key: 'K', label: <M>{'K_{inj}'}</M>, def: 0.3, min: 0.01, max: 1, step: 0.01 },
+            { key: 'r', label: <><M>{'r = \\omega_0/K'}</M></>, def: 0.9, min: 0, max: 1, step: 0.01 },
+            { key: 'G', label: <>grid 步數 <M>{'G'}</M></>, def: 256, min: 1, max: 256, step: 1 },
+            { key: 'peak', label: '峰值', def: 1.76, min: 0, max: 128, step: 0.01, unit: 'LSB' },
+          ]}
+          compute={(vv) => {
+            const g = qNearest(vv.G);
+            // ω₀ = r·K rad/cycle  ->  Δf = ω₀ f_ref / 2π
+            const deltaFHz = (vv.r * vv.K * F_REF) / TWO_PI;
+            const thetaSs = sinFixedPointRad(vv.K, deltaFHz, F_REF);
+            const eps = cyclesToRadians(vv.peak / g);
+            if (thetaSs === null) {
+              return {
+                steps: [
+                  { label: <>Δf</>, value: exFmt(deltaFHz / 1e6, 6, 'MHz') },
+                  { label: <><M>{'\\varepsilon'}</M></>, value: exFmt(eps, 6, 'rad') },
+                ],
+                answer: <>不在 lock range(<M>{'|\\omega_0| > K_{inj}'}</M>),沒有 stable fixed point</>,
+                warn: '靜態 lock 條件已破:r > 1,sin map 無解,必然 slip。',
+              };
+            }
+            const omega0 = (TWO_PI * deltaFHz) / F_REF;
+            const margin = Math.PI - 2 * thetaSs;
+            const thetaUn = Math.PI - thetaSs;
+            const eInj = thetaSs + eps;
+            const kick = -vv.K * Math.sin(eInj);
+            const net = omega0 + kick;
+            const rStar = Math.sin((Math.PI - eps) / 2);
+            return {
+              steps: [
+                { label: <><M>{'\\Delta f'}</M>(<M>{'\\omega_0 = rK'}</M>)</>, value: `${exFmt(deltaFHz / 1e6, 6, 'MHz')}(ω₀ = ${exFmt(omega0, 6)} rad/cyc)` },
+                { label: <><M>{'\\theta_{ss} = \\arcsin r'}</M></>, value: exFmt(thetaSs, 6, 'rad') },
+                { label: <><M>{'\\theta_{unstable} = \\pi - \\theta_{ss}'}</M></>, value: exFmt(thetaUn, 6, 'rad') },
+                { label: <><M>{'M(r) = \\pi - 2\\arcsin r'}</M></>, value: exFmt(margin, 6, 'rad') },
+                { label: <><M>{'\\varepsilon = 2\\pi\\,\\text{peak}/G'}</M></>, value: exFmt(eps, 6, 'rad') },
+                { label: <>margin ratio <M>{'M/\\varepsilon'}</M></>, value: `${exFmt(margin / eps, 6)}×` },
+                { label: <>最壞單拍 <M>{'e_{inj} = \\theta_{ss} + \\varepsilon'}</M></>, value: exFmt(eInj, 6, 'rad') },
+                { label: <>injection kick <M>{'-K\\sin(e_{inj})'}</M></>, value: exFmt(kick, 6, 'rad') },
+                { label: <>淨移動 <M>{'\\omega_0 - K\\sin(e_{inj})'}</M></>, value: exFmt(net, 6, 'rad') },
+                { label: <>預測 onset <M>{'r^{*} = \\sin((\\pi-\\varepsilon)/2)'}</M></>, value: exFmt(rStar, 6) },
+              ],
+              answer: (
+                <>
+                  淨移動 = {exFmt(net, 6, 'rad')} —— {net < 0 ? '被拉回 fixed point,不 slip' : '往 slip 方向漂'};
+                  <M>{'M/\\varepsilon'}</M> = {exFmt(margin / eps, 4)}×,預測 onset{' '}
+                  <M>{'r^{*}'}</M> = {exFmt(rStar, 4)}
+                </>
+              ),
+              warn:
+                eInj > thetaUn
+                  ? `最壞單拍 e_inj = ${exFmt(eInj, 4)} rad 已跨過 unstable 點 ${exFmt(thetaUn, 4)} rad —— 連續數拍即發展成 cycle slip。`
+                  : vv.r > rStar
+                    ? `r = ${exFmt(vv.r, 3)} 已超過預測 onset r* = ${exFmt(rStar, 3)}:判準屬「不會晚於」方向的近似,實測會更早 slip。`
+                    : undefined,
+            };
+          }}
+        />
+
         <p>
           <b>手算例:lock 邊緣附近的一拍。</b>取 K_inj = 0.3、ω₀ = 0.9K = 0.27
           rad/cycle(Δf = 171.89 MHz;K=0.3 的 lock edge 是 190.99 MHz):

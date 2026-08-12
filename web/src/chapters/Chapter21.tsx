@@ -36,6 +36,7 @@ import EChart from '../components/EChart';
 import EpistemicTag from '../components/EpistemicTag';
 import Callout from '../components/Callout';
 import DebugTable from '../components/DebugTable';
+import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { M, MathBlock } from '../components/Math';
 import { ParamPanel, Slider, SelectControl, Toggle, PresetButtons } from '../components/controls';
 import UnitSwitch, { useUnit } from '../components/UnitSwitch';
@@ -47,14 +48,18 @@ import {
   formatSiTime,
   trimNumber,
 } from '../lib/format';
-import { useChapterNDiv, N_DIV_PRESETS } from '../lib/globalParams';
+import { useChapterNDiv, N_DIV_PRESETS, N_DIV_ALL_PRESETS } from '../lib/globalParams';
 import { chapterHref } from '../lib/router';
 import { useSimStatus } from '../SimStatusContext';
 import { chapterById } from './index';
 import {
   aIdeal,
+  sIdeal,
   wrapCycles,
+  qNearest,
   pymod,
+  fromPartial,
+  configTVcoS,
   makeQuantizer,
   ErrorFeedbackFirstOrder,
   makeStream,
@@ -76,6 +81,16 @@ const DIAG_DELTA = 2 ** -13 + 2 ** -25;
 /** periodic Hann 的 U = mean(w²) = 3/8(整數週期 cos 平均為 0、cos² 為 1/2)。 */
 const HANN_U = 0.375;
 
+/**
+ * N 值圖鑑用的連分數上界。基本 5 個 preset 的 q ≤ 100,但 sub-LSB 階梯的
+ * F3 = 321/2560、F4 = 3201/25600 需要 q 到 25600 才還原得出來(預設 qMax = 1024
+ * 會回傳 null → P 欄誤顯示「—」)。tol 同時收緊到 1e-12:F8(α = 0.25/φ)的
+ * 連分數收斂速度是 ~1/q²,q ≤ 65536 時誤差 ≳ 2.3e-10 ≫ 1e-12,故仍正確回傳
+ * null(quasi-periodic、無有限 P)。圖一 / 圖七沿用各自原本的 (1024, 1e-9)。
+ */
+const CAT_QMAX = 65536;
+const CAT_TOL = 1e-12;
+
 type StageKey = 'div' | 'pmux' | 'dtc';
 
 interface StageDef {
@@ -90,6 +105,59 @@ const STAGE_DEFS: StageDef[] = [
   { key: 'pmux', s: 4, labelZh: '+ 4-to-1 PMUX(grid = T_vco/4)', short: '+PMUX' },
   { key: 'dtc', s: 256, labelZh: '+ 6-bit DTC(grid = T_vco/256)', short: '+DTC' },
 ];
+
+/**
+ * N 值圖鑑的靜態欄位:id 與 one-line story,逐字對應 MODEL_SPEC §1.1 的 preset 目錄。
+ *
+ * 以 `String(n)`(float64 的精確短表示,13 個 preset 兩兩相異)為 key,而非陣列 index ——
+ * `N_DIV_PRESET_GROUPS` 日後增刪或重排 preset 時不會把 id/story 錯配到別的 N;查不到的
+ * N(例:未來新增但這裡忘了補)退回 CATALOG_FALLBACK,只是少了敘述,不會顯示錯的敘述。
+ *
+ * 其餘欄位(f_vco、α·G、三級 grid 的 P、spur 間距)全部在 runtime 由 n 推導,不寫死。
+ */
+const N_CATALOG_META: Record<string, { id: string; story: string }> = {
+  '3': { id: '—', story: 'integer-N,on-grid,e_FB ≡ 0' },
+  '3.125': { id: '—', story: 'on-grid α = 1/8,e_FB ≡ 0' },
+  '3.13': { id: '—', story: '預設 off-grid 主力案例' },
+  '3.1375': { id: '—', story: 'off-grid α = 11/80' },
+  '3.25': { id: '—', story: 'on-grid α = 1/4,e_FB ≡ 0' },
+  '3.126953125': {
+    id: 'F1',
+    story: '半 LSB tie:half-up qNearest 每隔一拍才進位,誤差序列 0, +0.5 LSB 交替 → Nyquist tone f_ref/2',
+  },
+  '3.1259765625': { id: 'F2', story: '殘量 0.25 LSB(α = 129/1024),4 拍鋸齒' },
+  '3.125390625': { id: 'F3', story: '殘量 0.1 LSB(α = 321/2560),10 拍鋸齒' },
+  '3.1250390625': {
+    id: 'F4',
+    story: '殘量 0.01 LSB(α = 3201/25600),fractional-boundary close-in spur',
+  },
+  '3.2': {
+    id: 'F5',
+    story: 'α = 1/5:integer / PMUX / DTC 三層 grid 的 P 都是 5(q = 5 與 1, 4, 256 互質)',
+  },
+  '3.22265625': {
+    id: 'F6',
+    story: 'f_vco = 25.78125 Gbps / 2(Ethernet);α·G = 57 exactly on-grid,e_FB ≡ 0',
+  },
+  '3.001': {
+    id: 'F7',
+    story: 'near-integer:α = 0.001 < 3/256 → DSM 進入 n_int = 2 regime(§4);close-in spur',
+  },
+  '3.1545084971874737': { id: 'F8', story: 'α = 0.25/φ,φ =(1+√5)/2:quasi-periodic,無離散 spur' },
+};
+
+const CATALOG_FALLBACK = { id: '—', story: '' };
+
+/** id/story 查表:key 是 float64 的精確短表示,查不到回傳 fallback(不會錯配)。 */
+function catalogMeta(n: number): { id: string; story: string } {
+  return N_CATALOG_META[String(n)] ?? CATALOG_FALLBACK;
+}
+
+/** 互動例三的「DSM 階數 → quantizer」對照(0 = nearest,無 shaping)。 */
+const ORDER_QUANT: Quantizer[] = ['nearest', 'ef1', 'mash11', 'mash111'];
+
+/** 三個 stage grid 的合法 G(每 VCO cycle 步數);其它值仍可算,只是非本章硬體。 */
+const STAGE_G = [1, 4, 256];
 
 const QUANT_OPTIONS: { value: Quantizer; label: string }[] = [
   { value: 'nearest', label: 'nearest(half-up)' },
@@ -430,6 +498,28 @@ function FingerprintCell({
   );
 }
 
+/**
+ * 綠色「exact」徽章:該 stage grid 上 α·S 為整數 → P = 1、e_FB ≡ 0、無 fractional spur。
+ * 圖一之二的格與圖一之三的 P 欄共用同一視覺。
+ */
+function ExactChip({ color, title }: { color: string; title?: string }) {
+  return (
+    <span
+      title={title}
+      style={{
+        color,
+        border: '1px solid currentColor',
+        borderRadius: 3,
+        padding: '0 4px',
+        fontSize: 10,
+        fontWeight: 700,
+      }}
+    >
+      exact
+    </span>
+  );
+}
+
 /* ================================================================== */
 
 export default function Chapter21() {
@@ -443,6 +533,8 @@ export default function Chapter21() {
   const [dither, setDither] = useState(0);
   const [nCyc, setNCyc] = useState(256);
   const [logX, setLogX] = useState(false);
+  /** 圖一之二的列數:false = 基本 5(預設,保持輕量);true = 全部 13 個 preset。 */
+  const [fpAll, setFpAll] = useState(false);
 
   const stage = STAGE_DEFS.find((s) => s.key === stageKey)!;
   const tVco = 1 / (F_REF * nDiv); // display only
@@ -492,19 +584,31 @@ export default function Chapter21() {
 
   /**
    * 圖一之二:64 拍 e_PD 指紋(nearest、無 dither),P 沿用圖一同一公式
-   * P = q/gcd(q,G)。列 = 5 preset N(+ 目前 slider N,若非 preset,額外插入一列);
-   * 欄 = 3 stage grid。18 次(至多)runStage(64 cycles)在同一 useMemo 內算完。
+   * P = q/gcd(q,G)。列 = 基本 5 preset N 或全部 13 個(fpAll 切換)+ 目前 slider N
+   * (若非顯示中的 preset,額外插入一列);欄 = 3 stage grid。
+   * 至多 14 列 × 3 欄 = 42 次 runStage(64 cycles)在同一 useMemo 內算完。
+   *
+   * ratApprox 用 (CAT_QMAX, CAT_TOL) 而非預設 (1024, 1e-9):F3/F4 的 q = 2560 / 25600
+   * 超過預設上界,否則 P 欄會誤顯示「—」。基本 5 個的 q ≤ 100,兩組參數結果相同。
    */
   const fingerprint = useMemo((): {
     n: number;
+    id: string;
     isPreset: boolean;
     frac: string;
     cells: { stage: StageDef; err: Float64Array; pPred: number | null; peakSec: number; exact: boolean }[];
   }[] => {
-    const ns = N_DIV_PRESETS.includes(nDiv) ? N_DIV_PRESETS : [...N_DIV_PRESETS, nDiv].sort((a, b) => a - b);
+    const base = fpAll ? N_DIV_ALL_PRESETS.map((p) => p.n) : N_DIV_PRESETS;
+    // 基本 5 依 N 遞增插入目前值;全部 13 依圖鑑順序(基本 → sub-LSB 階梯 → 特殊),
+    // 與下方 N 值圖鑑逐列對齊,目前值附在最後。
+    const ns = base.includes(nDiv)
+      ? base
+      : fpAll
+        ? [...base, nDiv]
+        : [...base, nDiv].sort((a, b) => a - b);
     return ns.map((n) => {
       const tVcoN = 1 / (F_REF * n);
-      const fr = ratApprox(n - 3);
+      const fr = ratApprox(n - 3, CAT_QMAX, CAT_TOL);
       const cells = STAGE_DEFS.map((sd) => {
         const run = runStage(n, 64, sd.s, 'nearest', 0);
         const pPred = fr ? fr.q / gcd(fr.q, sd.s) : null;
@@ -513,12 +617,46 @@ export default function Chapter21() {
       });
       return {
         n,
-        isPreset: N_DIV_PRESETS.includes(n),
+        id: catalogMeta(n).id,
+        isPreset: base.includes(n),
         frac: fr ? (fr.p === 0 ? '0' : `${fr.p}/${fr.q}`) : '—',
         cells,
       };
     });
-  }, [nDiv]);
+  }, [nDiv, fpAll]);
+
+  /**
+   * 圖一之三 — N 值圖鑑:MODEL_SPEC §1.1 preset 目錄的可執行版本。
+   * f_vco / α·G / 三級 grid 的 P / spur 間距全部由 `N_DIV_ALL_PRESETS` 的 float64
+   * 在 runtime 推導(不寫死數字),故永遠與全站共用的 preset 目錄一致。
+   *
+   * f_vco 以 GHz 表示 = n · (f_ref/1e9) = n · 4:乘 4 是 2 的冪,float64 下無捨入,
+   * String(n*4) 即是精確短表示(例:3.1250390625 → 12.50015625)。
+   * P_S = q/gcd(q,S),S ∈ {1, 4, 256};P_S = 1 ⇔ α·S 為整數 ⇔ 該 grid 上 e_FB ≡ 0。
+   * spur 間距 = f_ref / P_DTC,僅在 P_DTC > 1 時存在(P = 1 無 fractional spur)。
+   */
+  const catalog = useMemo(() => {
+    return N_DIV_ALL_PRESETS.map((preset) => {
+      const n = preset.n;
+      const cat = catalogMeta(n); // 不用 `meta`:module scope 已有 chapter meta
+      const fr = ratApprox(n - 3, CAT_QMAX, CAT_TOL);
+      const alphaG = (n - 3) * 256;
+      const ps = STAGE_DEFS.map((sd) => (fr ? fr.q / gcd(fr.q, sd.s) : null));
+      const pDtc = ps[ps.length - 1];
+      return {
+        n,
+        id: cat.id,
+        story: cat.story,
+        fVcoGhz: n * 4,
+        // 有理 preset 顯示 nominal α·G(12 位有效數字吃掉 ~1e-14 的十進位轉換殘量,
+        // 例 33.27999999999997 → 33.28);F8 無有理表示 → 顯示完整 float64。
+        alphaGText: fr ? trimNumber(alphaG, 12) : String(alphaG),
+        frac: fr ? (fr.p === 0 ? '0' : `${fr.p}/${fr.q}`) : '—',
+        ps,
+        spacingMhz: pDtc !== null && pDtc > 1 ? F_REF / pDtc / 1e6 : null,
+      };
+    });
+  }, []);
 
   /* ------------------------------------- Layer 2: 逐級暫態(互動模擬) */
   const transient = useMemo(() => {
@@ -1128,6 +1266,258 @@ export default function Chapter21() {
 
       <SectionExample>
         <p>
+          先用三個<b>可改數字</b>的例題把上一節的三條式子跑一遍:例一是 (2) 的 stage grid
+          量化、例二是 (3) 的週期/峰值/spur 間距、例三是 (4) 的 DSM 誤差預算與 wrap 摺疊。
+          每個例子的計算都直接呼叫本頁 model(<code>sIdeal</code> / <code>qNearest</code> /{' '}
+          <code>wrapCycles</code> / <code>makeQuantizer</code> / <code>configTVcoS</code>),
+          所以任何一組輸入的答案都是模型算出來的,不是寫死的數字。
+        </p>
+
+        <ExampleProblem
+          index={1}
+          tag="EXACT"
+          title="stage grid 上的單拍 PD 誤差"
+          prompt={
+            <>
+              feedback chain 被截斷在「每個 VCO cycle 有 <M>{'G'}</M> 個格點」的那一級
+              (divider <M>{'G=1'}</M>、+PMUX <M>{'G=4'}</M>、+DTC <M>{'G=256'}</M>)。
+              取 divide ratio <M>{'N'}</M> 與第 <M>{'k'}</M> 個 reference edge,依 (2) 式算
+              stage code <M>{'v = G\\,s_{ideal}[k]'}</M>、量化 <M>{'y = \\operatorname{qNearest}(v)'}</M>,
+              再求 PD 輸入端誤差{' '}
+              <M>{'e_{PD} = \\operatorname{wrapCycles}\\bigl((y-v)/G\\bigr)'}</M>,並換算成時間。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 3, max: 3.25, step: 0.001 },
+            { key: 'k', label: <M>{'k'}</M>, def: 5, min: 0, max: 1023, step: 1 },
+            { key: 'G', label: <>grid 步數 <M>{'G'}</M></>, def: 4, min: 1, max: 256, step: 1 },
+            {
+              key: 'fref',
+              label: <M>{'f_{ref}'}</M>,
+              def: 4,
+              min: 0.5,
+              max: 20,
+              step: 0.1,
+              unit: 'GHz',
+            },
+          ]}
+          compute={(vv) => {
+            const g = qNearest(vv.G);
+            const k = qNearest(vv.k);
+            const tVcoPs = configTVcoS(fromPartial({ n_div: vv.N, f_ref_hz: vv.fref * 1e9 })) * 1e12;
+            const s = sIdeal(k + 1, vv.N)[k]; // s_ideal[k] = k·N(乘法,不累加)
+            const code = g * s; // (2) 式的 v[k]
+            const y = qNearest(code); // half-up,絕不用 Math.round
+            const raw = (y - code) / g;
+            const e = wrapCycles(raw); // (-0.5, 0.5]
+            const halfLsb = 0.5 / g;
+            return {
+              steps: [
+                { label: <><M>{'s_{ideal}[k] = kN'}</M></>, value: fmt(s, 9, 'cyc') },
+                { label: <>格距 <M>{'\\Delta = 1/G'}</M></>, value: fmt(1 / g, 6, 'cyc') },
+                { label: <>stage code <M>{'v = G\\,s_{ideal}[k]'}</M></>, value: fmt(code, 9) },
+                { label: <><M>{'y = \\operatorname{qNearest}(v)'}</M></>, value: `${y}` },
+                { label: <>未 wrap 的 <M>{'(y-v)/G'}</M></>, value: fmt(raw, 6, 'cyc') },
+                { label: <><M>{'e_{PD} = \\operatorname{wrapCycles}((y-v)/G)'}</M></>, value: fmt(e, 6, 'cyc') },
+                { label: <>理論上界 <M>{'\\Delta/2 = 1/(2G)'}</M></>, value: fmt(halfLsb, 6, 'cyc') },
+                { label: <><M>{'T_{vco} = 1/(N f_{ref})'}</M></>, value: fmt(tVcoPs, 6, 'ps') },
+              ],
+              answer: (
+                <>
+                  <M>{'e_{PD}[k]'}</M> = {fmt(e, 6, 'cyc')} = {fmt(e * tVcoPs, 6, 'ps')}
+                  (= {fmt(e * g, 4)} stage-LSB,上界 {fmt(halfLsb, 6, 'cyc')})
+                </>
+              ),
+              warn:
+                !STAGE_G.includes(g)
+                  ? `G = ${g} 不是本章的三級 grid(1 / 4 / 256);公式仍成立,但不對應實際硬體。`
+                  : Math.abs(e) > halfLsb + 1e-12
+                    ? '誤差超出 Δ/2 —— nearest 不該發生,請檢查輸入。'
+                    : undefined,
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={2}
+          tag="EXACT"
+          title="從 α = p/q 推週期 P、峰值與 spur 間距"
+          prompt={
+            <>
+              把 <M>{'\\alpha = N - 3'}</M> 寫成最簡分數 <M>{'p/q'}</M>,依 (3) 式算誤差序列的
+              最小週期 <M>{'P = q/\\gcd(q, G)'}</M>、實際峰值{' '}
+              <M>{'\\lfloor P/2\\rfloor/P \\cdot \\Delta'}</M> 與 spur 基頻{' '}
+              <M>{'f_{ref}/P'}</M>,再用 model 跑 <M>{'\\min(2P, 128)'}</M> 拍 nearest 量測峰值
+              對照。預設 <M>{'p/q = 13/100'}</M>(N = 3.13)、DTC grid <M>{'G = 256'}</M>。
+            </>
+          }
+          inputs={[
+            { key: 'p', label: <>分子 <M>{'p'}</M></>, def: 13, min: 0, max: 4096, step: 1 },
+            { key: 'q', label: <>分母 <M>{'q'}</M></>, def: 100, min: 1, max: 4096, step: 1 },
+            { key: 'G', label: <>grid 步數 <M>{'G'}</M></>, def: 256, min: 1, max: 256, step: 1 },
+            {
+              key: 'fref',
+              label: <M>{'f_{ref}'}</M>,
+              def: 4,
+              min: 0.5,
+              max: 20,
+              step: 0.1,
+              unit: 'GHz',
+            },
+          ]}
+          compute={(vv) => {
+            const p = qNearest(vv.p);
+            const q = qNearest(vv.q);
+            const g = qNearest(vv.G);
+            const fRefHz = vv.fref * 1e9;
+            const alpha = p / q;
+            const nDiv = 3 + alpha;
+            const tVcoPs = configTVcoS(fromPartial({ n_div: nDiv, f_ref_hz: fRefHz })) * 1e12;
+            const dRed = gcd(p, q); // p/q 未必已約分
+            const qRed = q / dRed;
+            const pRed = p / dRed;
+            const d = gcd(qRed, g);
+            const period = qRed / d;
+            const delta = 1 / g;
+            const peakPred = (Math.floor(period / 2) / period) * delta;
+            const fSpurMHz = fRefHz / period / 1e6;
+            // model 量測:nearest 掃 min(2P, 128) 拍
+            const nMeas = Math.min(2 * period, 128);
+            const sArr = sIdeal(nMeas, nDiv);
+            let peakMeas = 0;
+            for (let i = 0; i < nMeas; i++) {
+              const code = g * sArr[i];
+              const e = wrapCycles((qNearest(code) - code) / g);
+              if (Math.abs(e) > peakMeas) peakMeas = Math.abs(e);
+            }
+            return {
+              steps: [
+                { label: <>約分後 <M>{'\\alpha = p/q'}</M></>, value: `${pRed}/${qRed} = ${fmt(alpha, 9)}` },
+                { label: <><M>{'N = 3 + \\alpha'}</M></>, value: fmt(nDiv, 9) },
+                { label: <><M>{'\\gcd(q, G)'}</M></>, value: `${d}` },
+                { label: <><M>{'P = q/\\gcd(q, G)'}</M></>, value: `${period} 拍` },
+                { label: <>格距 <M>{'\\Delta = 1/G'}</M></>, value: fmt(delta, 6, 'cyc') },
+                {
+                  label: <>公式峰值 <M>{'(\\lfloor P/2\\rfloor/P)\\Delta'}</M></>,
+                  value: `${fmt(peakPred * g, 6)} LSB = ${fmt(peakPred * tVcoPs * 1000, 6, 'fs')}`,
+                },
+                {
+                  label: <>model 量測峰值({nMeas} 拍 nearest)</>,
+                  value: `${fmt(peakMeas * g, 6)} LSB`,
+                },
+                {
+                  label: <><M>{'T_{vco}'}</M> / spur 基頻 <M>{'f_{ref}/P'}</M></>,
+                  value: `${fmt(tVcoPs, 6, 'ps')} / ${fmt(fSpurMHz, 6, 'MHz')}`,
+                },
+              ],
+              answer: (
+                <>
+                  <M>{'P'}</M> = {period} 拍,peak = {fmt(peakPred * g, 4)} LSB ={' '}
+                  {fmt(peakPred * tVcoPs * 1000, 6, 'fs')},spur 間距 = {fmt(fSpurMHz, 6, 'MHz')}
+                </>
+              ),
+              warn:
+                p === 0
+                  ? 'α = 0 → integer-N:誤差恆為 0,P = 1 只是形式解。'
+                  : alpha >= 1
+                    ? `p/q = ${fmt(alpha, 6)} ≥ 1:N = ${fmt(nDiv, 6)} 已超出本章的 3…3.25 範圍,公式仍成立。`
+                    : 2 * period > 128
+                      ? `P = ${period} 太長:量測窗只有 128 拍(< 2P),量測峰值可能還沒走到公式峰值。`
+                      : undefined,
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={3}
+          tag="EXPERIMENT"
+          title="DSM 的 wrap 摺疊誤差預算"
+          prompt={
+            <>
+              依 (4) 式:shaping 把<b>瞬時</b>擺幅放大,一旦{' '}
+              <M>{'|y-v|/G \\ge 0.5'}</M> cycle,PD 只看得到 wrap 後的值 —— 摺疊會毀掉 in-band
+              收益。給定 <M>{'N'}</M>、stage grid <M>{'G'}</M>、DSM 階數(0 = nearest、
+              1 = ef1、2 = mash11、3 = mash111)與拍數,由 model 的{' '}
+              <code>makeQuantizer</code> 實跑,回報未 wrap 峰值、摺疊門檻 <M>{'G/2'}</M>{' '}
+              stage-LSB、摺疊拍數與剩餘餘裕。把 <M>{'G'}</M> 改成 1(只有 divider)就看得到
+              摺疊爆炸。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 3, max: 3.25, step: 0.001 },
+            { key: 'G', label: <>grid 步數 <M>{'G'}</M></>, def: 4, min: 1, max: 256, step: 1 },
+            { key: 'order', label: 'DSM 階數', def: 3, min: 0, max: 3, step: 1 },
+            { key: 'n', label: '拍數', def: 100, min: 8, max: 128, step: 1 },
+          ]}
+          compute={(vv) => {
+            const g = qNearest(vv.G);
+            const order = Math.min(3, Math.max(0, qNearest(vv.order)));
+            const n = qNearest(vv.n);
+            const name = ORDER_QUANT[order];
+            const quant = makeQuantizer(name); // fresh state(§6)
+            const sArr = sIdeal(n, vv.N);
+            const wrapped = new Float64Array(n);
+            const tVcoPs = configTVcoS(fromPartial({ n_div: vv.N, f_ref_hz: F_REF })) * 1e12;
+            let peakRaw = 0;
+            let peakWrap = 0;
+            let folds = 0;
+            let acc = 0;
+            for (let k = 0; k < n; k++) {
+              const code = g * sArr[k];
+              const y = quant.quantize(code);
+              acc += y - code;
+              const raw = (y - code) / g;
+              const w = wrapCycles(raw);
+              wrapped[k] = w;
+              if (Math.abs(raw) > peakRaw) peakRaw = Math.abs(raw);
+              if (Math.abs(w) > peakWrap) peakWrap = Math.abs(w);
+              if (Math.abs(raw) >= 0.5) folds += 1;
+            }
+            const rmsCyc = rms(wrapped);
+            const marginLsb = g / 2 - peakRaw * g;
+            return {
+              steps: [
+                { label: <>quantizer / 拍數</>, value: `${name} / ${n}` },
+                {
+                  label: <>未 wrap 峰值 <M>{'\\max|y-v|'}</M></>,
+                  value: `${fmt(peakRaw * g, 6)} stage-LSB = ${fmt(peakRaw, 6, 'cyc')}`,
+                },
+                {
+                  label: <>摺疊門檻 <M>{'G/2'}</M>(= 0.5 cycle)</>,
+                  value: `${fmt(g / 2, 6)} stage-LSB`,
+                },
+                { label: <>摺疊拍數 <M>{'\\#\\{|y-v|/G \\ge 0.5\\}'}</M></>, value: `${folds} / ${n}` },
+                { label: <>摺疊餘裕 <M>{'G/2 - \\max|y-v|'}</M></>, value: `${fmt(marginLsb, 6)} stage-LSB` },
+                {
+                  label: <>wrap 後峰值 <M>{'\\max|e_{PD}|'}</M></>,
+                  value: `${fmt(peakWrap, 6, 'cyc')} = ${fmt(peakWrap * tVcoPs, 6, 'ps')}`,
+                },
+                {
+                  label: <><M>{'\\operatorname{rms}(e_{PD})'}</M></>,
+                  value: `${fmt(rmsCyc, 6, 'cyc')} = ${fmt(rmsCyc * tVcoPs, 6, 'ps')}`,
+                },
+                {
+                  label: <>DC 準度 <M>{'|\\sum_k (y-v)|'}</M></>,
+                  value: `${fmt(Math.abs(acc), 3)} stage-LSB`,
+                },
+              ],
+              answer: (
+                <>
+                  未 wrap 峰值 = {fmt(peakRaw * g, 4)} stage-LSB(= {fmt(peakWrap * tVcoPs, 6, 'ps')}),
+                  摺疊 {folds} 拍,餘裕 {fmt(marginLsb, 4)} stage-LSB
+                </>
+              ),
+              warn:
+                folds > 0
+                  ? `已發生 wrap 摺疊(${folds}/${n} 拍):PD 看到的是摺疊後的值,shaping 的 in-band 收益在此失效。`
+                  : !STAGE_G.includes(g)
+                    ? `G = ${g} 不是本章的三級 grid(1 / 4 / 256)。`
+                    : undefined,
+            };
+          }}
+        />
+
+        <p>
           <b>手算例:N = 3.13、ef1 @ PMUX grid(G = 4)的 startup 全表。</b>v[k] = 4·s_ideal[k]
           = 12.52k。ef1 fresh state e = 0(fresh instance,§6);每拍 v+e 取 floor,殘量存回
           state。前 3 拍手驗:k=1:v = 12.52,e_in = 0 → y = ⌊12.52⌋ = 12,e_out = 0.52,
@@ -1236,28 +1626,69 @@ export default function Chapter21() {
       </SectionFigure>
 
       <SectionFigure
-        title="圖一之二 — 每 N 誤差指紋:e_PD[k] sparkline 陣列(5 preset N × 3 stages,64 拍、nearest、無 dither)"
+        title={`圖一之二 — 每 N 誤差指紋:e_PD[k] sparkline 陣列(${
+          fpAll ? '全部 13 個 preset N' : '基本 5 個 preset N'
+        } × 3 stages,64 拍、nearest、無 dither)`}
         caption={
           <span>
             每格:x 軸 k = 0…63(reference cycle,同一起點);y 軸為<b>該格自身</b>正規化的
             e_PD[k](sparkline —— 縱軸尺度逐格不同,只比較<b>形狀</b>——鋸齒週期、正負交錯、
             是否恆零,不能跨格比幅度)。格內左下標 P(與圖一同一公式 P = q/gcd(q,G)
             <EpistemicTag kind="EXACT" />),右下標 peak(64 拍內量測,以 formatSiTime 顯示;
-            α·G 為整數的格顯示綠色「exact」徽章,誤差恆 0)。列 = 5 個 preset N(若目前
-            slider N 不是 preset,額外插入一列並加粗標「目前」);欄 = divider / +PMUX /
-            +DTC 三級 grid,與本頁其餘圖表同一 stage 定義。<b>點擊任一格</b>會把該 N 載入
-            全站(TopBar/ParamPanel 的 N)並把 stage 切到該格,下方圖四/圖七的
-            stage-explorer 立即跟著換。<EpistemicTag kind="EXPERIMENT" />
+            α·G 為整數的格顯示綠色「exact」徽章,誤差恆 0)。列 = 用上方切換鈕選<b>基本 5</b>
+            (預設,保持輕量)或<b>全部 13</b> 個 preset N(依圖鑑順序:基本 → sub-LSB 階梯 →
+            特殊,與下方圖一之三逐列對齊);若目前 slider N 不在顯示中的清單裡,額外插入一列
+            並加粗標「目前」。欄 = divider / +PMUX / +DTC 三級 grid,與本頁其餘圖表同一 stage
+            定義。<b>點擊任一格</b>會把該 N 載入全站(TopBar/ParamPanel 的 N)並把 stage 切到
+            該格,下方圖四/圖七的 stage-explorer 立即跟著換。<EpistemicTag kind="EXPERIMENT" />
           </span>
         }
       >
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            flexWrap: 'wrap',
+            marginBottom: 8,
+          }}
+        >
+          <span style={{ fontSize: 12, color: ct.textSubtle }}>列數:</span>
+          {[
+            { all: false, label: `基本 5(${N_DIV_PRESETS.length} 列)` },
+            { all: true, label: `全部 13(${N_DIV_ALL_PRESETS.length} 列)` },
+          ].map((opt) => (
+            <button
+              key={String(opt.all)}
+              type="button"
+              onClick={() => setFpAll(opt.all)}
+              aria-pressed={fpAll === opt.all}
+              style={{
+                font: 'inherit',
+                fontSize: 12,
+                padding: '3px 10px',
+                borderRadius: 4,
+                cursor: 'pointer',
+                border: `1px solid ${fpAll === opt.all ? ct.accent : 'var(--border)'}`,
+                background: fpAll === opt.all ? 'var(--bg-hover)' : 'var(--bg-panel)',
+                color: 'inherit',
+                fontWeight: fpAll === opt.all ? 600 : 400,
+              }}
+            >
+              {opt.label}
+            </button>
+          ))}
+          <span style={{ fontSize: 11.5, color: ct.textSubtle }}>
+            (全部 13 = 基本 5 + sub-LSB 階梯 F1–F4 + 特殊 F5–F8,見下方圖一之三)
+          </span>
+        </div>
         <div style={{ overflowX: 'auto' }}>
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: `132px repeat(${STAGE_DEFS.length}, minmax(150px, 1fr))`,
+              gridTemplateColumns: `164px repeat(${STAGE_DEFS.length}, minmax(150px, 1fr))`,
               gap: 6,
-              minWidth: 640,
+              minWidth: 672,
               alignItems: 'stretch',
             }}
           >
@@ -1281,16 +1712,34 @@ export default function Chapter21() {
               <Fragment key={row.n}>
                 <div
                   style={{
-                    fontSize: 13,
+                    fontSize: 12.5,
                     fontWeight: row.isPreset ? 500 : 700,
                     display: 'flex',
                     flexDirection: 'column',
                     justifyContent: 'center',
                     padding: '2px 6px 2px 0',
                     borderRight: '1px solid var(--border)',
+                    overflowWrap: 'anywhere',
                   }}
                 >
-                  <span>N = {row.n}</span>
+                  <span>
+                    {row.id !== '—' && (
+                      <span
+                        style={{
+                          color: ct.textSubtle,
+                          border: '1px solid var(--border)',
+                          borderRadius: 3,
+                          padding: '0 3px',
+                          fontSize: 10,
+                          fontWeight: 700,
+                          marginRight: 4,
+                        }}
+                      >
+                        {row.id}
+                      </span>
+                    )}
+                    N = {row.n}
+                  </span>
                   <span style={{ fontSize: 11, color: ct.textSubtle, fontWeight: 400 }}>
                     α = {row.frac}
                     {row.isPreset ? '' : '(目前)'}
@@ -1335,18 +1784,7 @@ export default function Chapter21() {
                       >
                         <span>P={cell.pPred ?? '—'}</span>
                         {cell.exact ? (
-                          <span
-                            style={{
-                              color: ct.good,
-                              border: '1px solid currentColor',
-                              borderRadius: 3,
-                              padding: '0 4px',
-                              fontSize: 10,
-                              fontWeight: 700,
-                            }}
-                          >
-                            exact
-                          </span>
+                          <ExactChip color={ct.good} />
                         ) : (
                           <span>{formatSiTime(cell.peakSec)}</span>
                         )}
@@ -1359,13 +1797,145 @@ export default function Chapter21() {
           </div>
         </div>
         <p style={{ fontSize: 13, opacity: 0.85 }}>
-          非 preset 的「目前」列若 α 連分數在 q ≤ 1024 內找不到(P 欄顯示「—」,同圖七
-          check 1 的 N/A 判準),或 α 很接近 0,64 拍視窗可能還沒摺返一次 —— peak 此時只是
-          <b>視窗內量測值</b>,可能小於漸近上界 Δ/2(python3 實測:N=3.001@divider 64 拍
-          peak 0.063 cyc,512 拍後才到 0.5)。<EpistemicTag kind="EXPERIMENT" /> 5 個
-          preset 不受此限:python3 交叉驗證 64 拍與 512 拍的 peak 逐一相等
-          (含 divider 級 P=80/100 這種週期長於視窗的情況,因為峰值在週期內提早出現,
-          不需等滿一整個 P)。
+          <b>peak 是視窗內量測值,不是漸近上界。</b>非 preset 的「目前」列若 α 連分數在
+          q ≤ {CAT_QMAX}(tol {CAT_TOL})內找不到,P 欄顯示「—」;此時或當該 grid 的 P 大於
+          64,64 拍視窗可能還沒掃到週期內的峰值,peak 會小於漸近上界 Δ/2。
+          <EpistemicTag kind="EXPERIMENT" /> python3 交叉驗證 64 拍 vs 512 拍的 peak:
+          <b>基本 5 個 preset 的 9 格全部相等</b>(含 divider 級 P = 80/100 這種週期長於視窗的
+          情況 —— 峰值在週期內提早出現,不需等滿一整個 P)。切到「全部 13」後有 11 格不等,
+          全部落在 P 遠大於 64 的 divider / +PMUX 欄:F1 39.35→39.98 ps、F2 39.68→39.91 ps、
+          F3 39.87→39.9 ps、F6 36.36→38.79 ps(P_div = 256)、F7 5.248→41.65 ps
+          (P_div = 1000,α = 0.001 太小,64 拍才走到 0.063 cycle),以及 F8 三格全部
+          (quasi-periodic、無有限 P,+DTC 153.4→154.7 fs)。反例同樣存在:F4 的
+          P_div = 25600 ≫ 64,但 64 拍已達 39.99 ps 與 512 拍相同 —— <b>P &gt; 64 是峰值可能
+          短缺的必要條件,不是充分條件</b>。+DTC 欄除 F8 外 13 個 N 全部相等。
+        </p>
+      </SectionFigure>
+
+      <SectionFigure
+        title="圖一之三 — N 值圖鑑:13 個 preset N 的 α·G、三級 grid 週期 P 與 spur 間距"
+        caption={
+          <span>
+            全站 preset N 目錄的可執行版本(MODEL_SPEC §1.1)。每列一個 preset,
+            <b>所有數字都在 runtime 由該 preset 的 float64 N 推導</b>,沒有寫死的常數 ——
+            唯一的靜態欄位是 id 與 story 文字。<EpistemicTag kind="EXACT" />
+            <br />
+            <b>f_vco</b> = N · f_ref,f_ref = 4 GHz;以 GHz 表示即 N · 4,乘 4 是 2 的冪,
+            float64 下無捨入,顯示的是精確短表示。<b>α·G</b> = (N−3)·256 = 一拍相對 DTC grid
+            的前進量,整數 ⇔ on-grid。<b>P</b> = q/gcd(q, S) —— 把 α 約分成 p/q(連分數,
+            q ≤ {CAT_QMAX}),S 為該級 grid 每 VCO cycle 的步數(divider 1 / +PMUX 4 /
+            +DTC 256)。P = 1 顯示綠色「exact」徽章:α·S 為整數、e_FB ≡ 0、該級<b>沒有</b>
+            fractional spur。<b>spur 間距</b> = f_ref / P<sub>DTC</sub>(§17),故 P 越大 spur
+            越靠近載波;P = 1 時無 fractional spur,顯示「無」。
+            <br />
+            F8(α = 0.25/φ)沒有實用意義下的有限 P:float64 嚴格來說仍是有理數
+            (q = 2⁵¹ → 形式上 P = 2⁴³ = 8796093022208),但該週期遠長於任何模擬長度,
+            實務上等同 quasi-periodic,故 P 與 spur 間距皆列為「無」。
+            <EpistemicTag kind="APPROX" />
+            <br />
+            點<b>載入</b>把該 N 設成全站共用值(TopBar / ParamPanel / 上方指紋陣列 / 下方所有
+            圖表同步跟著換);目前選中的列以底色標示。
+          </span>
+        }
+      >
+        <div style={{ overflowX: 'auto' }}>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>id</th>
+                <th>N(float64)</th>
+                <th>f_vco</th>
+                <th>α·G</th>
+                <th>α = p/q</th>
+                {STAGE_DEFS.map((sd) => (
+                  <th key={`cat-h-${sd.key}`} title={sd.labelZh}>
+                    P · {sd.short}(S={sd.s})
+                  </th>
+                ))}
+                <th>spur 間距</th>
+                <th style={{ textAlign: 'left' }}>story(MODEL_SPEC §1.1)</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {catalog.map((row) => {
+                const active = row.n === nDiv;
+                return (
+                  <tr key={row.n} style={active ? { background: 'var(--bg-hover)' } : undefined}>
+                    <td style={{ fontWeight: row.id === '—' ? 400 : 700 }}>{row.id}</td>
+                    <td style={{ fontWeight: active ? 700 : 400 }}>{String(row.n)}</td>
+                    <td>{String(row.fVcoGhz)} GHz</td>
+                    <td>{row.alphaGText}</td>
+                    <td>{row.frac}</td>
+                    {row.ps.map((p, i) => (
+                      <td key={`cat-p-${row.n}-${STAGE_DEFS[i].key}`}>
+                        {p === null ? (
+                          <span title="α 無有限有理表示(quasi-periodic)">無</span>
+                        ) : p === 1 ? (
+                          <ExactChip
+                            color={ct.good}
+                            title={`P = 1:α·${STAGE_DEFS[i].s} 為整數,此 grid 上 on-grid、e_FB ≡ 0`}
+                          />
+                        ) : (
+                          p
+                        )}
+                      </td>
+                    ))}
+                    <td>
+                      {row.spacingMhz === null ? (
+                        <span title="quasi-periodic:無離散 spur">無</span>
+                      ) : (
+                        `${trimNumber(row.spacingMhz, 6)} MHz`
+                      )}
+                    </td>
+                    <td
+                      style={{
+                        textAlign: 'left',
+                        whiteSpace: 'normal',
+                        minWidth: 280,
+                        fontFamily: 'inherit',
+                      }}
+                    >
+                      {row.story}
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        onClick={() => setNDiv(row.n)}
+                        disabled={active}
+                        title={`把 N = ${row.n} 設成全站共用值`}
+                        style={{
+                          font: 'inherit',
+                          fontSize: 11.5,
+                          padding: '1px 8px',
+                          borderRadius: 4,
+                          border: `1px solid ${active ? ct.accent : 'var(--border)'}`,
+                          background: 'var(--bg-panel)',
+                          color: 'inherit',
+                          cursor: active ? 'default' : 'pointer',
+                          opacity: active ? 0.6 : 1,
+                        }}
+                      >
+                        {active ? '目前' : '載入'}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <p style={{ fontSize: 13, opacity: 0.85 }}>
+          三個 P 欄一起讀就是<b>「加細一級 grid 能不能把 spur 消掉」</b>的答案:P 從 divider
+          到 +DTC 每縮一次,代表 gcd(q, S) 把 q 吃掉一塊。3.25 在 +PMUX 就 exact(α·4 = 1),
+          3.125 要到 +DTC(α·256 = 32),F6 也是 +DTC(α·256 = 57);而 F5(α = 1/5)
+          <b>三級全都是 5</b> —— q = 5 與 1, 4, 256 互質,gcd 永遠是 1,再細的 grid 也搬不動
+          spur 位置,只能壓幅度(對照圖一 N=3.13 在 PMUX/DTC 同為 P=25 的同一機制)。
+          <EpistemicTag kind="EXACT" /> 另一端,P 最大的兩個 —— F4(P = 100 → 40 MHz)與
+          F7(P = 125 → 32 MHz)—— 把 spur 推進 in-band proxy(
+          {trimNumber(F_BAND / 1e6, 4)} MHz)之內,這正是 fractional boundary 與 near-integer
+          最難處理的原因:loop filter 濾不掉它。反過來 F1 的 P = 2 把能量全丟到 f_ref/2 =
+          2 GHz 的 Nyquist tone,離載波最遠、最容易濾。
         </p>
       </SectionFigure>
 

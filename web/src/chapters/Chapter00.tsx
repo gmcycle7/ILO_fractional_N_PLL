@@ -24,6 +24,7 @@ import {
 } from '../components/ChapterShell';
 import EpistemicTag from '../components/EpistemicTag';
 import Callout from '../components/Callout';
+import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { M, MathBlock } from '../components/Math';
 import PhaseWheel from '../components/PhaseWheel';
 import { ParamPanel, PresetButtons, Slider } from '../components/controls';
@@ -36,9 +37,16 @@ import {
   fVcoHz,
   dtcLsbS,
   phaseLsbDeg,
+  gFine,
+  wrap01,
   wrapCycles,
   cyclesToDegrees,
   cyclesToTime,
+  uInjIdeal,
+  fromPartial,
+  configAlpha,
+  configG,
+  configTVcoS,
 } from '../model';
 
 const meta = chapterById(0)!;
@@ -284,6 +292,159 @@ export default function Chapter00() {
           <M>{'1\\% \\times 20\\,\\mathrm{ps} = 200\\,\\mathrm{fs}'}</M>;
           <M>{'0.13 \\times 360^\\circ = 46.8^\\circ'}</M>。
         </p>
+
+        <ExampleProblem
+          index={1}
+          tag="EXACT"
+          title="頻率規劃:由 f_ref、N 反推 T_vco 與量化 LSB"
+          prompt={
+            <>
+              規格書給定 reference 頻率 <M>{'f_{ref}'}</M> 與 divide ratio{' '}
+              <M>{'N'}</M>,決定 <M>{'f_{vco}=Nf_{ref}'}</M>、
+              <M>{'T_{vco}=1/f_{vco}'}</M>;6-bit DTC 的量化步階{' '}
+              <M>{'\\mathrm{LSB}=T_{vco}/G'}</M>(<M>{'G=N_{PMUX}\\cdot 2^{B_{DTC}}=256'}</M>)。
+              給一組 <M>{'f_{ref}, N'}</M>,算出 <M>{'f_{vco}'}</M>、<M>{'T_{vco}'}</M> 與
+              LSB(時間、角度)。
+            </>
+          }
+          inputs={[
+            { key: 'fref', label: <M>{'f_{ref}'}</M>, def: 4, min: 0.1, max: 20, step: 0.1, unit: 'GHz' },
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 3, max: 3.25, step: 0.001 },
+          ]}
+          compute={(v) => {
+            const fRefHz = v.fref * 1e9;
+            const fv = fVcoHz(v.N, fRefHz);
+            const tv = tVcoS(v.N, fRefHz);
+            const g = gFine();
+            const lsbS = dtcLsbS(v.N, fRefHz);
+            const lsbDeg = phaseLsbDeg(g);
+            return {
+              steps: [
+                { label: <M>{'f_{vco}=Nf_{ref}'}</M>, value: fmt(fv / 1e9, 6, 'GHz') },
+                { label: <M>{'T_{vco}=1/f_{vco}'}</M>, value: fmt(tv * 1e12, 6, 'ps') },
+                { label: <M>{'G=N_{PMUX}\\cdot 2^{B_{DTC}}'}</M>, value: fmt(g, 6) },
+                { label: <M>{'\\mathrm{LSB}_{time}=T_{vco}/G'}</M>, value: fmt(lsbS * 1e15, 6, 'fs') },
+                { label: <M>{'\\mathrm{LSB}_{phase}=360^\\circ/G'}</M>, value: fmt(lsbDeg, 6, '°') },
+              ],
+              answer: (
+                <>
+                  <M>{'T_{vco}'}</M> = {fmt(tv * 1e12, 6, 'ps')},1 LSB = {fmt(lsbS * 1e15, 6, 'fs')} ={' '}
+                  {fmt(lsbDeg, 6, '°')}
+                </>
+              ),
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={2}
+          tag="EXACT"
+          title="第 k 拍的 injection 反向 command"
+          prompt={
+            <>
+              第 <M>{'k'}</M> 拍 VCO 的理想 fractional phase 是{' '}
+              <M>{'x_{ideal}[k]=\\operatorname{wrap01}(s_0+kN)'}</M>。若期望的 zero-crossing
+              相位是 <M>{'z_0'}</M>,scheduler 要送給 injection path 的理想 command 是{' '}
+              <M>{'u_{INJ,ideal}[k]=\\operatorname{wrap01}(z_0-x_{ideal}[k])'}</M>。給定{' '}
+              <M>{'N, s_0, k, z_0'}</M>,算出這一拍要送的 command,並驗證兩針相加(mod 1)是否鏡回{' '}
+              <M>{'z_0'}</M>。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 3, max: 3.25, step: 0.001 },
+            { key: 's0', label: <M>{'s_0'}</M>, def: 0, min: -50, max: 50, step: 0.01, unit: 'cyc' },
+            { key: 'k', label: <M>{'k'}</M>, def: 1, min: 0, max: 1023, step: 1 },
+            { key: 'z0', label: <M>{'z_0'}</M>, def: 0, min: -1, max: 1, step: 0.01, unit: 'cyc' },
+          ]}
+          compute={(v) => {
+            const s = v.s0 + v.k * v.N;
+            const x = wrap01(s);
+            const u = uInjIdeal([x], v.z0)[0];
+            const mirror = wrap01(x + u);
+            const target = wrap01(v.z0);
+            return {
+              steps: [
+                { label: <M>{'s_{ideal}=s_0+kN'}</M>, value: fmt(s, 8, 'cyc') },
+                { label: <M>{'x_{ideal}=\\operatorname{wrap01}(s_{ideal})'}</M>, value: fmt(x, 6, 'cyc') },
+                {
+                  label: <M>{'u_{INJ,ideal}=\\operatorname{wrap01}(z_0-x_{ideal})'}</M>,
+                  value: fmt(u, 6, 'cyc'),
+                },
+                {
+                  label: <>鏡像檢查 <M>{'\\operatorname{wrap01}(x_{ideal}+u_{INJ,ideal})'}</M></>,
+                  value: `${fmt(mirror, 6, 'cyc')}(應 = ${fmt(target, 6, 'cyc')})`,
+                },
+              ],
+              answer: (
+                <>
+                  <M>{'u_{INJ,ideal}[k]'}</M> = {fmt(u, 6, 'cyc')} = {fmt(u * 360, 5, '°')}
+                </>
+              ),
+              warn:
+                Math.abs(wrapCycles(mirror - target)) > 1e-9
+                  ? '鏡像檢查未通過(數值誤差超出預期)'
+                  : undefined,
+            };
+          }}
+        />
+
+        <ExampleProblem
+          index={3}
+          tag="EXACT"
+          title="Pipeline latency 誤差 vs. half-LSB 量化預算"
+          prompt={
+            <>
+              若 digital scheduler 沒做 look-ahead,固定 latency <M>{'L'}</M> 拍會造成排程誤差{' '}
+              <M>{'e_{lat}=\\operatorname{wrapCycles}(-L\\alpha)'}</M>(<M>{'\\alpha=N-3'}</M>)。
+              給定 <M>{'N, L, f_{ref}'}</M>,算出 <M>{'e_{lat}'}</M> 的角度、時間,並與量化系統的
+              half-LSB 預算(<M>{'\\tfrac12\\cdot\\tfrac{360^\\circ}{G}'}</M>)相比是幾倍,判斷
+              look-ahead 是否必要。
+            </>
+          }
+          inputs={[
+            { key: 'N', label: <M>{'N'}</M>, def: 3.13, min: 3, max: 3.25, step: 0.001 },
+            { key: 'L', label: <M>{'L'}</M>, def: 1, min: 0, max: 16, step: 1, unit: 'cyc' },
+            { key: 'fref', label: <M>{'f_{ref}'}</M>, def: 4, min: 0.1, max: 20, step: 0.1, unit: 'GHz' },
+          ]}
+          compute={(v) => {
+            const cfg = fromPartial({ n_div: v.N, f_ref_hz: v.fref * 1e9 });
+            const alpha = configAlpha(cfg);
+            const eLatCyc = wrapCycles(-v.L * alpha);
+            const eLatDeg = cyclesToDegrees(eLatCyc);
+            const g = configG(cfg);
+            const halfLsbCyc = 1 / (2 * g);
+            const halfLsbDeg = cyclesToDegrees(halfLsbCyc);
+            const ratio = Math.abs(eLatCyc) / halfLsbCyc;
+            const tv = configTVcoS(cfg);
+            const eLatTimeS = cyclesToTime(eLatCyc, tv);
+            return {
+              steps: [
+                { label: <M>{'\\alpha=N-3'}</M>, value: fmt(alpha, 6, 'cyc') },
+                {
+                  label: <M>{'e_{lat}=\\operatorname{wrapCycles}(-L\\alpha)'}</M>,
+                  value: fmt(eLatCyc, 6, 'cyc'),
+                },
+                { label: <>換算角度</>, value: fmt(eLatDeg, 6, '°') },
+                {
+                  label: <>換算時間(<M>{'\\times T_{vco}'}</M>)</>,
+                  value: fmt(eLatTimeS * 1e15, 6, 'fs'),
+                },
+                {
+                  label: <>half-LSB <M>{'=\\tfrac12\\cdot\\tfrac{360^\\circ}{G}'}</M></>,
+                  value: fmt(halfLsbDeg, 6, '°'),
+                },
+                { label: <>倍數 <M>{'|e_{lat}|\\,/\\,\\text{half-LSB}'}</M></>, value: fmt(ratio, 4) },
+              ],
+              answer: (
+                <>
+                  <M>{'e_{lat}'}</M> = {fmt(eLatDeg, 4, '°')} = {fmt(eLatTimeS * 1e15, 5, 'fs')},為
+                  half-LSB 的 {fmt(ratio, 4)} 倍
+                  {ratio > 1 ? '(超過量化預算,look-ahead 是必要設計)' : '(在量化預算內)'}
+                </>
+              ),
+            };
+          }}
+        />
       </SectionExample>
 
       <SectionFigure

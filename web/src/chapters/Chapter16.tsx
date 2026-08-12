@@ -27,12 +27,14 @@ import EChart from '../components/EChart';
 import EpistemicTag from '../components/EpistemicTag';
 import Callout from '../components/Callout';
 import { M, MathBlock } from '../components/Math';
+import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { ParamPanel, Slider, SelectControl, Toggle, PresetButtons } from '../components/controls';
 import UnitSwitch, { useUnit } from '../components/UnitSwitch';
 import DebugTable from '../components/DebugTable';
 import { makeLineOption, makeMarkLine } from '../lib/chartOptions';
 import { useChartTheme } from '../lib/useChartTheme';
 import { formatPhase, phaseAxisLabel, makePhaseTickFormatter, trimNumber } from '../lib/format';
+import { N_DIV_ALL_PRESETS } from '../lib/globalParams';
 import { useSimStatus } from '../SimStatusContext';
 import { chapterById } from './index';
 import {
@@ -45,6 +47,11 @@ import {
   integratedPhase,
   mean,
   rms,
+  db20,
+  wrap01,
+  qFloor,
+  configG,
+  cyclesToRadians,
   TWO_PI,
 } from '../model';
 import type { SimConfig, Spur } from '../model';
@@ -119,6 +126,81 @@ const SIG_PRESETS: SigPreset[] = [
   },
 ];
 
+/* ------------------------------------------------- spur summary table(全 N presets) */
+
+/**
+ * id + P(DTC grid,MODEL_SPEC §1.1)for every N_DIV_ALL_PRESETS entry, keyed
+ * by exact float64 n(與 globalParams.test.ts 的 EXPECTED_PERIOD 同一份真值,
+ * 已經 errorPeriod() 數值驗證過)。P = null 表示 quasi-periodic(F8)。
+ */
+const N_PERIOD_INFO: ReadonlyMap<number, { id: string; P: number | null }> = new Map([
+  [3.0, { id: '—', P: 1 }],
+  [3.125, { id: '—', P: 1 }],
+  [3.13, { id: '—', P: 25 }],
+  [3.1375, { id: '—', P: 5 }],
+  [3.25, { id: '—', P: 1 }],
+  [3.126953125, { id: 'F1', P: 2 }],
+  [3.1259765625, { id: 'F2', P: 4 }],
+  [3.125390625, { id: 'F3', P: 10 }],
+  [3.1250390625, { id: 'F4', P: 100 }],
+  [3.2, { id: 'F5', P: 5 }],
+  [3.22265625, { id: 'F6', P: 1 }],
+  [3.001, { id: 'F7', P: 125 }],
+  [3.1545084971874737, { id: 'F8', P: null }],
+]);
+
+/** n_cycles used by the summary sweep — independent of the chapter's own n_cycles selector. */
+const SPUR_SUMMARY_N_CYCLES = 1024;
+
+interface SpurSummaryDetection {
+  fMhz: number;
+  levelDbcHz: number;
+}
+
+interface SpurSummaryRow {
+  id: string;
+  nLabel: string;
+  n: number;
+  P: number | null;
+  spacingMhz: number | null; // predicted f_ref/P;null when P=1(on-grid,無 fractional spur)或 P=null(F8)
+  detections: SpurSummaryDetection[]; // top-5,降冪排序
+}
+
+/**
+ * 對 N_DIV_ALL_PRESETS 每一個 N 重跑一次模擬(quantizer='nearest' — 本章
+ * 所有 SIG_PRESETS 明講或預設值都落在這個 quantizer,是「章節目前的
+ * quantizer」;其餘欄位一律 defaultConfig,即純 feedback quantization,
+ * 不含 injection/noise,才能讓 spur 位置乾淨對應 P),detectSpurs 抓
+ * e_ZC_total 的 top-5。
+ */
+function computeSpurSummary(thresholdDb: number): SpurSummaryRow[] {
+  return N_DIV_ALL_PRESETS.map((preset) => {
+    const info = N_PERIOD_INFO.get(preset.n) ?? { id: '—', P: null };
+    const cfg = fromPartial({
+      n_div: preset.n,
+      n_cycles: SPUR_SUMMARY_N_CYCLES,
+      quantizer: 'nearest',
+    });
+    const res = simulate(cfg);
+    const phi = Float64Array.from(res.data.e_ZC_total, (v) => TWO_PI * v);
+    const { freqsHz, psd } = periodogramPsd(phi, cfg.f_ref_hz);
+    const spurs = detectSpurs(freqsHz, psd, thresholdDb);
+    const detections: SpurSummaryDetection[] = spurs.slice(0, 5).map((s) => ({
+      fMhz: s.freqHz / 1e6,
+      levelDbcHz: s.psdDb - LOG2_DB,
+    }));
+    const spacingMhz = info.P !== null && info.P > 1 ? cfg.f_ref_hz / info.P / 1e6 : null;
+    return {
+      id: info.id,
+      nLabel: preset.label,
+      n: preset.n,
+      P: info.P,
+      spacingMhz,
+      detections,
+    };
+  });
+}
+
 /* ---------------------------------------------------------- 真實模型碼節錄 */
 
 const CODE_EXCERPT = `// web/src/model/measurements.ts — Hann-window periodogram(MODEL_SPEC §17)
@@ -173,6 +255,343 @@ type FoldSigmaStr = '0' | '0.002';
 
 type NCyclesStr = '256' | '512' | '1024';
 
+/* ---------------------------------------------------------------------------
+ * 數值例子(SectionExample):三個互動 worked example。
+ * compute 皆為 pure function,dBc / shaping / 週期偵測全部建立在 ../model
+ * (toneAmpToDbc / db20 / cyclesToRadians / configG / wrap01 / simulate)
+ * 之上,沒有任何寫死的答案常數。
+ * ------------------------------------------------------------------------- */
+
+const EX_N_SIM = 128; // 例 2 的模擬長度(週期偵測用)
+const EX_PERIOD_TOL = 1e-9; // cycles;e_ZC_hw 逐位比較的容差
+
+/** 由 model 輸出的 e_ZC_hw 找最小重複週期 P(找不到回傳 null)。 */
+function findPeriod(e: Float64Array, pMax: number, tol: number): number | null {
+  for (let p = 1; p <= pMax; p++) {
+    let ok = true;
+    for (let i = 0; i + p < e.length; i++) {
+      if (Math.abs(e[i + p] - e[i]) > tol) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return p;
+  }
+  return null;
+}
+
+const EX_DBC_INPUTS = [
+  {
+    key: 'aLsb',
+    label: (
+      <>
+        tone 幅度 <M>{'a'}</M>
+      </>
+    ),
+    def: 1,
+    min: 0.001,
+    max: 64,
+    step: 0.01,
+    unit: 'LSB',
+  },
+  { key: 'frefGHz', label: <M>{'f_{ref}'}</M>, def: 4, min: 0.1, max: 20, step: 0.1, unit: 'GHz' },
+  { key: 'nfft', label: <>FFT 長度 <M>{'N'}</M></>, def: 512, min: 8, max: 65536, step: 1 },
+];
+
+function exDbcCompute(v: Record<string, number>) {
+  const cfg = fromPartial({ f_ref_hz: v.frefGHz * 1e9 });
+  const g = configG(cfg);
+  const aCyc = v.aLsb / g;
+  const aRad = cyclesToRadians(aCyc);
+  const dbc = toneAmpToDbc(aRad);
+  const nfft = qFloor(v.nfft);
+  const binHz = cfg.f_ref_hz / nfft;
+  return {
+    steps: [
+      {
+        label: (
+          <>
+            <M>{'a'}</M> 換算成 cycles(1 LSB = 1/{g} cycle)
+          </>
+        ),
+        value: fmt(aCyc, 8, 'cyc'),
+      },
+      {
+        label: (
+          <>
+            <M>{'a'}</M> 換算成 rad(<M>{'2\\pi\\times'}</M> cycles)
+          </>
+        ),
+        value: fmt(aRad, 8, 'rad'),
+      },
+      {
+        label: (
+          <>
+            single sideband 幅度 <M>{'a/2'}</M>(narrowband FM 一階展開)
+          </>
+        ),
+        value: fmt(aRad / 2, 8, 'rad'),
+      },
+      {
+        label: (
+          <>
+            SSB spur <M>{'= 20\\log_{10}(a/2)'}</M>
+          </>
+        ),
+        value: fmt(dbc, 7, 'dBc'),
+      },
+      {
+        label: (
+          <>
+            FFT bin 間距 <M>{'\\Delta f = f_{ref}/N'}</M>(取樣率 = <M>{'f_{ref}'}</M>)
+          </>
+        ),
+        value: fmt(binHz / 1e6, 7, 'MHz'),
+      },
+      {
+        label: (
+          <>
+            最高可觀測頻率 <M>{'f_{ref}/2'}</M>
+          </>
+        ),
+        value: fmt(cfg.f_ref_hz / 2e6, 7, 'MHz'),
+      },
+    ],
+    answer: (
+      <>
+        SSB spur = {fmt(dbc, 7, 'dBc')}(<M>{'a'}</M> = {fmt(aRad, 6, 'rad')});bin 間距{' '}
+        {fmt(binHz / 1e6, 7, 'MHz')}
+      </>
+    ),
+    warn:
+      aRad > 0.2
+        ? `a = ${fmt(aRad, 4)} rad 已不算 small angle,20log10(a/2) 的一階展開開始失準(高階 sideband 不可忽略)`
+        : undefined,
+  };
+}
+
+const EX_SPUR_INPUTS = [
+  { key: 'nDiv', label: <M>{'N'}</M>, def: 3 + 32.125 / 256, min: 3, max: 3.25, step: 0.0001 },
+  { key: 'frefGHz', label: <M>{'f_{ref}'}</M>, def: 4, min: 0.1, max: 20, step: 0.1, unit: 'GHz' },
+  {
+    key: 'pMax',
+    label: (
+      <>
+        搜尋上限 <M>{'P_{max}'}</M>
+      </>
+    ),
+    def: 64,
+    min: 1,
+    max: EX_N_SIM / 2,
+    step: 1,
+  },
+];
+
+function exSpurCompute(v: Record<string, number>) {
+  const cfg = fromPartial({
+    n_div: v.nDiv,
+    f_ref_hz: v.frefGHz * 1e9,
+    n_cycles: EX_N_SIM,
+    quantizer: 'nearest',
+  });
+  const g = configG(cfg);
+  const res = simulate(cfg);
+  const e = res.data.e_ZC_hw;
+  const frac = wrap01(g * cfg.n_div); // 每拍 fine code 的小數增量
+  const p = findPeriod(e, qFloor(v.pMax), EX_PERIOD_TOL);
+  const eRmsLsb = rms(e) * g;
+  const mMax = p === null ? 0 : qFloor(p / 2);
+  const fSpur1 = p === null ? Number.NaN : cfg.f_ref_hz / p;
+  const list: string[] = [];
+  if (p !== null) {
+    for (let m = 1; m <= Math.min(mMax, 4); m++) {
+      list.push(fmt((m * cfg.f_ref_hz) / p / 1e6, 6));
+    }
+  }
+  return {
+    steps: [
+      {
+        label: (
+          <>
+            每拍 fine code 增量 <M>{'G\\,N'}</M>
+          </>
+        ),
+        value: fmt(g * cfg.n_div, 10, 'LSB'),
+      },
+      {
+        label: (
+          <>
+            其小數部分 <M>{'\\operatorname{wrap01}(G N)'}</M>
+          </>
+        ),
+        value: fmt(frac, 8, 'LSB'),
+      },
+      {
+        label: <>模擬 {EX_N_SIM} 拍後 e_ZC,hw 的 rms</>,
+        value: fmt(eRmsLsb, 6, 'LSB'),
+      },
+      {
+        label: (
+          <>
+            最小重複週期 <M>{'P'}</M>(逐位比較,容差 {fmt(EX_PERIOD_TOL, 2)} cyc)
+          </>
+        ),
+        value: p === null ? `> ${qFloor(v.pMax)}(未在搜尋範圍內重複)` : `${p} 拍`,
+      },
+      {
+        label: (
+          <>
+            基頻 <M>{'f_{ref}/P'}</M>
+          </>
+        ),
+        value: p === null ? '—' : fmt(fSpur1 / 1e6, 7, 'MHz'),
+      },
+      {
+        label: (
+          <>
+            spur 序號範圍 <M>{'m = 1..\\lfloor P/2 \\rfloor'}</M>
+          </>
+        ),
+        value: p === null ? '—' : mMax === 0 ? '無(P = 1,誤差為 DC)' : `1 .. ${mMax}`,
+      },
+      {
+        label: (
+          <>
+            前幾根 spur <M>{'m\\,f_{ref}/P'}</M>
+          </>
+        ),
+        value: list.length === 0 ? '—' : `${list.join(', ')} MHz`,
+      },
+    ],
+    answer:
+      p === null ? (
+        <>
+          在 <M>{'P \\le'}</M> {qFloor(v.pMax)} 內找不到週期:誤差序列非短週期,頻譜呈現密集
+          tone 或近似 floor
+        </>
+      ) : mMax === 0 ? (
+        <>
+          <M>{'P'}</M> = 1:e_ZC,hw 每拍相同(rms = {fmt(eRmsLsb, 6, 'LSB')}),能量集中在
+          DC,不產生 spur
+        </>
+      ) : (
+        <>
+          <M>{'P'}</M> = {p} → spur 位於 <M>{'m\\,f_{ref}/P'}</M> ={' '}
+          {fmt(fSpur1 / 1e6, 7, 'MHz')} 的整數倍,<M>{'m'}</M> = 1..{mMax}
+        </>
+      ),
+    warn:
+      p !== null && p > EX_N_SIM / 4
+        ? `P = ${p} 已接近 ${EX_N_SIM} 拍模擬能可靠判定的上限,建議在圖 #17 用更長序列確認`
+        : undefined,
+  };
+}
+
+const EX_FOLD_INPUTS = [
+  {
+    key: 'ePkLsb',
+    label: (
+      <>
+        peak <M>{'|e_{FB,abs}|'}</M>
+      </>
+    ),
+    def: 1.76,
+    min: 0.01,
+    max: 128,
+    step: 0.01,
+    unit: 'LSB',
+  },
+  { key: 'order', label: <>DSM 階數 <M>{'m'}</M></>, def: 3, min: 1, max: 5, step: 1 },
+  {
+    key: 'foffMHz',
+    label: <>offset 頻率 <M>{'f'}</M></>,
+    def: 100,
+    min: 0.01,
+    max: 2000,
+    step: 1,
+    unit: 'MHz',
+  },
+  { key: 'frefGHz', label: <M>{'f_{ref}'}</M>, def: 4, min: 0.1, max: 20, step: 0.1, unit: 'GHz' },
+];
+
+function exFoldCompute(v: Record<string, number>) {
+  const cfg = fromPartial({ f_ref_hz: v.frefGHz * 1e9 });
+  const g = configG(cfg);
+  const m = qFloor(v.order);
+  const fHz = v.foffMHz * 1e6;
+  const epsPk = cyclesToRadians(v.ePkLsb / g); // rad
+  const hAmp = (2 * Math.sin((Math.PI * fHz) / cfg.f_ref_hz)) ** m; // |1-e^{-j2pi f/fref}|^m
+  const hDb = db20(hAmp);
+  const aShaped = epsPk * hAmp;
+  const dbcShaped = toneAmpToDbc(aShaped);
+  const foldRatio = (epsPk * epsPk) / 6; // sin map 三階項相對線性項
+  const foldDb = db20(foldRatio);
+  const marginDb = foldDb - hDb;
+  return {
+    steps: [
+      {
+        label: (
+          <>
+            <M>{'\\varepsilon_{pk} = 2\\pi\\,e_{pk}/G'}</M>
+          </>
+        ),
+        value: fmt(epsPk, 7, 'rad'),
+      },
+      {
+        label: (
+          <>
+            NTF 幅度 <M>{'(2\\sin(\\pi f/f_{ref}))^{m}'}</M>
+          </>
+        ),
+        value: fmt(hAmp, 7),
+      },
+      {
+        label: <>換成 dB(振幅,20log10)</>,
+        value: fmt(hDb, 7, 'dB'),
+      },
+      {
+        label: (
+          <>
+            shaped in-band tone 幅度 <M>{'\\varepsilon_{pk}\\cdot H'}</M>
+          </>
+        ),
+        value: fmt(aShaped, 7, 'rad'),
+      },
+      {
+        label: (
+          <>
+            其 SSB 位準 <M>{'20\\log_{10}(a/2)'}</M>
+          </>
+        ),
+        value: fmt(dbcShaped, 7, 'dBc'),
+      },
+      {
+        label: (
+          <>
+            sin map 三階折返相對量 <M>{'\\varepsilon_{pk}^{2}/6'}</M>
+          </>
+        ),
+        value: `${fmt(foldRatio, 7)} = ${fmt(foldDb, 7, 'dB')}`,
+      },
+      {
+        label: <>折返相對 shaped in-band tone 的裕度</>,
+        value: fmt(marginDb, 7, 'dB'),
+      },
+    ],
+    answer: (
+      <>
+        shaped tone = {fmt(dbcShaped, 7, 'dBc')}(NTF 抑制 {fmt(hDb, 7, 'dB')});三階折返{' '}
+        {fmt(foldDb, 7, 'dB')},比 shaped tone 低 {fmt(-marginDb, 6, 'dB')} →{' '}
+        {marginDb < 0 ? 'shaping 在 in-band 存活' : '折返主導,shaping 失效'}
+      </>
+    ),
+    warn:
+      marginDb >= 0
+        ? `折返項高於 shaped in-band tone(裕度 ${fmt(marginDb, 4)} dB):injection 非線性把高頻 shaped noise 折回 in-band,量到的 floor 不再是 (2sin)^m`
+        : undefined,
+  };
+}
+
 export default function Chapter16() {
   const { unit } = useUnit();
   const ct = useChartTheme();
@@ -213,6 +632,69 @@ export default function Chapter16() {
   useEffect(() => {
     setStatus('done', `${preset.label}: ${nCycles} cycles → PSD(fs = f_ref = 4 GHz)`);
   }, [preset, nCycles, setStatus]);
+
+  /* -------------------------------------- spur summary table(全 N presets) */
+
+  // job = 使用者按下按鈕當下的 snapshot(threshold 用當時的值,之後滑動
+  // slider 不會偷偷重跑);null = 尚未執行過。
+  const [spurSummaryJob, setSpurSummaryJob] = useState<{ token: number; thresholdDb: number } | null>(
+    null,
+  );
+  const [spurSummaryRows, setSpurSummaryRows] = useState<SpurSummaryRow[] | null>(null);
+  const [spurSummaryPending, setSpurSummaryPending] = useState(false);
+
+  useEffect(() => {
+    if (spurSummaryJob === null) return;
+    setSpurSummaryPending(true);
+    setStatus(
+      'running',
+      `spur summary:掃描全部 ${N_DIV_ALL_PRESETS.length} 個 N presets(${SPUR_SUMMARY_N_CYCLES} cycles)…`,
+    );
+    // post-paint:先讓 spinner 畫出來,再跑 13 次 simulate()。
+    const id = window.setTimeout(() => {
+      const rows = computeSpurSummary(spurSummaryJob.thresholdDb);
+      setSpurSummaryRows(rows);
+      setSpurSummaryPending(false);
+      setStatus(
+        'done',
+        `spur summary:${N_DIV_ALL_PRESETS.length} 個 N presets(threshold = median + ${spurSummaryJob.thresholdDb} dB)`,
+      );
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [spurSummaryJob, setStatus]);
+
+  const spurSummaryTableRows = useMemo(() => {
+    if (spurSummaryRows === null) return [];
+    const out: Record<string, unknown>[] = [];
+    for (const r of spurSummaryRows) {
+      if (r.detections.length === 0) {
+        out.push({
+          id: r.id,
+          n_label: r.nLabel,
+          P: r.P ?? '—',
+          spacing_mhz: r.spacingMhz,
+          rank: '—',
+          f_mhz: null,
+          level_dbc_hz: null,
+          note: '(無 spur ≥ threshold)',
+        });
+        continue;
+      }
+      r.detections.forEach((d, i) => {
+        out.push({
+          id: r.id,
+          n_label: r.nLabel,
+          P: r.P ?? '—',
+          spacing_mhz: r.spacingMhz,
+          rank: i + 1,
+          f_mhz: d.fMhz,
+          level_dbc_hz: d.levelDbcHz,
+          note: '',
+        });
+      });
+    }
+    return out;
+  }, [spurSummaryRows]);
 
   /* ------------------------------------------------------------ 圖表選項 */
 
@@ -550,6 +1032,58 @@ export default function Chapter16() {
             能量集中於 DC,不產生 spur 也不抬 floor。<EpistemicTag kind="EXACT" />
           </li>
         </ol>
+
+        <ExampleProblem
+          index={1}
+          tag="EXACT"
+          title="tone 幅度 → dBc,以及 FFT 的頻率刻度"
+          prompt={
+            <>
+              phase 序列裡有一根幅度 <M>{'a'}</M> 的 tone(以 fine LSB 給定,
+              <M>{'1\\,\\mathrm{LSB}=1/G'}</M> cycle)。先換成 rad
+              (<M>{'1'}</M> cycle <M>{'=2\\pi'}</M> rad),再用 §17 的 dBc convention{' '}
+              <M>{'\\mathrm{SSB}=20\\log_{10}(a/2)'}</M> 求 spur 位準;同時算出取樣率{' '}
+              <M>{'=f_{ref}'}</M> 下長度 <M>{'N'}</M> 的 FFT bin 間距 <M>{'f_{ref}/N'}</M>。
+            </>
+          }
+          inputs={EX_DBC_INPUTS}
+          compute={exDbcCompute}
+        />
+
+        <ExampleProblem
+          index={2}
+          tag="EXPERIMENT"
+          title="量化誤差的週期 P 與 spur 間距"
+          prompt={
+            <>
+              給定 <M>{'N'}</M>,fine code 每拍前進 <M>{'G N'}</M> LSB,其小數部分決定量化誤差的
+              重複週期。跑 {EX_N_SIM} 拍模擬(<code>quantizer=&apos;nearest&apos;</code>),
+              直接從 <M>{'e_{ZC,hw}'}</M> 序列找最小的 <M>{'P'}</M>,再依{' '}
+              <M>{'f_{spur,m}=\\frac{m}{P}f_{ref}'}</M>、<M>{'m=1..\\lfloor P/2\\rfloor'}</M>{' '}
+              算出 spur 位置。
+            </>
+          }
+          inputs={EX_SPUR_INPUTS}
+          compute={exSpurCompute}
+        />
+
+        <ExampleProblem
+          index={3}
+          tag="APPROX"
+          title="Shaping 預算:NTF 抑制 vs injection 非線性折返"
+          prompt={
+            <>
+              m 階 phase DSM 的 in-band 抑制為{' '}
+              <M>{'|1-e^{-j2\\pi f/f_{ref}}|^{m}=(2\\sin(\\pi f/f_{ref}))^{m}'}</M>;
+              但 sin injection map 的三階項會把高頻 shaped noise 折回 in-band,相對量約{' '}
+              <M>{'\\varepsilon_{pk}^{2}/6'}</M>。給定 peak 量化誤差(LSB)、DSM 階數與 offset
+              頻率,算出 shaped in-band tone 的 dBc、折返的 dB,以及兩者的裕度 — 判斷 shaping
+              是否在 in-band 存活。
+            </>
+          }
+          inputs={EX_FOLD_INPUTS}
+          compute={exFoldCompute}
+        />
       </SectionExample>
 
       <SectionFigure
@@ -631,6 +1165,98 @@ export default function Chapter16() {
             PSD <strong>逐位一致</strong>(純數位路徑 tolerance 1e-12,含 noise
             路徑 1e-9,libm 差異)。<EpistemicTag kind="EXACT" /> 表格的 CSV export
             可直接 diff 對照。
+          </p>
+        </Callout>
+      </SectionFigure>
+
+      <SectionFigure
+        title="圖 #18b — Spur Summary Table:全部 N presets 一鍵掃描"
+        caption={
+          <span>
+            一鍵對 lib/globalParams 的全部 {N_DIV_ALL_PRESETS.length} 個 N presets(基本
+            5 個 + sub-LSB 階梯 4 個 + 特殊 4 個)各重跑一次模擬 —— quantizer =
+            nearest(章節目前所有 error-signature preset 明講或預設都落在這個值)、
+            其餘欄位 defaultConfig(無 injection/noise,純 feedback quantization),
+            {SPUR_SUMMARY_N_CYCLES} cycles(Δf = {trimNumber(4000 / SPUR_SUMMARY_N_CYCLES, 4)} MHz)。
+            對每個 N 的 e_ZC_total 跑 detectSpurs(threshold 取自上方 spur threshold
+            slider,按下當下的值),表列 top-5(依 level 降冪)。「predicted f_ref/P」
+            欄位是 MODEL_SPEC §1.1 的封閉式公式(P = q/gcd(q, 256),
+            <M>{'\\alpha = N - 3'}</M> 約分 p/q);P = 1 表示 on-grid、e_FB ≡ 0、
+            <strong>沒有</strong> fractional spur,顯示「—」。<EpistemicTag kind="EXPERIMENT" />
+          </span>
+        }
+      >
+        <div style={{ marginBottom: '0.75rem' }}>
+          <button
+            type="button"
+            className="preset-button"
+            disabled={spurSummaryPending}
+            onClick={() => setSpurSummaryJob({ token: Date.now(), thresholdDb })}
+          >
+            {spurSummaryPending
+              ? '掃描中…'
+              : spurSummaryRows === null
+                ? `掃描全部 ${N_DIV_ALL_PRESETS.length} 個 N presets`
+                : `重新掃描(threshold = median + ${trimNumber(thresholdDb, 3)} dB)`}
+          </button>
+        </div>
+        {spurSummaryRows === null && !spurSummaryPending && (
+          <p style={{ opacity: 0.75 }}>尚未執行 —— 按上方按鈕開始(13 次 simulate(),post-paint)。</p>
+        )}
+        {spurSummaryTableRows.length > 0 && (
+          <div style={{ marginTop: '0.5rem' }}>
+            <DebugTable
+              columns={[
+                { key: 'id', label: 'id' },
+                { key: 'n_label', label: 'N' },
+                { key: 'P', label: 'P(DTC grid)' },
+                {
+                  key: 'spacing_mhz',
+                  label: 'predicted f_ref/P(MHz)',
+                  fmt: (v) => (v === null || v === undefined ? '—' : trimNumber(Number(v), 6)),
+                },
+                { key: 'rank', label: '#' },
+                {
+                  key: 'f_mhz',
+                  label: 'f(MHz)',
+                  fmt: (v) => (v === null || v === undefined ? '—' : trimNumber(Number(v), 6)),
+                },
+                {
+                  key: 'level_dbc_hz',
+                  label: 'level(dBc/Hz)',
+                  fmt: (v) => (v === null || v === undefined ? '—' : trimNumber(Number(v), 5)),
+                },
+                { key: 'note', label: '備註' },
+              ]}
+              rows={spurSummaryTableRows}
+              maxHeight={420}
+              exportName="ch16_spur_summary.csv"
+            />
+          </div>
+        )}
+        <Callout type="note" title="F8 與 on-grid 列的預期結果(讀表前先看這裡)">
+          <p>
+            <strong>F8(3.1545084971874737,irrational α)</strong>:MODEL_SPEC §1.1 標註
+            quasi-periodic、<strong>無離散 spur</strong>——float64 嚴格來說仍是有理數
+            (週期 <M>{'P = 2^{43}'}</M>),但遠長於任何模擬長度,實務上等同無理數,
+            合理地<strong>沒有穩定的 discrete comb</strong>可供 predicted f_ref/P 對照;
+            表中該列會列出 detectSpurs 抓到的 local maxima(若有),但那是有限視窗
+            leakage 造成的統計突起,不是可重現的 tone —— 這正是它與其他列的本質差異。
+            <EpistemicTag kind="APPROX" />
+          </p>
+          <p>
+            <strong>on-grid 列(F6 = 3.22265625、3.000、3.125,以及 3.25)</strong>:
+            P = 1 表示 α·G 恰為整數、DTC grid 上 e_FB_abs ≡ 0 逐拍精確成立,
+            e_ZC_total 全序列為 0 —— PSD 沒有能量、detectSpurs
+            <strong>什麼都找不到</strong>,表中顯示「(無 spur ≥ threshold)」。
+            <EpistemicTag kind="EXACT" />
+          </p>
+          <p>
+            <strong>額外一個邊界情況:F1</strong>(3.126953125,半 LSB tie,P = 2)predicted
+            f_ref/P 恰好等於 <strong>Nyquist</strong>(2000 MHz)—— 與本章圖 #17+#18
+            討論過的「Nyquist 端點無紅點」是同一個 detectSpurs 邊界(local-maximum
+            定義不含端點),所以 F1 這列也常顯示「無 spur」,並非模型算錯,
+            而是偵測方法的已知限制。<EpistemicTag kind="EXPERIMENT" />
           </p>
         </Callout>
       </SectionFigure>
