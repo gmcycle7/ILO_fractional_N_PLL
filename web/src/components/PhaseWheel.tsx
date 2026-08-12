@@ -35,6 +35,15 @@ export interface WheelArc {
   width?: number;
 }
 
+export interface WheelTrailPoint {
+  angleCycles: number;
+  color?: string;
+  /** radius fraction (default 0.8) */
+  r?: number;
+  /** fill opacity, 0..1 (default 0.4) */
+  opacity?: number;
+}
+
 export interface PhaseWheelProps {
   /** fixed reference positions on the ring (e.g. the 8 injection taps) */
   taps?: WheelTap[];
@@ -42,6 +51,8 @@ export interface PhaseWheelProps {
   markers: WheelMarker[];
   /** highlighted angular ranges */
   arcs?: WheelArc[];
+  /** fading history dots (e.g. previous landing points), drawn under the needles */
+  trail?: WheelTrailPoint[];
   /** rendered pixel size (square), default 260 */
   size?: number;
   /** animate marker needle rotation (CSS transition) */
@@ -69,6 +80,7 @@ export default function PhaseWheel({
   taps,
   markers,
   arcs,
+  trail,
   size = 260,
   animateToMarker = false,
   title,
@@ -159,6 +171,21 @@ export default function PhaseWheel({
                 {tap.label}
               </text>
             </g>
+          );
+        })}
+
+        {/* trail: fading history dots (no labels, drawn under the needles) */}
+        {trail?.map((p, i) => {
+          const q = pt(wrap01(p.angleCycles), (p.r ?? 0.8) * R);
+          return (
+            <circle
+              key={`tr${i}`}
+              cx={q.x}
+              cy={q.y}
+              r={3}
+              fill={p.color ?? 'var(--fg-subtle)'}
+              opacity={p.opacity ?? 0.4}
+            />
           );
         })}
 

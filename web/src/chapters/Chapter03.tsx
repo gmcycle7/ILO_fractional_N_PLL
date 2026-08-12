@@ -3,6 +3,7 @@
  *
  * Content contract: CHAPTER_GUIDE.md Ch3; math contract MODEL_SPEC.md §3.
  * Figures: #2 animated phase wheel (+alpha per cycle, play/pause/step),
+ * #2b gear/odometer animation (3 full turns + alpha per tick, n_int counter),
  * #5 absolute coordinate staircase, #6 fractional accumulator plot,
  * cycle-by-cycle table. 5 preset N values.
  */
@@ -42,6 +43,65 @@ const meta = chapterById(3)!;
 
 const N_CYCLES = 128; // interactive figures stay <= 1024 cycles
 const STAIR_CYCLES = 24;
+
+// ---- figure #2b (gear / odometer) geometry + timing ----
+const GEAR_CYCLES = 32; // beats shown by the odometer strip
+const GEAR_PERIOD_MS = 900; // Play cadence: one reference beat
+const GEAR_SPIN_MS = 520; // dial spin duration (ease-out), < GEAR_PERIOD_MS
+const CLK_PITCH = 9; // px per reference period in the REF clock SVG
+const CLK_X0 = 6;
+const CLK_HI = 18;
+const CLK_LO = 36;
+const CLK_W = CLK_X0 + GEAR_CYCLES * CLK_PITCH + 6;
+const DIAL_VB = 200;
+const DIAL_C = DIAL_VB / 2;
+const DIAL_R = 72;
+
+/** REF clock square wave path — display packaging only, no math */
+function refClockPath(): string {
+  const parts: string[] = [`M ${CLK_X0 - CLK_PITCH / 2} ${CLK_LO}`];
+  for (let i = 0; i < GEAR_CYCLES; i++) {
+    const x = CLK_X0 + i * CLK_PITCH;
+    parts.push(`L ${x} ${CLK_LO}`, `L ${x} ${CLK_HI}`);
+    parts.push(`L ${x + CLK_PITCH / 2} ${CLK_HI}`, `L ${x + CLK_PITCH / 2} ${CLK_LO}`);
+  }
+  return parts.join(' ');
+}
+
+/** dial angle (cycles) -> point; 0 cycles at 12 o'clock, clockwise positive */
+function dialPt(angleCycles: number, r: number): { x: number; y: number } {
+  const a = 2 * Math.PI * angleCycles;
+  return { x: DIAL_C + r * Math.sin(a), y: DIAL_C - r * Math.cos(a) };
+}
+
+const DIAL_LABELS = ['0', '1/8', '1/4', '3/8', '1/2', '5/8', '3/4', '7/8'];
+
+/** odometer 讀數格(純顯示;數值一律由 model 算好後傳入) */
+function OdoCell({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
+  return (
+    <div
+      style={{
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--radius)',
+        background: 'var(--bg-alt)',
+        padding: '8px 14px',
+        minWidth: 160,
+      }}
+    >
+      <div style={{ fontSize: '0.75rem', color: 'var(--fg-subtle)' }}>{label}</div>
+      <div
+        style={{
+          fontFamily: 'var(--font-mono)',
+          fontSize: '1.35rem',
+          lineHeight: 1.5,
+          color: accent ? 'var(--accent)' : 'var(--fg)',
+        }}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
 
 const PRESET_N: { label: string; value: number }[] = [
   { label: '3.000', value: 3.0 },
@@ -90,6 +150,10 @@ export default function Chapter03() {
   const [alpha, setAlpha] = useChapterAlpha();
   const [wheelK, setWheelK] = useState(0);
   const [playing, setPlaying] = useState(false);
+  // figure #2b: { k, snap } — snap = true 時不做 CSS transition(reset / 回捲那拍)
+  const [gear, setGear] = useState<{ k: number; snap: boolean }>({ k: 0, snap: true });
+  const [gearPlaying, setGearPlaying] = useState(false);
+  const [reduceMotion, setReduceMotion] = useState(false);
   const { unit } = useUnit();
   const ct = useChartTheme();
   const { setStatus } = useSimStatus();
@@ -115,6 +179,26 @@ export default function Chapter03() {
     return () => window.clearInterval(id);
   }, [playing]);
 
+  // ---- figure #2b: gear / odometer animation state ----
+  useEffect(() => {
+    if (!gearPlaying) return undefined;
+    const id = window.setInterval(() => {
+      setGear((p) => {
+        const next = p.k + 1;
+        return next >= GEAR_CYCLES ? { k: 0, snap: true } : { k: next, snap: false };
+      });
+    }, GEAR_PERIOD_MS);
+    return () => window.clearInterval(id);
+  }, [gearPlaying]);
+
+  useEffect(() => {
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const apply = () => setReduceMotion(mq.matches);
+    apply();
+    mq.addEventListener('change', apply);
+    return () => mq.removeEventListener('change', apply);
+  }, []);
+
   const sArr = result.data.s_ideal;
   const xArr = result.data.x_ideal;
   const xNow = xArr[wheelK];
@@ -130,6 +214,28 @@ export default function Chapter03() {
       r: 0.58,
     });
   }
+
+  // ---- figure #2b: odometer = qFloor(s_ideal) 與其每拍增量 n_int ----
+  const gearData = useMemo(() => {
+    const iFloor = new Float64Array(GEAR_CYCLES);
+    const nInt = new Float64Array(GEAR_CYCLES);
+    for (let k = 0; k < GEAR_CYCLES; k++) {
+      iFloor[k] = qFloor(sArr[k]); // 已消化的完整 VCO cycle 數
+      nInt[k] = k === 0 ? Number.NaN : iFloor[k] - iFloor[k - 1]; // /3-/4 divider 指令
+    }
+    return { iFloor, nInt };
+  }, [sArr]);
+
+  const gearK = gear.k;
+  const gearDeg = 360 * sArr[gearK]; // 累積轉角(度):每拍前進 360N,故實轉 3 圈 + α
+  const gearSpin = gear.snap || reduceMotion ? 'none' : `transform ${GEAR_SPIN_MS}ms ease-out`;
+  const gearNInt = gearData.nInt[gearK];
+
+  const stepGear = () =>
+    setGear((p) => {
+      const next = p.k + 1;
+      return next >= GEAR_CYCLES ? { k: 0, snap: true } : { k: next, snap: false };
+    });
 
   // ---- figure #5: absolute coordinate staircase ----
   const stairOption = useMemo(() => {
@@ -359,6 +465,275 @@ export default function Chapter03() {
       </SectionFigure>
 
       <SectionFigure
+        title="圖 #2b — 齒輪 / 里程計:每拍轉 3 圈 + α"
+        caption={
+          <span>
+            左邊 REF clock 的 x 軸是 reference cycle k(每個 pulse = 一拍,sample rate = f_ref,
+            無量綱計數);右邊 VCO 錶盤的角度單位是 VCO cycle(整圈 = 1 cycle = 360°),needle 的
+            累積轉角為 <code>360 × s_ideal[k]</code> 度——每按一拍它會真的轉過 3 整圈再多 α 圈,
+            最後落在 <code>x_ideal[k]</code>。下方 odometer:左格是{' '}
+            <code>floor(s_ideal[k])</code>(單位 VCO cycles,到第 k 拍為止已消化的完整 cycle 數),
+            中格是它的每拍增量,也就是 /3-/4 divider 的指令 <code>n_int</code>
+            (單位 VCO cycles/拍,只會是 3 或 4,4 以 accent 標色),右格是餘數{' '}
+            <code>x_ideal[k]</code>(顯示單位隨 <UnitSwitch /> 切換)。
+            <strong>
+              wrap01 丟掉的正是這些整圈,而 /3-/4 divider 負責把它們吞掉——上面那個 phase wheel
+              永遠只看得到餘數。
+            </strong>
+            這裡的 <code>n_int</code> 由 <code>qFloor(s_ideal)</code> 的逐拍差分算出;以 nearest
+            quantizer、5 個 preset、512 拍實算比對,與 Ch4 由 <M>{'I_{FB}'}</M> 差分得到的{' '}
+            <code>n_int</code> 逐拍相同(僅索引差一拍:此處記在「抵達」的那一拍)。
+            <EpistemicTag kind="EXACT" /> Play 每 {GEAR_PERIOD_MS / 1000} s 前進一拍(轉盤動畫{' '}
+            {GEAR_SPIN_MS / 1000} s ease-out);到 k = {GEAR_CYCLES - 1} 後回到 0 且不做反向動畫;
+            系統設為 reduced motion 時直接跳格。N 由右側 α slider / preset N 控制。
+          </span>
+        }
+      >
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 20, alignItems: 'flex-start' }}>
+          {/* --- REF clock:每拍一個 pulse --- */}
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+            <svg
+              width={CLK_W}
+              height={62}
+              viewBox={`0 0 ${CLK_W} 62`}
+              role="img"
+              aria-label="reference clock"
+            >
+              <path d={refClockPath()} fill="none" className="wheel-tick" />
+              <line
+                x1={CLK_X0 + gearK * CLK_PITCH}
+                y1={10}
+                x2={CLK_X0 + gearK * CLK_PITCH}
+                y2={44}
+                stroke="var(--accent)"
+                strokeWidth={1.5}
+              />
+              <circle
+                cx={CLK_X0 + gearK * CLK_PITCH}
+                cy={CLK_HI}
+                r={3.2}
+                fill="var(--accent)"
+              />
+              {[0, 8, 16, 24].map((k) => (
+                <text
+                  key={`ck${k}`}
+                  x={CLK_X0 + k * CLK_PITCH}
+                  y={58}
+                  className="wheel-tick-label"
+                >
+                  {k}
+                </text>
+              ))}
+            </svg>
+            <div className="phase-wheel-title">
+              REF clock:第 <strong>k = {gearK}</strong> 個 reference edge
+            </div>
+          </div>
+
+          {/* --- VCO 錶盤:累積轉角 360·s_ideal[k] --- */}
+          <figure className="phase-wheel">
+            <svg
+              width={220}
+              height={220}
+              viewBox={`0 0 ${DIAL_VB} ${DIAL_VB}`}
+              role="img"
+              aria-label="VCO revolution dial"
+            >
+              <circle cx={DIAL_C} cy={DIAL_C} r={DIAL_R} className="wheel-ring" />
+              {Array.from({ length: 32 }, (_, i) => {
+                if (i % 4 === 0) return null;
+                const p1 = dialPt(i / 32, DIAL_R - 4);
+                const p2 = dialPt(i / 32, DIAL_R);
+                return (
+                  <line
+                    key={`dmi${i}`}
+                    x1={p1.x}
+                    y1={p1.y}
+                    x2={p2.x}
+                    y2={p2.y}
+                    className="wheel-tick"
+                  />
+                );
+              })}
+              {Array.from({ length: 8 }, (_, i) => {
+                const p1 = dialPt(i / 8, DIAL_R - 9);
+                const p2 = dialPt(i / 8, DIAL_R);
+                const lp = dialPt(i / 8, DIAL_R + 15);
+                return (
+                  <g key={`dma${i}`}>
+                    <line
+                      x1={p1.x}
+                      y1={p1.y}
+                      x2={p2.x}
+                      y2={p2.y}
+                      className="wheel-tick wheel-tick-major"
+                    />
+                    <text x={lp.x} y={lp.y + 3} className="wheel-tick-label">
+                      {DIAL_LABELS[i]}
+                    </text>
+                  </g>
+                );
+              })}
+              {/* 12 點鐘 datum:α = 0 時 needle 每拍都停在這裡 */}
+              <line
+                x1={DIAL_C}
+                y1={DIAL_C - DIAL_R - 6}
+                x2={DIAL_C}
+                y2={DIAL_C - DIAL_R + 12}
+                stroke="var(--fg)"
+                strokeWidth={2}
+              />
+              <g
+                style={{
+                  transform: `rotate(${gearDeg}deg)`,
+                  transformOrigin: '50% 50%',
+                  transformBox: 'view-box',
+                  transition: gearSpin,
+                }}
+              >
+                <line
+                  x1={DIAL_C}
+                  y1={DIAL_C}
+                  x2={DIAL_C}
+                  y2={DIAL_C - DIAL_R * 0.82}
+                  stroke="var(--accent)"
+                  strokeWidth={2}
+                />
+                <circle
+                  cx={DIAL_C}
+                  cy={DIAL_C - DIAL_R * 0.82}
+                  r={4.5}
+                  fill="var(--accent)"
+                />
+              </g>
+              <circle cx={DIAL_C} cy={DIAL_C} r={2.5} className="wheel-center" />
+            </svg>
+            <figcaption className="phase-wheel-title">
+              s_ideal[{gearK}] = {trimNumber(sArr[gearK], 6)} cyc → 累積轉角{' '}
+              {trimNumber(gearDeg, 8)}°
+            </figcaption>
+          </figure>
+
+          {/* --- 控制 --- */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 250 }}>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="preset-button"
+                onClick={() => setGearPlaying((p) => !p)}
+              >
+                {gearPlaying ? 'Pause' : 'Play'}
+              </button>
+              <button
+                type="button"
+                className="preset-button"
+                onClick={() => {
+                  setGearPlaying(false);
+                  stepGear();
+                }}
+              >
+                Step +1
+              </button>
+              <button
+                type="button"
+                className="preset-button"
+                onClick={() => {
+                  setGearPlaying(false);
+                  setGear({ k: 0, snap: true });
+                }}
+              >
+                Reset
+              </button>
+            </div>
+            <p style={{ margin: 0 }}>
+              每拍 needle 實際轉 <strong>{trimNumber(cfg.n_div, 6)}</strong> 圈 ={' '}
+              {trimNumber(360 * cfg.n_div, 7)}°:前 3 整圈被 /3-/4 divider 吞掉(記進 odometer),
+              只有多出來的 α = {trimNumber(alphaEff, 6)} 圈留在錶面上。
+            </p>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 12 }}>
+          <OdoCell
+            label="odometer:floor(s_ideal[k]) (VCO cycles)"
+            value={String(gearData.iFloor[gearK])}
+          />
+          <OdoCell
+            label="本拍增量 = divider 指令 n_int"
+            value={Number.isNaN(gearNInt) ? '—' : String(gearNInt)}
+            accent={gearNInt === 4}
+          />
+          <OdoCell
+            label="餘數 x_ideal[k] = wrap01(s_ideal[k])"
+            value={formatPhase(xArr[gearK], unit, tVco)}
+          />
+        </div>
+
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontSize: '0.75rem', color: 'var(--fg-subtle)', marginBottom: 4 }}>
+            n_int[k],k = 0…{GEAR_CYCLES - 1}(4 = 這一拍 divider 吞掉 4 個 VCO cycles;
+            底線標出目前拍)
+          </div>
+          <div style={{ overflowX: 'auto', paddingBottom: 4 }}>
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 2,
+                width: GEAR_CYCLES * 25 - 3,
+              }}
+            >
+              <div style={{ display: 'flex', gap: 3 }}>
+                {Array.from({ length: GEAR_CYCLES }, (_, k) => {
+                  const v = gearData.nInt[k];
+                  const isFour = v === 4;
+                  return (
+                    <div
+                      key={`ni${k}`}
+                      title={`k = ${k}`}
+                      style={{
+                        flex: '0 0 auto',
+                        width: 22,
+                        textAlign: 'center',
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: '0.7rem',
+                        padding: '2px 0',
+                        borderRadius: 3,
+                        border: `1px solid ${isFour ? 'var(--accent)' : 'var(--border)'}`,
+                        background: isFour ? 'var(--accent-soft)' : 'var(--bg)',
+                        color: isFour ? 'var(--accent)' : 'var(--fg-subtle)',
+                        fontWeight: isFour ? 600 : 400,
+                        boxShadow: k === gearK ? 'inset 0 -3px 0 0 var(--fg)' : undefined,
+                      }}
+                    >
+                      {Number.isNaN(v) ? '—' : v}
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ display: 'flex', gap: 3 }}>
+                {Array.from({ length: GEAR_CYCLES }, (_, k) => (
+                  <div
+                    key={`nk${k}`}
+                    style={{
+                      flex: '0 0 auto',
+                      width: 22,
+                      textAlign: 'center',
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: '0.65rem',
+                      color: 'var(--fg-faint)',
+                    }}
+                  >
+                    {k % 4 === 0 ? k : ''}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      </SectionFigure>
+
+      <SectionFigure
         title="圖 #5 — absolute coordinate staircase"
         caption={
           <span>
@@ -456,6 +831,13 @@ export default function Chapter03() {
           <li>
             圖 #2:N = 3.130 時 needle 每拍順時針走 46.8°(0.13 cycle),第 8 拍從 0.91 wrap 到
             0.04;N = 3.000 時 needle 完全靜止(α = 0);N = 3.250 時每 4 拍回到原位。
+          </li>
+          <li>
+            圖 #2b:N = 3.130 時 needle 每拍實轉 3.13 圈(1126.8°),odometer 大多每拍 +3,只有
+            wrap 那拍 +4;前四個 4-command 落在 k = 8、16、24、31(注意不是 32:0.13 × 31 = 4.03
+            已跨過第 4 個整圈),100 拍裡恰有 13 個 4。N = 3.000 時 needle 每拍精確轉 3 整圈、
+            每次都停回 12 點鐘 datum,n_int 恆為 3、餘數恆為 0——錶面完全看不出 VCO 轉了多少圈,
+            只有 odometer 記得。<EpistemicTag kind="EXACT" />
           </li>
           <li>
             圖 #5:實線斜率恰為 N(每拍 +3.13 cycles),階梯每拍升 3 格、偶爾升 4 格——升 4

@@ -32,10 +32,24 @@ import PhaseWheel from '../components/PhaseWheel';
 import DebugTable from '../components/DebugTable';
 import { makeLineOption, makeMarkLine, type LineSeriesSpec } from '../lib/chartOptions';
 import { useChartTheme } from '../lib/useChartTheme';
-import { formatPhase, phaseAxisLabel, makePhaseTickFormatter, trimNumber } from '../lib/format';
+import {
+  formatPhase,
+  formatSiTime,
+  phaseAxisLabel,
+  makePhaseTickFormatter,
+  trimNumber,
+} from '../lib/format';
 import { useSimStatus } from '../SimStatusContext';
 import { chapterById } from './index';
-import { simulate, fromPartial, xIdeal, uInjIdeal, wrap01, type Quantizer } from '../model';
+import {
+  simulate,
+  fromPartial,
+  xIdeal,
+  uInjIdeal,
+  wrap01,
+  wrapCycles,
+  type Quantizer,
+} from '../model';
 
 const meta = chapterById(6)!;
 
@@ -56,6 +70,215 @@ function withMarkLine(
   const s = (option as unknown as { series?: Record<string, unknown>[] }).series;
   if (s && s[idx]) s[idx].markLine = ml;
   return option;
+}
+
+/**
+ * 時域波形落點動畫的純 SVG 渲染(SSR-safe:無 window / timer 存取;
+ * 動畫狀態由 Chapter06 的既有 Play/Pause/Step pattern 驅動)。
+ * 所有落點數值(u_FB_digital、u_INJ_digital、x_ideal、u_INJ_ideal)皆來自 ../model。
+ */
+interface LandingWaveformProps {
+  k: number;
+  nDiv: number;
+  z0: number;
+  xNow: number; // x_ideal[k]
+  uIdealNow: number; // u_INJ_ideal[k] = wrap01(z0 − x_ideal[k])
+  uFb: number; // u_FB_digital[k] (cycles)
+  uInj: number; // u_INJ_digital[k] (cycles)
+  uFbHist: number[]; // 最近 ≤8 拍(含當拍)
+  uInjHist: number[];
+  kLo: number; // uFbHist/uInjHist 第一筆對應的 k
+  tVcoS: number;
+  tRefS: number;
+}
+
+function LandingWaveform(p: LandingWaveformProps) {
+  const L = 48;
+  const R = 706;
+  const W = R - L;
+  const Y0 = 78;
+  const AMP = 44;
+  const xOf = (tauCyc: number) => L + (tauCyc / p.nDiv) * W;
+  const clampX = (px: number) => Math.min(Math.max(px, L + 16), R - 16);
+  const psOf = (cyc: number) => formatSiTime(cyc * p.tVcoS);
+
+  // VCO differential sinusoid(示意渲染):v(τ) = sin(2π(x_ideal[k] + τ − z0)),
+  // rising zero crossings 落在 absolute phase 整數 + z0。
+  const NPTS = 220;
+  const pts: string[] = [];
+  for (let i = 0; i <= NPTS; i++) {
+    const tau = (p.nDiv * i) / NPTS;
+    const v = Math.sin(2 * Math.PI * (p.xNow + tau - p.z0));
+    pts.push(`${i === 0 ? 'M' : 'L'}${xOf(tau).toFixed(2)},${(Y0 - AMP * v).toFixed(2)}`);
+  }
+
+  // 視窗內全部 rising zero crossings:τ = wrap01(z0 − x) + j = u_INJ_ideal[k] + j
+  const crossings: number[] = [];
+  for (let t = p.uIdealNow; t <= p.nDiv + 1e-9; t += 1) crossings.push(t);
+  // INJ pulse 對準的 target crossing(modular nearest;nearest quantizer 下即 j=0)
+  const tTarget = p.uInj + wrapCycles(p.uIdealNow - p.uInj);
+
+  // 下三列 timeline strip:絕對時間 t ∈ [k−7, k+1](單位 T_ref)
+  const sX = (t: number) => L + ((t - (p.k - 7)) / 8) * W;
+  const fade = (j: number) => Math.max(0.15, 1 - Math.max(0, p.k - j) * 0.12);
+  const ROW_REF = 224;
+  const ROW_FB = 248;
+  const ROW_INJ = 272;
+
+  const fbX = xOf(p.uFb);
+  const injX = xOf(p.uInj);
+  const refTicks = Array.from({ length: p.k + 2 - p.kLo }, (_, i) => p.kLo + i);
+
+  return (
+    <svg
+      viewBox="0 0 720 292"
+      style={{ width: '100%', height: 'auto', display: 'block' }}
+      role="img"
+      aria-label="單一 T_ref 視窗內的 VCO 波形與 FB/INJ edge 落點動畫"
+    >
+      {/* ── 上圖:第 k 個 T_ref 視窗 ── */}
+      <text x={L} y={16} fontSize={11} fill="var(--fg-subtle)">
+        REF edge k = {p.k}
+      </text>
+      <text x={R} y={16} fontSize={11} fill="var(--fg-faint)" textAnchor="end">
+        REF edge k+1
+      </text>
+      <line x1={L} y1={22} x2={L} y2={150} stroke="var(--fg)" strokeWidth={1.6} />
+      <line
+        x1={R}
+        y1={22}
+        x2={R}
+        y2={150}
+        stroke="var(--border-strong)"
+        strokeWidth={1.2}
+        strokeDasharray="5 4"
+      />
+      <line x1={L} y1={Y0} x2={R} y2={Y0} stroke="var(--border)" strokeWidth={1} />
+      <path d={pts.join('')} fill="none" stroke="var(--fg-subtle)" strokeWidth={1.3} />
+      {crossings.map((t, i) => (
+        <circle key={`zc-${i}`} cx={xOf(t)} cy={Y0} r={3} fill="var(--fg-faint)" />
+      ))}
+      {tTarget >= 0 && tTarget <= p.nDiv && (
+        <circle
+          cx={xOf(tTarget)}
+          cy={Y0}
+          r={7}
+          fill="none"
+          stroke="var(--accent-strong)"
+          strokeWidth={1.8}
+        />
+      )}
+      {/* INJ pulse:垂直虛線,穿過 target crossing */}
+      <line
+        x1={injX}
+        y1={26}
+        x2={injX}
+        y2={150}
+        stroke="var(--fg)"
+        strokeWidth={1.4}
+        strokeDasharray="4 3"
+      />
+      <polygon points={`${injX - 4},158 ${injX + 4},158 ${injX},150`} fill="var(--fg)" />
+      {/* FB fractional delay 命令:marker row 上的 accent 刻度 */}
+      <line x1={fbX} y1={134} x2={fbX} y2={150} stroke="var(--accent)" strokeWidth={2.2} />
+      <line x1={L} y1={150} x2={R} y2={150} stroke="var(--border)" strokeWidth={1} />
+      {[0, 1, 2, 3, 4, 5].map((i) => {
+        const px = L + (i / 5) * W;
+        return (
+          <g key={`tick-${i}`}>
+            <line x1={px} y1={150} x2={px} y2={154} stroke="var(--fg-faint)" strokeWidth={1} />
+            <text x={px} y={166} fontSize={10} fill="var(--fg-faint)" textAnchor="middle">
+              {trimNumber((p.tRefS * 1e12 * i) / 5, 4)}
+              {i === 5 ? ' ps' : ''}
+            </text>
+          </g>
+        );
+      })}
+      <text x={clampX(fbX)} y={180} fontSize={10.5} fill="var(--accent)" textAnchor="middle">
+        FB {psOf(p.uFb)}
+      </text>
+      <text x={clampX(injX)} y={193} fontSize={10.5} fill="var(--fg)" textAnchor="middle">
+        INJ {psOf(p.uInj)}
+      </text>
+      <text
+        x={14}
+        y={Y0}
+        fontSize={10}
+        fill="var(--fg-faint)"
+        transform={`rotate(-90 14 ${Y0})`}
+        textAnchor="middle"
+      >
+        V_diff (a.u.)
+      </text>
+      {/* ── 下三列:最近 8 拍 edge 落點(絕對時間) ── */}
+      <text x={L} y={210} fontSize={10} fill="var(--fg-subtle)">
+        最近 8 拍 edge 落點(絕對時間,單位 T_ref;越舊越淡)
+      </text>
+      <rect
+        x={sX(p.k)}
+        y={214}
+        width={sX(p.k + 1) - sX(p.k)}
+        height={66}
+        fill="var(--accent-soft)"
+      />
+      <line x1={L} y1={ROW_REF} x2={R} y2={ROW_REF} stroke="var(--border)" strokeWidth={1} />
+      <line x1={L} y1={ROW_FB} x2={R} y2={ROW_FB} stroke="var(--border)" strokeWidth={1} />
+      <line x1={L} y1={ROW_INJ} x2={R} y2={ROW_INJ} stroke="var(--border)" strokeWidth={1} />
+      <text x={8} y={ROW_REF + 3} fontSize={10} fill="var(--fg-subtle)">
+        REF
+      </text>
+      <text x={8} y={ROW_FB + 3} fontSize={10} fill="var(--accent)">
+        FB
+      </text>
+      <text x={8} y={ROW_INJ + 3} fontSize={10} fill="var(--fg-subtle)">
+        INJ
+      </text>
+      {refTicks.map((j) => (
+        <line
+          key={`ref-${j}`}
+          x1={sX(j)}
+          y1={ROW_REF - 7}
+          x2={sX(j)}
+          y2={ROW_REF + 7}
+          stroke="var(--fg-faint)"
+          strokeWidth={1.4}
+          opacity={fade(j)}
+        />
+      ))}
+      {p.uFbHist.map((u, i) => {
+        const j = p.kLo + i;
+        const px = sX(j + u / p.nDiv);
+        return (
+          <line
+            key={`fb-${j}`}
+            x1={px}
+            y1={ROW_FB - 7}
+            x2={px}
+            y2={ROW_FB + 7}
+            stroke="var(--accent)"
+            strokeWidth={1.6}
+            opacity={fade(j)}
+          />
+        );
+      })}
+      {p.uInjHist.map((u, i) => {
+        const j = p.kLo + i;
+        const px = sX(j + u / p.nDiv);
+        return (
+          <line
+            key={`inj-${j}`}
+            x1={px}
+            y1={ROW_INJ - 7}
+            x2={px}
+            y2={ROW_INJ + 7}
+            stroke="var(--fg)"
+            strokeWidth={1.6}
+            opacity={fade(j)}
+          />
+        );
+      })}
+    </svg>
+  );
 }
 
 const QUANTIZER_OPTIONS: { value: Quantizer; label: string }[] = [
@@ -121,8 +344,23 @@ export default function Chapter06() {
   }, [sims, setStatus]);
 
   const tVco = sims.cur.t_vco_s;
+  const tRef = sims.cur.t_ref_s;
   const xNow = wheel.x[wheelK];
   const uNow = wheel.u[wheelK];
+
+  // --- 時域落點動畫:與雙輪共用 wheelK(N_WHEEL <= N_SIM,可直接索引模擬輸出) ---
+  const landing = useMemo(() => {
+    const d = sims.cur.data;
+    const k = Math.min(wheelK, N_SIM - 1);
+    const kLo = Math.max(0, k - 7);
+    return {
+      uFb: d.u_FB_digital[k],
+      uInj: d.u_INJ_digital[k],
+      uFbHist: Array.from(d.u_FB_digital.subarray(kLo, k + 1)),
+      uInjHist: Array.from(d.u_INJ_digital.subarray(kLo, k + 1)),
+      kLo,
+    };
+  }, [sims, wheelK]);
 
   const zcOption = useMemo(() => {
     const series: LineSeriesSpec[] = [
@@ -488,6 +726,116 @@ export default function Chapter06() {
       </SectionFigure>
 
       <SectionFigure
+        title="時域波形落點動畫:單一 T_ref 視窗內,INJ pulse 逐拍追著 zero crossing 跑"
+        caption={
+          <span>
+            上圖 x 軸:第 k 個 reference 視窗內的時間 τ(單位 ps;τ=0 為第 k 個 ref edge,右緣虛線為第
+            k+1 個),y 軸:VCO differential 波形(任意振幅)。正弦波形只是 phase 的示意渲染 —— model
+            是 phase-domain timing model,不含波形形狀 <EpistemicTag kind="ASSUMPTION" />。灰點:視窗內
+            全部 rising zero crossings(τ = <M>{'\\operatorname{wrap01}(z_0 - x_{ideal}[k]) + j'}</M>,
+            即 absolute phase 整數 + z<sub>0</sub>);accent 圓圈:INJ pulse 對準的 target crossing;
+            垂直虛線:injection pulse,位置 <M>{'u_{INJ,digital}[k] \\cdot T_{vco}'}</M>;accent 刻度:
+            feedback 路徑的 fractional delay 命令 <M>{'u_{FB,digital}[k] \\cdot T_{vco}'}</M>(其實體
+            anchor 是 VCO integer-cycle boundary,鎖定時 divider edge 本身與 ref edge 對齊;此處與
+            u_INJ 畫在同一軸,以顯示 +α/−α 鏡像)。所有落點數值皆取自 simulate() 輸出{' '}
+            <EpistemicTag kind="EXACT" />。下三列:最近 8 拍 REF/FB/INJ edge 的絕對時間(x 軸單位
+            T_ref,越舊越淡)。例:N=3.13 時 T_vco ≈ 79.87 ps,每拍漂移 α·T_vco ≈ 10.38 ps。本圖時間
+            軸固定以 ps 顯示,不隨 UnitSwitch 切換。
+          </span>
+        }
+      >
+        <LandingWaveform
+          k={wheelK}
+          nDiv={nDiv}
+          z0={z0}
+          xNow={xNow}
+          uIdealNow={uNow}
+          uFb={landing.uFb}
+          uInj={landing.uInj}
+          uFbHist={landing.uFbHist}
+          uInjHist={landing.uInjHist}
+          kLo={landing.kLo}
+          tVcoS={tVco}
+          tRefS={tRef}
+        />
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 16,
+            alignItems: 'center',
+            marginTop: 8,
+          }}
+        >
+          <div style={{ minWidth: 260, fontSize: '0.9rem', lineHeight: 1.9 }}>
+            <div>
+              k = <strong>{wheelK}</strong>,N = {trimNumber(nDiv, 6)},T_vco ={' '}
+              {formatSiTime(tVco)}
+            </div>
+            <div>
+              u_FB_digital[k] = {trimNumber(landing.uFb, 6)} cyc ={' '}
+              <strong>{formatSiTime(landing.uFb * tVco)}</strong>
+            </div>
+            <div>
+              u_INJ_digital[k] = {trimNumber(landing.uInj, 6)} cyc ={' '}
+              <strong>{formatSiTime(landing.uInj * tVco)}</strong>
+            </div>
+            <div>
+              每拍漂移:INJ pulse 與 target crossing{' '}
+              <strong>
+                {alpha === 0 ? '0(N 為整數,無漂移)' : `−α·T_vco = −${formatSiTime(alpha * tVco)}`}
+              </strong>
+              (往早);FB 刻度{' '}
+              <strong>{alpha === 0 ? '0' : `+α·T_vco = +${formatSiTime(alpha * tVco)}`}</strong>
+              (往晚)
+            </div>
+          </div>
+          <div style={{ flex: '1 1 260px', maxWidth: 420 }}>
+            <Slider
+              label="k"
+              value={wheelK}
+              min={0}
+              max={N_WHEEL - 1}
+              step={1}
+              onChange={(v) => {
+                setPlaying(false);
+                setWheelK(Math.round(v) % N_WHEEL);
+              }}
+              fmt={(v) => String(Math.round(v))}
+            />
+            <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+              <button type="button" className="preset-button" onClick={() => setPlaying((p) => !p)}>
+                {playing ? '暫停' : '播放'}
+              </button>
+              <button
+                type="button"
+                className="preset-button"
+                onClick={() => {
+                  setPlaying(false);
+                  setWheelK((k) => (k + 1) % N_WHEEL);
+                }}
+              >
+                步進 +1
+              </button>
+              <button
+                type="button"
+                className="preset-button"
+                onClick={() => {
+                  setPlaying(false);
+                  setWheelK(0);
+                }}
+              >
+                重設 k=0
+              </button>
+            </div>
+            <p style={{ fontSize: '0.82rem', color: 'var(--fg-subtle)', marginTop: 8 }}>
+              與上方雙輪共用同一個 k:播放/步進時兩個圖同步前進。
+            </p>
+          </div>
+        </div>
+      </SectionFigure>
+
+      <SectionFigure
         title="e_ZC 公式分解:deterministic scheduling error 與 random η_vco"
         caption={
           <span>
@@ -583,6 +931,14 @@ for (let k = 0; k < n; k++) {
             <M>{'z_0'}</M>;預設 <M>{'z_0=0'}</M> 時鏡射軸即 12 點鐘方向);按「步進 +1」左輪順時針
             +α、右輪逆時針 −α。α=0.13 時第 100 拍兩輪同時回到起點(0.13 的循環長度)。讀值列的{' '}
             <M>{'\\operatorname{wrap01}(x+u)'}</M> 永遠等於 <M>{'z_0'}</M> —— 這是 identity,不是巧合。
+          </li>
+          <li>
+            <strong>時域落點動畫</strong>:按播放,INJ pulse(垂直虛線)與它對準的 target
+            crossing(accent 圓圈)黏在一起、每拍一同往「早」移 α·T_vco(N=3.13 時 ≈ 10.38 ps,
+            N=3.25 時 ≈ 19.23 ps;N=3.000 時全部靜止),而 FB 刻度反向每拍往「晚」移 α·T_vco ——
+            雙輪的 +α/−α 鏡像直接呈現在時間軸上。u_INJ 從近 0 wrap 回近 1 的那一拍,正是 divider
+            多吞一個 VCO cycle(n_int = 4)的時刻。nearest quantizer 下 pulse 對 crossing 的偏差
+            ≤ half-LSB(sub-ps,在 250 ps 視窗尺度下不可見)—— 其實際大小要看下方 e_ZC 分解圖。
           </li>
           <li>
             <strong>分解圖(全 ideal analog,quantizer = nearest)</strong>:實線與虛線重合,且被

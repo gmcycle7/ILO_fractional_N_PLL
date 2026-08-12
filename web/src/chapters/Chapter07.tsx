@@ -51,6 +51,10 @@ const meta = chapterById(7)!;
 
 const MAPPINGS = ['naive', 'nearest', 'calibrated'] as const;
 const N_CODES = 96; // code plot 模擬長度
+const N_BASIN = 128; // basin 逐拍情境模擬長度
+
+/** basin 逐拍播放的情境:off = slider 靜態模式 */
+type BasinScenario = 'off' | 'latency' | 'dsm';
 
 interface MapPick {
   j: number;
@@ -86,6 +90,13 @@ export default function Chapter07() {
   const [tap3Deg, setTap3Deg] = useState(0); // tap 3 mismatch, degrees
   const [alpha, setAlpha] = useChapterAlpha();
   const [eSchedLsb, setESchedLsb] = useState(0.5); // basin 圖:總排程誤差(LSB)
+  // #10b tap 交棒動畫:每拍 2 個 sub-stage(偶 = tap 對準、奇 = DTC 弧),k = floor(t/2)
+  const [tapPlayT, setTapPlayT] = useState(1);
+  const [tapPlaying, setTapPlaying] = useState(false);
+  // basin 捕捉逐拍動態
+  const [basinScenario, setBasinScenario] = useState<BasinScenario>('off');
+  const [basinK, setBasinK] = useState(0);
+  const [basinPlaying, setBasinPlaying] = useState(false);
   const { unit } = useUnit();
   const ct = useChartTheme();
   const { setStatus } = useSimStatus();
@@ -149,26 +160,65 @@ export default function Chapter07() {
 
   const tVco = codeRes.t_vco_s;
 
+  // --- 圖 #10b:tap 交棒動畫(重用 codeRes,兩段式 sub-stage) ---
+  useEffect(() => {
+    if (!tapPlaying) return undefined;
+    const id = window.setInterval(() => {
+      setTapPlayT((t) => (t + 1) % (2 * N_CODES));
+    }, 420);
+    return () => window.clearInterval(id);
+  }, [tapPlaying]);
+
+  const playK = Math.floor(tapPlayT / 2);
+  const tapStage: 'tap' | 'arc' = tapPlayT % 2 === 0 ? 'tap' : 'arc';
+
+  const play = useMemo(() => {
+    const d = codeRes.data;
+    const j = d.j_INJ[playK];
+    const trail: { angleCycles: number; color?: string; r?: number; opacity?: number }[] = [];
+    for (let b = 1; b <= 4 && playK - b >= 0; b++) {
+      trail.push({
+        angleCycles: wrap01(d.u_INJ_analog[playK - b]),
+        color: 'var(--fg-subtle)',
+        r: 0.8,
+        opacity: 0.45 - 0.1 * b, // 前 1..4 拍漸淡
+      });
+    }
+    return {
+      j,
+      c: d.c_INJ[playK],
+      tapU: demo.taps[j],
+      uAn: wrap01(d.u_INJ_analog[playK]),
+      uIdeal: d.u_INJ_ideal[playK],
+      eAbs: d.e_INJ_abs[playK],
+      trail,
+    };
+  }, [codeRes, playK, demo]);
+
   const jOption = useMemo(
     () =>
-      makeLineOption({
-        title: '#10 injection tap code j_INJ[k]',
-        xLabel: 'k (reference cycle)',
-        yLabel: 'j_INJ',
-        yMin: 0,
-        yMax: 7,
-        series: [
-          {
-            name: 'j_INJ',
-            data: toXY(codeRes.data.j_INJ),
-            color: ct.series[0],
-            step: 'middle',
-            showSymbol: true,
-            symbolSize: 4,
-          },
-        ],
-      }),
-    [codeRes, ct],
+      withMarkLine(
+        makeLineOption({
+          title: '#10 injection tap code j_INJ[k]',
+          xLabel: 'k (reference cycle)',
+          yLabel: 'j_INJ',
+          yMin: 0,
+          yMax: 7,
+          series: [
+            {
+              name: 'j_INJ',
+              data: toXY(codeRes.data.j_INJ),
+              color: ct.series[0],
+              step: 'middle',
+              showSymbol: true,
+              symbolSize: 4,
+            },
+          ],
+        }),
+        0,
+        makeMarkLine([{ x: playK, label: `k=${playK}` }]),
+      ),
+    [codeRes, ct, playK],
   );
 
   const cOption = useMemo(() => {
@@ -189,16 +239,89 @@ export default function Chapter07() {
         },
       ],
     });
-    return withMarkLine(opt, 0, makeMarkLine([{ y: 31.5, label: 'naive 上限 c=31' }]));
-  }, [codeRes, ct]);
+    return withMarkLine(
+      opt,
+      0,
+      makeMarkLine([{ y: 31.5, label: 'naive 上限 c=31' }, { x: playK }]),
+    );
+  }, [codeRes, ct, playK]);
 
-  // --- 1/8-cycle 對位模糊 basin 圖(純幾何,不跑 simulate)---
+  // --- basin 捕捉逐拍動態:兩個一鍵情境(exp10 式 / exp21b 式)---
+  const basinSim = useMemo(() => {
+    if (basinScenario === 'off') return null;
+    const cfg =
+      basinScenario === 'latency'
+        ? // exp10 式:L=1 無 look-ahead,N=3.13
+          fromPartial({ n_div: 3.13, latency_cycles: 1, lookahead: false, n_cycles: N_BASIN })
+        : // exp21b 式:dsm_only 無 gating
+          fromPartial({
+            n_div: 3.13,
+            quantizer: 'ef1',
+            actuator_mode: 'dsm_only',
+            inj_model: 'sin',
+            k_inj: 0.4,
+            delta_f_hz: 1e6,
+            sigma_vco_w_rad: 0.02,
+            n_cycles: N_BASIN,
+          });
+    const e = simulate(cfg).data.e_ZC_hw;
+    // 最近 crossing proxy:e = off/8 + resid,off = round(8e) ∈ [-4, 4]
+    const off = new Int32Array(N_BASIN);
+    for (let k = 0; k < N_BASIN; k++) {
+      off[k] = Math.round(8 * e[k] - wrapCycles(8 * e[k]));
+    }
+    return { e, off };
+  }, [basinScenario]);
+
+  useEffect(() => {
+    if (basinSim) setStatus('done', `Ch7 basin: ${basinScenario} × ${N_BASIN} cycles`);
+  }, [basinSim, basinScenario, setStatus]);
+
+  useEffect(() => {
+    if (!basinPlaying || !basinSim) return undefined;
+    const id = window.setInterval(() => {
+      setBasinK((k) => Math.min(k + 1, N_BASIN - 1));
+    }, 150);
+    return () => window.clearInterval(id);
+  }, [basinPlaying, basinSim]);
+
+  useEffect(() => {
+    if (basinK >= N_BASIN - 1) setBasinPlaying(false);
+  }, [basinK]);
+
+  // capture-count histogram 為 0..basinK 的純導出量(Reset = basinK 歸零)
+  const basinNow = useMemo(() => {
+    if (!basinSim) return null;
+    const counts = new Array<number>(8).fill(0);
+    for (let k = 0; k <= basinK; k++) {
+      counts[(basinSim.off[k] + 12) % 8] += 1; // T-index = (4 + off) mod 8(排定 = T4)
+    }
+    return {
+      e: basinSim.e[basinK],
+      off: basinSim.off[basinK],
+      resid: wrapCycles(8 * basinSim.e[basinK]) / 8,
+      counts,
+      maxCount: Math.max(1, ...counts),
+    };
+  }, [basinSim, basinK]);
+
+  const startBasin = (s: Exclude<BasinScenario, 'off'>) => {
+    setBasinScenario(s);
+    setBasinK(0);
+    setBasinPlaying(true);
+  };
+
+  // --- 1/8-cycle 對位模糊 basin 圖(slider 靜態模式為純幾何,不跑 simulate)---
   const eSchedCyc = eSchedLsb / 256;
+  // 顯示值:情境播放中取 e_ZC_hw[k],否則取 slider
+  const eShowCyc = basinNow ? basinNow.e : eSchedCyc;
   // 被捕捉的 crossing(相對排定 crossing 的整數位移)與 capture 後殘留
-  const capturedTaps = Math.round(8 * eSchedCyc - wrapCycles(8 * eSchedCyc));
-  const residCyc = wrapCycles(8 * eSchedCyc) / 8;
+  const capturedTaps = basinNow
+    ? basinNow.off
+    : Math.round(8 * eSchedCyc - wrapCycles(8 * eSchedCyc));
+  const residCyc = basinNow ? basinNow.resid : wrapCycles(8 * eSchedCyc) / 8;
   const falseLock = capturedTaps !== 0;
-  const uPulse = 0.5 + eSchedCyc; // 排定 crossing 固定畫在 0.5(T4)
+  const uPulse = 0.5 + eShowCyc; // 排定 crossing 固定畫在 0.5(T4)
   const uCaptured = 0.5 + capturedTaps / 8;
   const pullColor = falseLock ? 'var(--warn-border)' : 'var(--accent)';
   const xOf = (u: number) => 40 + u * 680; // phase axis 0..1 cycle -> px
@@ -461,12 +584,114 @@ export default function Chapter07() {
             反向旋轉而遞減(α ≥ 1/8 時每拍至少退一格;α=0.13 時每拍約 −33.3 LSB ≈ −1 tap;
             0 {'<'} α {'<'} 1/8 時偶爾停留,α = 0 時為水平線);下圖 c_INJ:naive/nearest 永遠停在{' '}
             <M>{'c \\le 31'}</M>(虛線以下),calibrated + mismatch 時會跳進 32–63 的 redundant 區。
-            兩圖 x 軸連動。
+            兩圖 x 軸連動;豎虛線游標 = 下方 #10b 交棒動畫目前的 k。
           </span>
         }
       >
         <EChart option={jOption} height={240} group="ch7codes" />
         <EChart option={cOption} height={260} group="ch7codes" />
+      </SectionFigure>
+
+      <SectionFigure
+        title="#10b Tap 交棒動畫:每拍 (j_INJ, c_INJ) 的兩段式對準"
+        caption={
+          <span>
+            wheel 角度 = phase(VCO cycles;0 在 12 點鐘、順時針增加)。每拍分兩個 sub-stage:
+            先「tap 對準」(高亮 tap j_INJ[k],ZC 針跳到該 tap),再「DTC 細調」(弧線 ={' '}
+            c_INJ[k]/256 cycle 的細 delay,ZC 針滑到 analog 落點);淡色小點 = 前 1–4 拍的落點
+            (漸淡)。長針 = 該拍理想目標 u_INJ_ideal[k]。資料重用上方 #10/#11 的同一次模擬
+            (N = 3 + α、mapping、tap3 mismatch 共用),#10/#11 的豎虛線游標同步指在同一個 k。
+            讀值單位:<UnitSwitch />
+          </span>
+        }
+      >
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'center' }}>
+          <PhaseWheel
+            size={300}
+            animateToMarker
+            title={
+              <span>
+                k = {playK}({tapStage === 'tap' ? 'tap 對準' : 'DTC 細調'});(j, c) = (
+                {play.j}, {play.c})
+              </span>
+            }
+            taps={Array.from(demo.taps, (a, j) => ({
+              angleCycles: a,
+              label: `T${j}`,
+              color: j === play.j ? 'var(--accent)' : undefined,
+            }))}
+            markers={[
+              { angleCycles: play.uIdeal, label: 'target', color: 'var(--accent)', r: 0.95 },
+              {
+                angleCycles: tapStage === 'tap' ? play.tapU : play.uAn,
+                label: 'ZC',
+                color: 'var(--fg)',
+                r: 0.8,
+              },
+            ]}
+            arcs={
+              tapStage === 'arc'
+                ? [
+                    {
+                      fromCycles: play.tapU,
+                      toCycles: play.uAn,
+                      color: 'var(--accent)',
+                      r: 0.68,
+                      width: 5,
+                    },
+                  ]
+                : undefined
+            }
+            trail={play.trail}
+          />
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 8,
+              minWidth: 260,
+              fontSize: '0.9rem',
+            }}
+          >
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="preset-button"
+                onClick={() => setTapPlaying((p) => !p)}
+              >
+                {tapPlaying ? 'Pause' : 'Play'}
+              </button>
+              <button
+                type="button"
+                className="preset-button"
+                onClick={() => {
+                  setTapPlaying(false);
+                  setTapPlayT((t) => (t + 1) % (2 * N_CODES));
+                }}
+              >
+                Step 半拍
+              </button>
+              <button
+                type="button"
+                className="preset-button"
+                onClick={() => {
+                  setTapPlaying(false);
+                  setTapPlayT(1);
+                }}
+              >
+                Reset
+              </button>
+            </div>
+            <p style={{ margin: 0 }}>
+              u_INJ_ideal[k] = {formatPhase(play.uIdeal, unit, tVco)};analog 落點 ={' '}
+              {formatPhase(play.uAn, unit, tVco)};e_INJ_abs ={' '}
+              {formatPhase(play.eAbs, unit, tVco)}。
+              <br />
+              α = {trimNumber(alpha, 4)}:每拍 j_INJ 平均反向旋轉 8α ≈{' '}
+              {trimNumber(8 * alpha, 3)} tap。Step 一次走半拍(tap 對準 ↔ DTC 細調)。
+            </p>
+          </div>
+        </div>
       </SectionFigure>
 
       <SectionFigure
@@ -478,7 +703,9 @@ export default function Chapter07() {
             (每個 crossing ±1/16 cycle = ±16 LSB);高亮豎線 = injection pulse 實際落點
             (排定 crossing + 總排程誤差 e<sub>sched</sub>);箭頭 = 被拉往的 crossing。
             右側 ParamPanel 的「e_sched(對位圖)」slider 與 preset 可重現各誤差等級。
-            讀值單位:<UnitSwitch />
+            兩個情境按鈕改以<strong>逐拍播放</strong>驅動本圖:pulse 豎線取第 k 拍的{' '}
+            e<sub>ZC,hw</sub>[k](模擬值),並在下方累積 8-bin capture-count histogram
+            (capture = 最近 crossing 之 proxy)。讀值單位:<UnitSwitch />
           </span>
         }
       >
@@ -509,6 +736,63 @@ export default function Chapter07() {
           不改變排定的 crossing;本節說的是「實際 VCO 相對排程」的偏差。
           <EpistemicTag kind="INFERENCE" />
         </p>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '12px 0' }}>
+          <button type="button" className="preset-button" onClick={() => startBasin('latency')}>
+            情境 (a):latency bug L=1(N=3.13)
+          </button>
+          <button type="button" className="preset-button" onClick={() => startBasin('dsm')}>
+            情境 (b):dsm_only 無 gating
+          </button>
+          <button
+            type="button"
+            className="preset-button"
+            onClick={() => {
+              setBasinPlaying(false);
+              setBasinScenario('off');
+              setBasinK(0);
+            }}
+          >
+            slider 模式
+          </button>
+          {basinSim !== null && (
+            <>
+              <button
+                type="button"
+                className="preset-button"
+                onClick={() => {
+                  if (basinPlaying) {
+                    setBasinPlaying(false);
+                    return;
+                  }
+                  if (basinK >= N_BASIN - 1) setBasinK(0);
+                  setBasinPlaying(true);
+                }}
+              >
+                {basinPlaying ? 'Pause' : 'Play'}
+              </button>
+              <button
+                type="button"
+                className="preset-button"
+                onClick={() => {
+                  setBasinPlaying(false);
+                  setBasinK((k) => Math.min(k + 1, N_BASIN - 1));
+                }}
+              >
+                Step +1
+              </button>
+              <button
+                type="button"
+                className="preset-button"
+                onClick={() => {
+                  setBasinPlaying(false);
+                  setBasinK(0);
+                }}
+              >
+                Reset
+              </button>
+            </>
+          )}
+        </div>
         <svg
           viewBox="0 0 760 200"
           style={{ width: '100%', maxWidth: 860, display: 'block' }}
@@ -610,20 +894,107 @@ export default function Chapter07() {
             </g>
           )}
         </svg>
-        <p style={{ marginTop: 8, fontSize: '0.9rem' }}>
-          e<sub>sched</sub> = {trimNumber(eSchedLsb, 4)} LSB ={' '}
-          {formatPhase(eSchedCyc, unit, tVco)};捕捉結果:
-          {falseLock ? (
-            <strong>
-              {' '}
-              false lock — 被拉去偏 {capturedTaps > 0 ? '+' : ''}
-              {capturedTaps}/8 cycle({capturedTaps * 45}°)的 crossing
-            </strong>
-          ) : (
-            <span> 正確 crossing(pulse 仍在排定 basin 內)</span>
-          )}
-          ;capture 後相對該 crossing 殘留 {formatPhase(residCyc, unit, tVco)}。
-        </p>
+        {basinNow ? (
+          <p style={{ marginTop: 8, fontSize: '0.9rem' }}>
+            情境{' '}
+            {basinScenario === 'latency'
+              ? '(a) latency bug L=1(N=3.13,無 look-ahead,exp10 式)'
+              : '(b) dsm_only 無 gating(N=3.13,ef1,exp21b 式)'}
+            :k = {basinK}/{N_BASIN - 1};e<sub>ZC,hw</sub>[k] ={' '}
+            {formatPhase(basinNow.e, unit, tVco)};捕捉:
+            {falseLock ? (
+              <strong>
+                {' '}
+                偏 {capturedTaps > 0 ? '+' : ''}
+                {capturedTaps}/8 cycle({capturedTaps * 45}°)的錯誤 crossing
+              </strong>
+            ) : (
+              <span> 排定 crossing</span>
+            )}
+            ;capture 後殘留 {formatPhase(residCyc, unit, tVco)}。
+            (情境播放中,e_sched slider 暫停作用;capture = 最近 crossing 之 proxy
+            <EpistemicTag kind="APPROX" />)
+          </p>
+        ) : (
+          <p style={{ marginTop: 8, fontSize: '0.9rem' }}>
+            e<sub>sched</sub> = {trimNumber(eSchedLsb, 4)} LSB ={' '}
+            {formatPhase(eSchedCyc, unit, tVco)};捕捉結果:
+            {falseLock ? (
+              <strong>
+                {' '}
+                false lock — 被拉去偏 {capturedTaps > 0 ? '+' : ''}
+                {capturedTaps}/8 cycle({capturedTaps * 45}°)的 crossing
+              </strong>
+            ) : (
+              <span> 正確 crossing(pulse 仍在排定 basin 內)</span>
+            )}
+            ;capture 後相對該 crossing 殘留 {formatPhase(residCyc, unit, tVco)}。
+          </p>
+        )}
+        {basinNow && (
+          <div style={{ marginTop: 8 }}>
+            <svg
+              viewBox="0 0 380 122"
+              style={{ width: '100%', maxWidth: 420, display: 'block' }}
+              role="img"
+              aria-label="per-crossing capture-count histogram(8 bins)"
+            >
+              {basinNow.counts.map((cnt, j) => {
+                const h = (cnt / basinNow.maxCount) * 78;
+                const x = 24 + j * 44;
+                const isSched = j === 4;
+                return (
+                  <g key={`hb${j}`}>
+                    <rect
+                      x={x}
+                      y={96 - h}
+                      width={26}
+                      height={Math.max(h, 1)}
+                      fill={
+                        isSched
+                          ? 'var(--accent)'
+                          : cnt > 0
+                            ? 'var(--warn-border)'
+                            : 'var(--border)'
+                      }
+                    />
+                    <text
+                      x={x + 13}
+                      y={110}
+                      textAnchor="middle"
+                      fontSize={10}
+                      fontFamily="var(--font-mono)"
+                      fill={isSched ? 'var(--accent)' : 'var(--fg-subtle)'}
+                    >
+                      {`T${j}`}
+                    </text>
+                    {cnt > 0 && (
+                      <text
+                        x={x + 13}
+                        y={91 - h}
+                        textAnchor="middle"
+                        fontSize={9}
+                        fill="var(--fg-subtle)"
+                      >
+                        {cnt}
+                      </text>
+                    )}
+                  </g>
+                );
+              })}
+            </svg>
+            <p style={{ fontSize: '0.85rem', marginTop: 4 }}>
+              capture-count histogram:x 軸 = 8 個 crossing(T0–T7,排定 = T4),y 軸 = 第
+              0..k 拍累積被捕捉的拍數(capture = 最近 crossing 之 proxy,round(8·e)/8
+              <EpistemicTag kind="APPROX" />)。情境 (a) 只長 T5 一根(128 拍實測 127/128;
+              唯一例外是 e=0 的 k=0)—— 每拍都被<strong>同一個</strong>錯 crossing 捕捉,
+              數位側毫無異狀:安靜的 false lock;情境 (b) 八根近乎均勻長高(128 拍實測每根
+              14–17)—— 每拍換 basin,injection 無固定收斂點 → unlock。
+              <EpistemicTag kind="EXPERIMENT" /> 「同一 crossing ⇒ 鎖錯相位、逐拍換 crossing ⇒
+              失鎖」的解讀為 tap 幾何推論。<EpistemicTag kind="INFERENCE" />
+            </p>
+          </div>
+        )}
         <p>
           拿 Ch15 的 mismatch 實測與本站各 experiment 對照這個 16 LSB 的預算
           (T<sub>vco</sub> = 80 ps 換算;各行來源標於表內):
@@ -824,6 +1195,19 @@ if (cfg.inj_mapping === 'naive') {
           <li>
             <strong>#11</strong>:naive/nearest 的 c_INJ 永遠在虛線(c=31)下方;calibrated + tap3
             mismatch 時,目標落在 tap3 粗格的那些拍會跳到 c ≥ 32(改走 tap2 + 上半 range)。
+          </li>
+          <li>
+            <strong>#10b 交棒動畫</strong>:α=0.13 時每拍退一格、平均每 ≈25 拍插入一次退兩格
+            (2048 拍實測:單格 1965/2047、雙格 82/2047;0.13 cycle = 33.28 LSB 超出一格的
+            1.28 LSB,每 25 拍累滿一格 32 LSB);N=3.000 時 j_INJ 靜止不動;α=0.25 時每拍
+            <strong>恰好</strong>退兩格。每次交棒都是「先 tap 對準、再長 DTC 弧」的兩段動作。
+            <EpistemicTag kind="EXPERIMENT" />
+          </li>
+          <li>
+            <strong>Basin 逐拍動態</strong>:情境 (a) 的 pulse 豎線幾乎固定在 +0.13 cycle,每拍被
+            <strong>同一個</strong> +1/8 cycle 的錯 crossing 捕捉(histogram 只長 T5)——
+            安靜的 false lock;情境 (b) 的 pulse 逐拍掃過整個 phase 軸,histogram 八根均勻長高
+            —— 每拍換 basin → unlock。<EpistemicTag kind="EXPERIMENT" />
           </li>
         </ul>
       </SectionObserve>

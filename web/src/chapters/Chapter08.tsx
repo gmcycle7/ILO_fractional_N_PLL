@@ -49,6 +49,33 @@ const N_SIM = 256;
 const LSB_CYC = 1 / 256;
 const HALF_LSB_CYC = 1 / 512;
 
+// ---- figure #15: Mode D digital code-identity bar geometry (static, pure) ----
+const SEAM_SVG_W = 760;
+const SEAM_SVG_H = 118;
+const SEAM_MARGIN_L = 40;
+const SEAM_MARGIN_R = 30;
+const SEAM_BAR_W = SEAM_SVG_W - SEAM_MARGIN_L - SEAM_MARGIN_R;
+const SEAM_CODE_MIN = -8;
+const SEAM_CODE_MAX = 264;
+const SEAM_CODE_SPAN = SEAM_CODE_MAX - SEAM_CODE_MIN;
+const SEAM_BAR_Y = 54;
+const SEAM_BAR_H = 26;
+const SEAM_MAJOR_TICKS = [0, 32, 64, 96, 128, 160, 192, 224, 256];
+const SEAM_TICKS = Array.from({ length: 257 }, (_, i) => i);
+
+/** SVG text-anchor + x that keeps a label inside the viewBox near either edge. */
+function seamLabelAnchor(px: number): { x: number; anchor: 'start' | 'middle' | 'end' } {
+  if (px > SEAM_SVG_W - 60) return { x: SEAM_SVG_W - 2, anchor: 'end' };
+  if (px < 60) return { x: 2, anchor: 'start' };
+  return { x: px, anchor: 'middle' };
+}
+
+/** code (0..256, plus small overflow margin) -> SVG x-pixel; clamps defensively. */
+function seamX(code: number): number {
+  const c = Math.min(SEAM_CODE_MAX, Math.max(SEAM_CODE_MIN, code));
+  return SEAM_MARGIN_L + ((c - SEAM_CODE_MIN) / SEAM_CODE_SPAN) * SEAM_BAR_W;
+}
+
 function toXY(a: ArrayLike<number>): [number, number][] {
   return Array.from(a as ArrayLike<number>, (v, i) => [i, v] as [number, number]);
 }
@@ -176,6 +203,42 @@ export default function Chapter08() {
       ]),
     );
   }, [res, unit, tVco, ct]);
+
+  // ---- figure #15: Mode D digital code-identity bar (proposal #3) ----
+  const [seamK, setSeamK] = useState(0);
+  const [seamPlaying, setSeamPlaying] = useState(false);
+
+  useEffect(() => {
+    if (!seamPlaying) return undefined;
+    const id = window.setInterval(() => {
+      setSeamK((k) => (k + 1) % N_SIM);
+    }, 180);
+    return () => window.clearInterval(id);
+  }, [seamPlaying]);
+
+  const seam = useMemo(() => {
+    const rfb = res.data.R_FB;
+    const rinj = res.data.R_INJ;
+    const n = rfb.length;
+    const mismatch = new Array<boolean>(n);
+    const cumMismatch = new Array<number>(n);
+    let running = 0;
+    for (let i = 0; i < n; i++) {
+      const isMismatch = pymod(rfb[i] + rinj[i], 256) !== 0;
+      mismatch[i] = isMismatch;
+      if (isMismatch) running += 1;
+      cumMismatch[i] = running;
+    }
+    return { rfb, rinj, mismatch, cumMismatch };
+  }, [res]);
+
+  const seamRfb = seam.rfb[seamK];
+  const seamRinj = seam.rinj[seamK];
+  const seamSum = seamRfb + seamRinj;
+  const seamNearestMult = Math.round(seamSum / 256) * 256;
+  const seamDeltaLsb = seamSum - seamNearestMult;
+  const seamIsMismatch = seam.mismatch[seamK];
+  const seamMismatchN = seam.cumMismatch[seamK];
 
   const tableRows = useMemo(() => {
     const d = res.data;
@@ -410,6 +473,256 @@ export default function Chapter08() {
         <EChart option={absOption} height={280} group="ch8" />
       </SectionFigure>
 
+      <SectionFigure
+        title="#15 Mode D 碼恆等式動態碼條 —— digital-layer twin of Ch6 幾何恆等式"
+        caption={
+          <span>
+            橫向 256-tick 碼條(G = 256,0 在最左、256 刻度在最右):深色段從原點起、長度為{' '}
+            <M>{'R_{FB}[k]'}</M>,淺色段緊接在後、長度為 <M>{'R_{INJ}[k]'}</M>。Mode D 下兩段的
+            交界(seam)每一拍都精準落在 256 刻度上,對應 <M>{'(R_{FB}+R_{INJ}) \\bmod 256 = R_{zero}'}</M>{' '}
+            —— 這是 Ch6「<M>{'x + u_{INJ}'}</M> 恆等於 <M>{'z_0'}</M>」的幾何恆等式在數位 code
+            層的孿生版本。Mode A/B/C 下 seam 偏離 256 刻度時,以 warn 色閃爍 gap(欠)/overlap(過)
+            標記並累計 running mismatch counter。Mode/quantizer 沿用本章上方選單。x 軸單位:LSB
+            code(1 LSB = 1/256 cycle)。
+          </span>
+        }
+      >
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 16,
+            marginBottom: 8,
+            alignItems: 'baseline',
+            fontFamily: 'var(--font-mono)',
+            fontSize: '0.92rem',
+          }}
+        >
+          <span>k = {seamK}</span>
+          <span>R_FB = {seamRfb}</span>
+          <span>R_INJ = {seamRinj}</span>
+          <span>sum = {seamSum}</span>
+          <span>
+            (sum mod 256) ={' '}
+            <strong style={{ color: seamIsMismatch ? 'var(--warn-border)' : 'var(--accent)' }}>
+              {pymod(seamSum, 256)}
+            </strong>
+          </span>
+        </div>
+
+        <svg
+          viewBox={`0 0 ${SEAM_SVG_W} ${SEAM_SVG_H}`}
+          width="100%"
+          style={{ maxWidth: 780, display: 'block' }}
+          role="img"
+          aria-label={`k=${seamK} 的 R_FB/R_INJ 碼條,sum=${seamSum}`}
+        >
+          <rect
+            x={seamX(0)}
+            y={SEAM_BAR_Y}
+            width={seamX(256) - seamX(0)}
+            height={SEAM_BAR_H}
+            fill="none"
+            stroke="var(--border-strong)"
+            strokeWidth={1}
+          />
+          {SEAM_TICKS.map((c) => {
+            const major = c % 32 === 0;
+            return (
+              <line
+                key={`tick-${c}`}
+                x1={seamX(c)}
+                y1={major ? SEAM_BAR_Y - 12 : SEAM_BAR_Y - 5}
+                x2={seamX(c)}
+                y2={SEAM_BAR_Y}
+                stroke={major ? 'var(--border-strong)' : 'var(--border)'}
+                strokeWidth={major ? 1.2 : 0.5}
+              />
+            );
+          })}
+          {SEAM_MAJOR_TICKS.map((c) => (
+            <text
+              key={`ticklabel-${c}`}
+              x={seamX(c)}
+              y={SEAM_BAR_Y - 16}
+              textAnchor="middle"
+              fontSize={10}
+              fill={c === 256 ? 'var(--fg)' : 'var(--fg-subtle)'}
+              fontWeight={c === 256 ? 600 : 400}
+            >
+              {c === 256 ? '256 ≡ R_zero' : c}
+            </text>
+          ))}
+
+          <rect
+            x={seamX(0)}
+            y={SEAM_BAR_Y}
+            width={Math.max(0, seamX(seamRfb) - seamX(0))}
+            height={SEAM_BAR_H}
+            fill="var(--accent)"
+          />
+          <rect
+            x={seamX(seamRfb)}
+            y={SEAM_BAR_Y}
+            width={Math.max(0, seamX(seamSum) - seamX(seamRfb))}
+            height={SEAM_BAR_H}
+            fill="var(--fg-subtle)"
+          />
+
+          {seamIsMismatch ? (
+            <g key={`mismatch-${seamK}`}>
+              <rect
+                x={seamX(Math.min(seamSum, seamNearestMult))}
+                y={SEAM_BAR_Y - 6}
+                width={Math.max(1.5, Math.abs(seamX(seamSum) - seamX(seamNearestMult)))}
+                height={SEAM_BAR_H + 12}
+                fill="var(--warn-border)"
+                fillOpacity={0.35}
+              >
+                <animate attributeName="fill-opacity" values="0.8;0.15;0.8;0.15;0.35" dur="0.9s" />
+              </rect>
+              <line
+                x1={seamX(seamSum)}
+                y1={SEAM_BAR_Y - 10}
+                x2={seamX(seamSum)}
+                y2={SEAM_BAR_Y + SEAM_BAR_H + 10}
+                stroke="var(--warn-border)"
+                strokeWidth={2}
+              >
+                <animate attributeName="opacity" values="1;0.25;1;0.25;1" dur="0.9s" />
+              </line>
+              <text
+                x={seamLabelAnchor(seamX(seamSum)).x}
+                y={SEAM_BAR_Y + SEAM_BAR_H + 26}
+                textAnchor={seamLabelAnchor(seamX(seamSum)).anchor}
+                fontSize={11}
+                fontFamily="var(--font-mono)"
+                fill="var(--warn-border)"
+              >
+                {seamDeltaLsb > 0 ? `overlap +${seamDeltaLsb} LSB` : `gap ${seamDeltaLsb} LSB`}
+              </text>
+            </g>
+          ) : (
+            <g>
+              <circle cx={seamX(seamSum)} cy={SEAM_BAR_Y + SEAM_BAR_H / 2} r={4} fill="var(--accent)" />
+              <text
+                x={seamLabelAnchor(seamX(seamSum)).x}
+                y={SEAM_BAR_Y + SEAM_BAR_H + 26}
+                textAnchor={seamLabelAnchor(seamX(seamSum)).anchor}
+                fontSize={11}
+                fontFamily="var(--font-mono)"
+                fill="var(--fg-subtle)"
+              >
+                seam Δ = 0(exact)
+              </text>
+            </g>
+          )}
+        </svg>
+
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 16,
+            fontSize: '0.82rem',
+            color: 'var(--fg-subtle)',
+            marginTop: 4,
+          }}
+        >
+          <span>
+            <span
+              style={{
+                display: 'inline-block',
+                width: 10,
+                height: 10,
+                background: 'var(--accent)',
+                marginRight: 4,
+                verticalAlign: 'middle',
+              }}
+            />
+            R_FB
+          </span>
+          <span>
+            <span
+              style={{
+                display: 'inline-block',
+                width: 10,
+                height: 10,
+                background: 'var(--fg-subtle)',
+                marginRight: 4,
+                verticalAlign: 'middle',
+              }}
+            />
+            R_INJ
+          </span>
+          <span>
+            <span
+              style={{
+                display: 'inline-block',
+                width: 10,
+                height: 10,
+                background: 'var(--warn-border)',
+                marginRight: 4,
+                verticalAlign: 'middle',
+              }}
+            />
+            gap / overlap(mismatch)
+          </span>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+          <button type="button" className="preset-button" onClick={() => setSeamPlaying((p) => !p)}>
+            {seamPlaying ? 'Pause' : 'Play'}
+          </button>
+          <button
+            type="button"
+            className="preset-button"
+            onClick={() => {
+              setSeamPlaying(false);
+              setSeamK((k) => (k + 1) % N_SIM);
+            }}
+          >
+            Step +1
+          </button>
+          <button
+            type="button"
+            className="preset-button"
+            onClick={() => {
+              setSeamPlaying(false);
+              setSeamK(0);
+            }}
+          >
+            Reset k=0
+          </button>
+          <div style={{ flex: '1 1 240px', minWidth: 220 }}>
+            <Slider
+              label="k (reference cycle)"
+              value={seamK}
+              min={0}
+              max={N_SIM - 1}
+              step={1}
+              fmt={(v) => String(Math.round(v))}
+              onChange={(v) => {
+                setSeamPlaying(false);
+                setSeamK(Math.round(v));
+              }}
+            />
+          </div>
+        </div>
+
+        <p style={{ marginTop: 10, fontSize: '0.9rem' }}>
+          running mismatch counter(k = 0…{seamK}):{' '}
+          <strong
+            style={{
+              fontFamily: 'var(--font-mono)',
+              color: seamMismatchN > 0 ? 'var(--warn-border)' : 'var(--fg-subtle)',
+            }}
+          >
+            {seamMismatchN} / {seamK + 1}
+          </strong>
+        </p>
+      </SectionFigure>
+
       <SectionCode
         language="typescript"
         title="web/src/model/injectionScheduler.ts(真實節錄:mode 分支與 e_pair)"
@@ -552,6 +865,18 @@ export function ePair(
           <li>
             <strong>開 1° tap mismatch(Mode D)</strong>:e_pair_digital 仍恆 0,但 e_pair_analog
             出現非零圖樣 —— 共享 code 管不到 analog 層,這是「不能消除」清單的直接示範。
+          </li>
+          <li>
+            <strong>新圖(碼恆等式動態碼條)</strong>:切到 Mode D、任取 k 或按 Play 掃過整段
+            256-拍軌跡,seam 都精準落在 256 刻度、running mismatch counter 全程停在 0
+            <EpistemicTag kind="EXACT" />——五個 preset N 皆然,因為恆等式證明與 α 無關(見上方
+            §Math)。切回 Mode B(預設 ef1):α·G 為整數的三個 preset(N = 3.000/3.125/3.250)
+            兩邊輸入皆是整數 LSB,quantize 一個已是整數的值必為零誤差,counter 同樣停在 0;
+            只有離網的 N = 3.13 才累積出上方已量化的 ~64% 落差拍(counter 收斂到約 164/256)。
+            但「on-grid 免疫」不是 Mode B 的通用保證 —— 換成 mash11,同一批 on-grid preset
+            (如 N = 3.125)下仍有約 59%(151/256)的拍偏離 256 刻度、多為 ±1 LSB:二階 MASH
+            兩級差分的結構,不像 ef1 一階迴路那樣能把誤差鎖進固定偏移。
+            <EpistemicTag kind="EXPERIMENT" />
           </li>
         </ul>
       </SectionObserve>

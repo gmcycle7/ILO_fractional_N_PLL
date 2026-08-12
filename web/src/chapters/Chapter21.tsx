@@ -16,7 +16,7 @@
  * TS 與 Python 逐位一致。
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   ChapterShell,
@@ -376,6 +376,60 @@ const EF1_SRC = `export class ErrorFeedbackFirstOrder implements QuantizerState 
   get state(): number { return this.e; }
 }`;
 
+/**
+ * 圖一之二的小格 sparkline:64 拍 e_PD[k] 依格自身峰值正規化畫線(縱軸尺度逐格不同,
+ * 只表達「形狀」——鋸齒週期、正負交錯、是否恆零)。exact 格(peak = 0)畫虛線。
+ */
+function FingerprintCell({
+  err,
+  exact,
+  accent,
+  line,
+}: {
+  err: Float64Array;
+  exact: boolean;
+  accent: string;
+  line: string;
+}) {
+  const W = 132;
+  const H = 40;
+  const pad = 3;
+  const plotW = W - pad * 2;
+  const plotH = H - pad * 2;
+  const midY = pad + plotH / 2;
+  if (exact) {
+    return (
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        style={{ width: '100%', height: 'auto', display: 'block' }}
+        role="img"
+        aria-label="e_PD ≡ 0(exact)"
+      >
+        <line x1={pad} y1={midY} x2={W - pad} y2={midY} stroke={line} strokeWidth={1.5} strokeDasharray="2,2" />
+      </svg>
+    );
+  }
+  const n = err.length;
+  const peak = maxAbs(err) || 1e-12;
+  const pts: string[] = new Array(n);
+  for (let k = 0; k < n; k++) {
+    const x = pad + (n > 1 ? (k / (n - 1)) * plotW : plotW / 2);
+    const y = midY - (err[k] / peak) * (plotH / 2 - 1);
+    pts[k] = `${x.toFixed(2)},${y.toFixed(2)}`;
+  }
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      style={{ width: '100%', height: 'auto', display: 'block' }}
+      role="img"
+      aria-label="e_PD[k] fingerprint, self-normalized to cell peak"
+    >
+      <line x1={pad} y1={midY} x2={W - pad} y2={midY} stroke={line} strokeWidth={1} />
+      <polyline points={pts.join(' ')} fill="none" stroke={accent} strokeWidth={1.3} />
+    </svg>
+  );
+}
+
 /* ================================================================== */
 
 export default function Chapter21() {
@@ -435,6 +489,36 @@ export default function Chapter21() {
     }
     return rows;
   }, []);
+
+  /**
+   * 圖一之二:64 拍 e_PD 指紋(nearest、無 dither),P 沿用圖一同一公式
+   * P = q/gcd(q,G)。列 = 5 preset N(+ 目前 slider N,若非 preset,額外插入一列);
+   * 欄 = 3 stage grid。18 次(至多)runStage(64 cycles)在同一 useMemo 內算完。
+   */
+  const fingerprint = useMemo((): {
+    n: number;
+    isPreset: boolean;
+    frac: string;
+    cells: { stage: StageDef; err: Float64Array; pPred: number | null; peakSec: number; exact: boolean }[];
+  }[] => {
+    const ns = N_DIV_PRESETS.includes(nDiv) ? N_DIV_PRESETS : [...N_DIV_PRESETS, nDiv].sort((a, b) => a - b);
+    return ns.map((n) => {
+      const tVcoN = 1 / (F_REF * n);
+      const fr = ratApprox(n - 3);
+      const cells = STAGE_DEFS.map((sd) => {
+        const run = runStage(n, 64, sd.s, 'nearest', 0);
+        const pPred = fr ? fr.q / gcd(fr.q, sd.s) : null;
+        const peakCyc = maxAbs(run.err);
+        return { stage: sd, err: run.err, pPred, peakSec: peakCyc * tVcoN, exact: peakCyc === 0 };
+      });
+      return {
+        n,
+        isPreset: N_DIV_PRESETS.includes(n),
+        frac: fr ? (fr.p === 0 ? '0' : `${fr.p}/${fr.q}`) : '—',
+        cells,
+      };
+    });
+  }, [nDiv]);
 
   /* ------------------------------------- Layer 2: 逐級暫態(互動模擬) */
   const transient = useMemo(() => {
@@ -1152,6 +1236,140 @@ export default function Chapter21() {
       </SectionFigure>
 
       <SectionFigure
+        title="圖一之二 — 每 N 誤差指紋:e_PD[k] sparkline 陣列(5 preset N × 3 stages,64 拍、nearest、無 dither)"
+        caption={
+          <span>
+            每格:x 軸 k = 0…63(reference cycle,同一起點);y 軸為<b>該格自身</b>正規化的
+            e_PD[k](sparkline —— 縱軸尺度逐格不同,只比較<b>形狀</b>——鋸齒週期、正負交錯、
+            是否恆零,不能跨格比幅度)。格內左下標 P(與圖一同一公式 P = q/gcd(q,G)
+            <EpistemicTag kind="EXACT" />),右下標 peak(64 拍內量測,以 formatSiTime 顯示;
+            α·G 為整數的格顯示綠色「exact」徽章,誤差恆 0)。列 = 5 個 preset N(若目前
+            slider N 不是 preset,額外插入一列並加粗標「目前」);欄 = divider / +PMUX /
+            +DTC 三級 grid,與本頁其餘圖表同一 stage 定義。<b>點擊任一格</b>會把該 N 載入
+            全站(TopBar/ParamPanel 的 N)並把 stage 切到該格,下方圖四/圖七的
+            stage-explorer 立即跟著換。<EpistemicTag kind="EXPERIMENT" />
+          </span>
+        }
+      >
+        <div style={{ overflowX: 'auto' }}>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: `132px repeat(${STAGE_DEFS.length}, minmax(150px, 1fr))`,
+              gap: 6,
+              minWidth: 640,
+              alignItems: 'stretch',
+            }}
+          >
+            <div />
+            {STAGE_DEFS.map((sd) => (
+              <div
+                key={`fp-head-${sd.key}`}
+                style={{
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: ct.textSubtle,
+                  textAlign: 'center',
+                  alignSelf: 'end',
+                  paddingBottom: 2,
+                }}
+              >
+                {sd.short}(G={sd.s})
+              </div>
+            ))}
+            {fingerprint.map((row) => (
+              <Fragment key={row.n}>
+                <div
+                  style={{
+                    fontSize: 13,
+                    fontWeight: row.isPreset ? 500 : 700,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    justifyContent: 'center',
+                    padding: '2px 6px 2px 0',
+                    borderRight: '1px solid var(--border)',
+                  }}
+                >
+                  <span>N = {row.n}</span>
+                  <span style={{ fontSize: 11, color: ct.textSubtle, fontWeight: 400 }}>
+                    α = {row.frac}
+                    {row.isPreset ? '' : '(目前)'}
+                  </span>
+                </div>
+                {row.cells.map((cell) => {
+                  const active = row.n === nDiv && stageKey === cell.stage.key;
+                  return (
+                    <button
+                      key={cell.stage.key}
+                      type="button"
+                      onClick={() => {
+                        setNDiv(row.n);
+                        setStageKey(cell.stage.key);
+                      }}
+                      title={`N=${row.n}(α=${row.frac})、${cell.stage.short}:P=${cell.pPred ?? '—'}、peak=${
+                        cell.exact ? '0(exact)' : formatSiTime(cell.peakSec)
+                      } — 點擊載入下方 stage-explorer`}
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 2,
+                        padding: '4px 6px',
+                        background: 'var(--bg-panel)',
+                        border: `1px solid ${active ? ct.accent : 'var(--border)'}`,
+                        borderRadius: 4,
+                        cursor: 'pointer',
+                        font: 'inherit',
+                        color: 'inherit',
+                        textAlign: 'left',
+                      }}
+                    >
+                      <FingerprintCell err={cell.err} exact={cell.exact} accent={ct.accent} line="var(--border)" />
+                      <span
+                        style={{
+                          fontSize: 11,
+                          color: ct.textSubtle,
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          gap: 6,
+                        }}
+                      >
+                        <span>P={cell.pPred ?? '—'}</span>
+                        {cell.exact ? (
+                          <span
+                            style={{
+                              color: ct.good,
+                              border: '1px solid currentColor',
+                              borderRadius: 3,
+                              padding: '0 4px',
+                              fontSize: 10,
+                              fontWeight: 700,
+                            }}
+                          >
+                            exact
+                          </span>
+                        ) : (
+                          <span>{formatSiTime(cell.peakSec)}</span>
+                        )}
+                      </span>
+                    </button>
+                  );
+                })}
+              </Fragment>
+            ))}
+          </div>
+        </div>
+        <p style={{ fontSize: 13, opacity: 0.85 }}>
+          非 preset 的「目前」列若 α 連分數在 q ≤ 1024 內找不到(P 欄顯示「—」,同圖七
+          check 1 的 N/A 判準),或 α 很接近 0,64 拍視窗可能還沒摺返一次 —— peak 此時只是
+          <b>視窗內量測值</b>,可能小於漸近上界 Δ/2(python3 實測:N=3.001@divider 64 拍
+          peak 0.063 cyc,512 拍後才到 0.5)。<EpistemicTag kind="EXPERIMENT" /> 5 個
+          preset 不受此限:python3 交叉驗證 64 拍與 512 拍的 peak 逐一相等
+          (含 divider 級 P=80/100 這種週期長於視窗的情況,因為峰值在週期內提早出現,
+          不需等滿一整個 P)。
+        </p>
+      </SectionFigure>
+
+      <SectionFigure
         title="圖二 — edge staircase:ideal 斜坡 vs 三級 grid 的量化樓梯(前 40 拍)"
         caption={
           <span>
@@ -1543,6 +1761,13 @@ export default function Chapter21() {
             圖一:N = 3.13 列 —— PMUX 與 DTC 的 P 都是 25(spur 間距同為 160 MHz),但
             peak 從 9.6 ps 縮到 149.8 fs:<b>加細 grid 縮幅度、不動頻率</b>。對照 N =
             3.1375:DTC 級 P 從 80 縮到 5(gcd 大),spur 反而變稀(800 MHz)。
+          </li>
+          <li>
+            圖一之二:同一列(N)橫向看三格 —— divider 鋸齒最陡最長、+PMUX 幅度縮 4× 且
+            鋸齒變密、+DTC 幾乎看不出形狀(峰值已在 fs 量級)。整列三格全「exact」只有
+            N=3.000;N=3.125 只有 DTC 格 exact,PMUX 格退化成 0/+1/8 兩態交錯的方波
+            (P=2)。這張 sparkline 陣列就是圖一 P=q/gcd(q,G) 表格的<b>視覺版</b>:週期、
+            交錯、恆零三種指紋一眼分辨。點一格,下方 stage-explorer 立刻切過去。
           </li>
           <li>
             圖二:divider 階梯一次跨 1 cycle(誤差鋸齒 ±0.5),DTC 階梯幾乎貼住灰線;把
