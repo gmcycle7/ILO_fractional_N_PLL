@@ -66,7 +66,7 @@ const PORT_TABLES: { module: string; rows: [string, string, string, string][] }[
     module: 'fractional_phase_scheduler',
     rows: [
       ['ref_clk', 'in', 'analog edge(vth)', 'reference clock,只用 rising edge'],
-      ['n_int_out', 'out', 'code × v_per_code', 'divider modulus;floor/nearest 為 {3,4},ef1 暫態允許 {2..5}'],
+      ['n_int_out', 'out', 'code × v_per_code', 'divider modulus;floor/nearest 為 {3,4};ef1 暫態 {2,3,4}(2 只在 α ≲ 0.012;5 對 N ∈ [3, 3.25] 不可達)—— §4'],
       ['m_fb_out', 'out', 'code × v_per_code', 'PMUX code 0..3'],
       ['c_fb_out', 'out', 'code × v_per_code', 'feedback DTC code 0..63'],
       ['s_ideal_out', 'out', '1 V/cycle', 'debug:s_ideal[k],無界成長(勿 lint 該節點)'],
@@ -662,7 +662,10 @@ export default function Chapter19() {
       <SectionObserve>
         <ul>
           <li>圖上 <code>n_int</code> 在 {'{3, 4}'} 之間切換(nearest/floor);把 quantizer 改成
-            ef1 可能出現暫態 {'{2..5}'} —— 這是 .va port 註解裡明寫的合法範圍。</li>
+            ef1 後,這幾個 preset 下集合仍是 {'{3, 4}'} —— §4 [EXACT] 的 ef1 可達集合是{' '}
+            {'{2, 3, 4}'}(2 只在 α ≲ 0.012 且 s0 ≠ 0 時出現),5 對 N ∈ [3, 3.25] 不可達
+            (只在 dsm_only 模式可達,而 .va 未實作 dsm_only)—— .va port 註解寫的就是這個
+            接受範圍。</li>
           <li><code>c_INJ</code> 與 <code>j_INJ</code> 隨 k <strong>倒退</strong>旋轉
             (reverse injection),而 <code>c_FB</code> 正向前進;N=3.125 時 j_INJ 每拍
             剛好 −1 tap。</li>

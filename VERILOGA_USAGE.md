@@ -42,7 +42,7 @@ in order, matching the Python model).
 | Port | Dir | Encoding | Meaning |
 |---|---|---|---|
 | `ref_clk` | in | analog edge, threshold `vth` | reference clock, rising edges only |
-| `n_int_out` | out | code × `v_per_code` | divider modulus command; {3,4} for floor/nearest, transients {2..5} legal for ef1 (§4) |
+| `n_int_out` | out | code × `v_per_code` | divider modulus command; {3,4} for floor/nearest; ef1 transients {2,3,4} (2 only for alpha < ~0.012; 5 unreachable for N in [3,3.25]) — MODEL_SPEC.md §4 |
 | `m_fb_out` | out | code × `v_per_code` | PMUX code 0..3 |
 | `c_fb_out` | out | code × `v_per_code` | feedback DTC code 0..63 |
 | `s_ideal_out` | out | 1 V/cycle | debug: `s_ideal[k]` — **grows without bound** |

@@ -9,6 +9,7 @@
  * themes without JS involvement.
  */
 
+import { useRef } from 'react';
 import type { ReactNode } from 'react';
 
 export interface WheelTap {
@@ -73,6 +74,9 @@ export default function PhaseWheel({
   title,
 }: PhaseWheelProps) {
   const showTickLabels = !taps || taps.length === 0;
+  // 每根 marker 的累積 render 角度:讓 CSS transition 走「最短有號步長」而不是
+  // 對 wrapped 絕對角度做數值內插(否則 wrap 拍會反向長繞一圈)。
+  const prevDegs = useRef<number[]>([]);
 
   return (
     <figure className={`phase-wheel${animateToMarker ? ' wheel-animate' : ''}`}>
@@ -161,7 +165,17 @@ export default function PhaseWheel({
         {/* markers: needles from center, rotated via CSS transform so they can animate */}
         {markers.map((m, i) => {
           const rr = (m.r ?? 0.8) * R;
-          const deg = 360 * wrap01(m.angleCycles);
+          const target = 360 * wrap01(m.angleCycles);
+          const prev = prevDegs.current[i];
+          let deg: number;
+          if (prev === undefined || !animateToMarker) {
+            deg = target;
+          } else {
+            let delta = target - (((prev % 360) + 360) % 360);
+            delta -= 360 * Math.round(delta / 360); // 最短有號步長
+            deg = prev + delta;
+          }
+          prevDegs.current[i] = deg;
           const color = m.color ?? 'var(--accent)';
           return (
             <g

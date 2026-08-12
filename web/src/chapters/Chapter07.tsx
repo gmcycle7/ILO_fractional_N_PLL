@@ -457,8 +457,9 @@ export default function Chapter07() {
         title="#10 / #11 tap code 與 injection DTC code 序列"
         caption={
           <span>
-            x 軸為 reference cycle k(N = 3 + α,Mode D,nearest quantizer)。上圖 j_INJ 逐拍遞減
-            (反向旋轉,α=0.13 時每拍約 −33.3 LSB ≈ −1 tap);下圖 c_INJ:naive/nearest 永遠停在{' '}
+            x 軸為 reference cycle k(N = 3 + α,Mode D,nearest quantizer)。上圖 j_INJ 隨 α
+            反向旋轉而遞減(α ≥ 1/8 時每拍至少退一格;α=0.13 時每拍約 −33.3 LSB ≈ −1 tap;
+            0 {'<'} α {'<'} 1/8 時偶爾停留,α = 0 時為水平線);下圖 c_INJ:naive/nearest 永遠停在{' '}
             <M>{'c \\le 31'}</M>(虛線以下),calibrated + mismatch 時會跳進 32–63 的 redundant 區。
             兩圖 x 軸連動。
           </span>

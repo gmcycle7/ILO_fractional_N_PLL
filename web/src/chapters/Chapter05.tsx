@@ -524,7 +524,9 @@ export default function Chapter05() {
           <span>
             上圖:time LSB(normalized 隨 T_vco/256 從 325.521 fs 降到 300.481 fs;fixed-time 恆為
             312.5 fs)與 peak |e_FB_analog|(nearest,128 cycles/點)。normalized 的 peak 貼著
-            half-LSB(~145–156 fs,half-LSB 的 fs 值本身隨 T_vco 縮小);fixed-time 的 peak 呈 V
+            half-LSB(多數點 ~145–156 fs,half-LSB 的 fs 值本身隨 T_vco 縮小;α =
+            0.05/0.10/0.15/0.20 四點因誤差週期 P = 5、peak = ⌊P/2⌋/P = 0.4 LSB(Ch21 Layer-1
+            公式),下探到 ~122–128 fs);fixed-time 的 peak 呈 V
             形:谷底在 12.5 GHz 附近(~0.17 ps),往低頻端升到 0.87 ps(12.04 GHz)。兩種 mode 在
             恰好 12.00 / 13.00 GHz 都掉到 0——α = 0 或 0.25 時 on-grid 且 c_FB ≡ 0,誤差機制都
             不被激發。下圖:phase LSB——normalized 恆 1.40625°,fixed-time 從 1.35° 變到 1.4625°。
@@ -619,7 +621,8 @@ export default function Chapter05() {
             N = 3.130(12.52 GHz)時因為貼近 12.5 GHz,scale 項只有 ~0.5 fs/LSB,幾乎看不出差異。
           </li>
           <li>
-            圖 #28 上圖:normalized 的 peak error 貼著 half-LSB;fixed-time 呈 V 形,谷底在 12.5
+            圖 #28 上圖:normalized 的 peak error 貼著 half-LSB(P = 5 的四個 α 例外,降到 0.4
+            LSB);fixed-time 呈 V 形,谷底在 12.5
             GHz 附近。兩條 peak 曲線在恰好 12.00/13.00 GHz 同時歸零(α = 0 / 0.25 → on-grid 且
             c_FB ≡ 0)。下圖:兩種 mode 的 phase LSB 在 12.5 GHz 交叉——那正是 312.5 fs 這個數字
             的由來。

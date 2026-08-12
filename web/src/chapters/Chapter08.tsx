@@ -212,7 +212,8 @@ export default function Chapter08() {
           數位實作裡「誰負責維持這個恆等式」?若 feedback 與 injection 各自拿一份 fractional
           trajectory 去 round(Mode A/B/C),兩個 quantizer 在同一拍可能往不同方向捨入 ——
           平均而言都對,但<strong>逐拍</strong>的 reverse 關係被打破,pair error 在 ±1 LSB 之間跳動。
-          對 DSM 型 quantizer 特別嚴重:兩邊的 error state 各自演化,何時進位互不相關。
+          對 DSM 型 quantizer 特別嚴重:兩邊的 error state 各自演化,何時進位一般互不相關
+          (α·G 為整數、或兩份 state 湊巧鎖入互補週期軌道時例外)。
         </p>
         <p>
           Mode D 的做法像「同一根軸上的兩個齒輪」:只 quantize 一次得到 <M>{'R_{FB}'}</M>,injection
@@ -255,7 +256,7 @@ export default function Chapter08() {
                 <td>同 A,但兩邊都是 DSM 型(ef1/mash11)、獨立 state</td>
                 <td>共享</td>
                 <td>獨立(各自演化)</td>
-                <td>非零、time-varying(ef1:{'{−1, 0, +1}'} LSB、約 64% 拍非零;mash11 至 ±3)→「不建議」</td>
+                <td>α·G 非整數時非零、time-varying(ef1 @ α = 0.13:{'{−1, 0, +1}'} LSB、約 64% 拍非零;mash11 至 ±3);α·G 為整數(N = 3.000/3.125/3.250)時兩邊輸入皆為整數 LSB → pair ≡ 0 →「不建議」</td>
               </tr>
               <tr>
                 <td>C</td>
@@ -524,6 +525,13 @@ export function ePair(
             不規則跳動 —— 256 拍中約 64% 非零,−1 / 0 / +1 約各佔三分之一,兩個獨立 DSM 的
             進位時刻互不相關。這就是「平均正確、cycle-by-cycle 錯誤」。切到 mash11 跳動範圍
             擴到 ±3 LSB(多為 ±1)。
+          </li>
+          <li>
+            <strong>Mode B 的病徵對 N 與 seed 敏感</strong>:N = 3.000/3.125/3.250(α·G 為整數)時
+            兩邊 quantizer 的輸入皆為整數 LSB,對任何 seed pair ≡ 0(結構性歸零);N = 3.1375 時
+            本站 seed(12345)下兩份獨立 ef1 state 恰好鎖入互補的極限週期,R_INJ 與 Mode D
+            逐位相同、pair 同樣全零 —— 五個 preset 中只有 N = 3.13 能觀察到 Mode B 的病徵。
+            <EpistemicTag kind="EXPERIMENT" />
           </li>
           <li>
             <strong>切到 Mode D(任何 quantizer)</strong>:e_pair_digital 變成一條精確為 0 的直線

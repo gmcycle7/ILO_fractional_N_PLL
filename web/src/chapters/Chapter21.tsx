@@ -307,7 +307,7 @@ function fitSlopeRatio(rawErr: Float64Array, order: number): { slope: number; r2
  * tone-bin 集中度:DC/Nyquist 鄰域 + (spur ±1 bins) 的功率占比。
  * detectSpurs 只掃內點,P = 2 之類「tone 恰在 Nyquist」的情況由固定納入的
  * 末兩 bin 涵蓋(python 驗證:無 dither、P ≤ 128 時 preset 0.987–1.000、
- * slider 掃描 ≥ 0.94;PMUX/DTC 級 dither 0.5 → 0.003–0.090)。
+ * slider 掃描 ≥ 0.93;PMUX/DTC 級 dither 0.5 → 0.003–0.090)。
  */
 function combConcentration(freqs: Float64Array, psd: Float64Array): number {
   let tot = 0;
@@ -613,17 +613,21 @@ export default function Chapter21() {
         name: '2. shaping 斜率 ≈ +20n dB/dec',
         status: 'na',
         detail: 'nearest 無 shaping(order 0)→ 不適用;選 ef1/mash11/mash111 觀察',
-        tolerance: '|slope − 20n| ≤ 4 dB/dec',
+        tolerance: '|slope − 20n| ≤ 4 dB/dec(order 3:≤ 6)',
       });
     } else {
       const diagRaw = runStage(nDiag, NC_PSD, stage.s, quant, 0).raw;
       const fit = fitSlopeRatio(diagRaw, order);
-      const ok = Math.abs(fit.slope - 20 * order) <= 4;
+      // order 3(mash111)在全 slider grid(N = 3–3.25 step 0.0005 × 3 stage)實測
+      // fit 範圍 57.5–65.5 dB/dec(python3 全掃描)→ 容差放寬到 ±6;order 1/2 最大
+      // 偏差 < 2.3 dB/dec,維持 ±4。
+      const tol = order === 3 ? 6 : 4;
+      const ok = Math.abs(fit.slope - 20 * order) <= tol;
       checks.push({
         name: '2. shaping 斜率 ≈ +20n dB/dec',
         status: ok ? 'pass' : 'fail',
         detail: `order ${order}:fit ${trimNumber(fit.slope, 4)} dB/dec(R² ${trimNumber(fit.r2, 3)});期望 +${20 * order}(含 sin 曲率的理論 fit ≈ +${trimNumber([19.6, 39.3, 58.9][order - 1], 3)});診斷序列 N* = ${trimNumber(nDiag, 8)}(未 wrap)`,
-        tolerance: '|slope − 20n| ≤ 4 dB/dec,band [62.5, 625] MHz',
+        tolerance: '|slope − 20n| ≤ 4 dB/dec(order 3:≤ 6),band [62.5, 625] MHz',
       });
     }
 
@@ -720,7 +724,7 @@ export default function Chapter21() {
           detail: `tone-bin 集中度 = ${trimNumber(conc, 4)}(nearest${dither > 0 ? ` + dither ${trimNumber(dither, 3)} LSB` : ''})${
             stage.s === 1 && dither > 0 ? ';divider 級 y±1 wrap 後不可見 → dither 無效' : ''
           };${expectComb ? '期望純 comb(≥ 0.9)' : 'dither ≥ 0.5 → 期望 tone 攤成 floor(≤ 0.5)'}`,
-          tolerance: 'comb ≥ 0.9(preset 實測 0.987–1.000;slider P ≤ 128 掃描 ≥ 0.94);floor ≤ 0.5(dither 0.5 實測 0.003–0.090)',
+          tolerance: 'comb ≥ 0.9(preset 實測 0.987–1.000;slider P ≤ 128 掃描 ≥ 0.93);floor ≤ 0.5(dither 0.5 實測 0.003–0.090)',
         });
       }
     }
@@ -1225,8 +1229,8 @@ export default function Chapter21() {
           </table>
         </div>
         <p style={{ fontSize: 13, opacity: 0.85 }}>
-          矩陣即時計算(無 dither;摺疊 = |raw| ≥ 0.5 cycle 的拍數,含恰為 +0.5 被 wrap
-          成 −0.5 的拍)。N=3.13 驗證錨點:DTC 列 peak = 0.48 / 0.76 / 1.36 / 1.76 LSB
+          矩陣即時計算(無 dither;摺疊 = |raw| ≥ 0.5 cycle 的拍數,含恰為 +0.5 的拍
+          ——wrapCycles 範圍是 (−0.5, 0.5],+0.5 不被 wrap 改變)。N=3.13 驗證錨點:DTC 列 peak = 0.48 / 0.76 / 1.36 / 1.76 LSB
           (nearest → mash111,與 Ch11 exp22 相同);divider 列的 DSM 出現大量 wrap 摺疊
           (ef1 raw ±0.9 cyc、132 拍;python3 同值)且 n_int 集合擴大(mash111 到 {'{−3…9}'}
           —— 對 /3-/4 硬體不可實作,只是把數學推到極端的教學展示)。
@@ -1416,14 +1420,15 @@ export default function Chapter21() {
           strong spur 都落在 m·f_ref/P 格點 ±1 bin;(2) DSM 誤差 ≡
           (1−z⁻¹)ⁿ × 有界序列 → 對 n 重積分的 PSD 比值斜率 +20n dB/dec [EXACT],python3
           掃 5 preset × 3 stage 實測 fit:order 1 = 19.5–19.8、order 2 = 39.0–39.5、order 3
-          = 59.6–61.7 dB/dec [EXPERIMENT];(3) periodogramPsd 的 U = mean(w²) 歸一化
+          = 59.6–61.7 dB/dec;order 3 對全 slider grid(N = 3–3.25 step 0.0005 × 3 stage)
+          實測 57.5–65.5 dB/dec → order 3 容差放寬為 ±6 [EXPERIMENT];(3) periodogramPsd 的 U = mean(w²) 歸一化
           (measurements.ts docstring:「white noise integrates to its variance」)保證
           寬頻訊號 Parseval 成立,短週期 tonal(P ≤ 128)python 實測 ratio:preset
           0.865–1.101、slider 掃描 0.967–1.021;慢 tonal(P {'>'} 128 無 dither)可偏到
           1.9 → N/A [EXPERIMENT];(4) 靜態 offset 只出現在 DC bin:N=3.125@PMUX nearest
           的 mean = +1/16 cycle 由 DC bin 反推分毫不差 [EXACT](dither / P {'>'} 128 時
           對帳失效 → N/A);(5) deterministic 短週期 → comb(preset 實測 0.987–1.000、
-          slider P ≤ 128 掃描 ≥ 0.94;P = 2 的 Nyquist tone 由固定納入的末兩 bin 涵蓋)、
+          slider P ≤ 128 掃描 ≥ 0.93;P = 2 的 Nyquist tone 由固定納入的末兩 bin 涵蓋)、
           dither ≥ 0.5(PMUX/DTC)→ floor(0.003–0.090)[EXPERIMENT]。
         </p>
       </SectionFigure>
@@ -1504,7 +1509,7 @@ export default function Chapter21() {
             code: 'err[k] = wrapCycles(raw[k]);',
             explain: (
               <span>
-                PD 只能看到 wrap 到 [−0.5, 0.5) 的相位差 —— e_PD 的定義。raw 與 err 不同
+                PD 只能看到 wrap 到 (−0.5, 0.5] 的相位差 —— e_PD 的定義。raw 與 err 不同
                 的拍就是「摺疊」:shaped 誤差 aliasing 回 in-band(Layer 3 的 mash111@PMUX)。
                 <EpistemicTag kind="EXACT" />
               </span>

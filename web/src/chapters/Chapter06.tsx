@@ -103,6 +103,7 @@ export default function Chapter06() {
         n_cycles: N_SIM,
         quantizer,
         z0_cycles: z0,
+        r_zero: Math.round(256 * z0), // mode-D 硬體目標跟著 z0(slider step = 1/256 → 恰為整數)
         tap_mismatch_cycles: mm,
         dtc_inj_gain: gainMm ? 1.01 : 1.0,
         sigma_vco_w_rad: sigmaVco,
@@ -110,7 +111,7 @@ export default function Chapter06() {
       }),
     );
     const base = simulate(
-      fromPartial({ n_div: nDiv, n_cycles: N_SIM, quantizer, z0_cycles: z0 }),
+      fromPartial({ n_div: nDiv, n_cycles: N_SIM, quantizer, z0_cycles: z0, r_zero: Math.round(256 * z0) }),
     );
     return { cur, base };
   }, [nDiv, z0, quantizer, tapMm, gainMm, sigmaVco]);
@@ -557,7 +558,8 @@ for (let k = 0; k < n; k++) {
               <span>
                 §5.1 的 <M>{'e_{ZC}'}</M> 公式在 deterministic 層的實作:VCO nominal phase + 實際
                 injection delay − 目標 <M>{'z_0'}</M>,wrap 到 <M>{'(-\\tfrac12,\\tfrac12]'}</M>。
-                理想 mapping 下此值為 0;quantization 讓它在 ±half-LSB 內跳動。
+                理想 mapping 下此值為 0;nearest quantization 讓它在 ±half-LSB 內跳動
+                (floor/truncate 為單邊 [0, 1 LSB);ef1/mash11 可達數個 half-LSB)。
               </span>
             ),
           },
@@ -577,13 +579,16 @@ for (let k = 0; k < n; k++) {
       <SectionObserve>
         <ul>
           <li>
-            <strong>雙輪動畫</strong>:兩根指針對 <M>{'z_0'}</M> 軸鏡像對稱;按「步進 +1」左輪順時針
+            <strong>雙輪動畫</strong>:兩根指針對 <M>{'z_0/2'}</M> 軸鏡像對稱(等價於兩角相加恆為{' '}
+            <M>{'z_0'}</M>;預設 <M>{'z_0=0'}</M> 時鏡射軸即 12 點鐘方向);按「步進 +1」左輪順時針
             +α、右輪逆時針 −α。α=0.13 時第 100 拍兩輪同時回到起點(0.13 的循環長度)。讀值列的{' '}
             <M>{'\\operatorname{wrap01}(x+u)'}</M> 永遠等於 <M>{'z_0'}</M> —— 這是 identity,不是巧合。
           </li>
           <li>
-            <strong>分解圖(全 ideal analog)</strong>:實線與虛線重合,且被 ±half-LSB(
-            {formatPhase(HALF_LSB_CYC, unit, tVco)})參考線夾住 —— 只剩第 3 類 quantization error。
+            <strong>分解圖(全 ideal analog,quantizer = nearest)</strong>:實線與虛線重合,且被
+            ±half-LSB({formatPhase(HALF_LSB_CYC, unit, tVco)})參考線夾住 —— 只剩第 3 類
+            quantization error。切 floor/truncate 時誤差變單邊 [0, 1 LSB);ef1/mash11 的瞬時誤差
+            可達數個 half-LSB(被 noise-shape,不是被夾住)。
           </li>
           <li>
             <strong>開 1° tap mismatch 或 1% DTC gain</strong>:實線離開虛線,出現超出 half-LSB
@@ -596,7 +601,8 @@ for (let k = 0; k < n; k++) {
             回來是 injection dynamics 的工作(Ch13),不是 scheduler 的。
           </li>
           <li>
-            切 quantizer 到 ef1/mash11:<M>{'e_{ZC,hw}'}</M> 的圖樣改變(誤差被 noise-shape),但仍是
+            切 quantizer 到 ef1/mash11:<M>{'e_{ZC,hw}'}</M> 的圖樣改變(誤差被 noise-shape)、瞬時值
+            超出 ±half-LSB 參考線(mash11 在 N=3.001 時至 ~3.7× half-LSB),但仍是
             deterministic —— 給定 state 完全可重現。
           </li>
         </ul>

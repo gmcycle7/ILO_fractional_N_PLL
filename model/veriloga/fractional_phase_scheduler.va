@@ -64,7 +64,8 @@ module fractional_phase_scheduler(ref_clk,
   input  ref_clk;      // reference clock; only RISING edges are used
                        // (ASSUMPTIONS.md A1: ideal 4 GHz square, rising edge)
   output n_int_out;    // divider modulus command n_int[k]; {3,4} for
-                       // floor/nearest, transients {2..5} allowed for ef1
+                       // floor/nearest; ef1 transients {2,3,4} (2 only for
+                       // alpha < ~0.012; 5 unreachable for N in [3,3.25])
                        // (MODEL_SPEC.md sec.4)
   output m_fb_out;     // PMUX code m_FB[k] in {0,1,2,3}   (v = code * v_per_code)
   output c_fb_out;     // DTC  code c_FB[k] in {0..63}     (v = code * v_per_code)
