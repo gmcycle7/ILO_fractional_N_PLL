@@ -8,13 +8,13 @@ import { EXPERIMENTS, PRESETS, getPreset, presetConfigs } from '../experiments';
 import { simulate } from '../simulate';
 
 describe('experiment presets (Test 11)', () => {
-  it('has the 23 canonical experiments plus the alias', () => {
-    expect(EXPERIMENTS.length).toBe(23);
+  it('has the 24 canonical experiments plus the alias', () => {
+    expect(EXPERIMENTS.length).toBe(24);
     const ids = EXPERIMENTS.map((e) => e.id);
-    for (let i = 1; i <= 23; i++) {
+    for (let i = 1; i <= 24; i++) {
       expect(ids).toContain(`exp${String(i).padStart(2, '0')}`);
     }
-    expect(Object.keys(PRESETS).length).toBe(24);
+    expect(Object.keys(PRESETS).length).toBe(25);
     expect(PRESETS.n3p13_shared_reverse).toBeDefined();
   });
 

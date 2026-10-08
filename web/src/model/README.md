@@ -37,16 +37,16 @@ mulberry32 with named streams, base seed 12345 (MODEL_SPEC §12).
 | `config.ts` | `config.py` | `SimConfig` (snake_case keys = JSON vector schema), `defaultConfig()`, `fromPartial()`, `replaceConfig()`, derived `configG/Alpha/TRefS/TVcoS` |
 | `phaseAccumulator.ts` | `phase_accumulator.py` | §3 `sIdeal`/`xIdeal`/`aIdeal` |
 | `quantizers.ts` | `dsm_first_order.py`, `mash11.py`, `mash111.py`, `feedback_scheduler.py` | §6 floor/nearest/truncate/`ErrorFeedbackFirstOrder`/`Mash11`/`Mash111`, `makeQuantizer`, triangular dither |
-| `rng.ts` | `noise_models.py` | §12 `Mulberry32` (+ Box-Muller `gauss()`), named streams `ref:1 … dsm_inj:10` |
+| `rng.ts` | `noise_models.py` | §12 `Mulberry32` (+ Box-Muller `gauss()`), named streams `ref:1 … dsm_inj:10, map_inj:11` |
 | `dtcModel.ts` | `dtc_model.py` | §10, §11 gain/offset/INL/DNL behavioral DTC |
 | `tapModel.ts` | `tap_model.py` | §4, §5, §10 tap/PMUX tables with mismatch |
 | `feedbackScheduler.ts` | `feedback_scheduler.py` | §4 quantize + decode `A_FB → I/R/m/c`, assertions |
-| `injectionScheduler.ts` | `injection_scheduler.py` | §5, §7, §8 modes A/B/C/D, naive/nearest/calibrated mappings (c-major tie-break), `ePair` |
+| `injectionScheduler.ts` | `injection_scheduler.py` | §5, §7, §8 modes A/B/C/D, naive/nearest/calibrated mappings (c-major tie-break) + `redundant_random` DEM (§8 mapping 4, one `map_inj` draw per cycle), `ePair` |
 | `latencyPipeline.ts` | `latency_pipeline.py` | §13 latency + look-ahead + metadata |
 | `injectionDynamics.ts` | `injection_dynamics.py` | §14 none/reset/linear/sin/lut maps, `lockCondition`, `sinFixedPointRad` |
 | `measurements.ts` | `measurements.py` | §17 rms/p2p/mean/histogram, plain radix-2 FFT, Hann periodogram (one-sided, fs = f_ref), `detectSpurs`, dBc helpers |
 | `errorDecomposition.ts` | `error_decomposition.py` | §16 per-term decomposition + joint total |
-| `experiments.ts` | `experiments.py` | the 22 presets `exp01…exp22` + `n3p13_shared_reverse` alias (same ids/configs) |
+| `experiments.ts` | `experiments.py` | the 24 presets `exp01…exp24` + `n3p13_shared_reverse` alias (same ids/configs) |
 | `simulate.ts` | `simulate.py` | full chain; `SimResult.data` keyed by the same column names (`COLUMNS`), `toRows()`, `summary()` |
 | `index.ts` | `__init__` | public re-export surface |
 

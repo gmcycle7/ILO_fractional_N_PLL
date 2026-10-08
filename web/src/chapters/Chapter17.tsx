@@ -296,6 +296,29 @@ const EXP_META: Record<string, ExpMeta> = {
       '(0.060)與失鎖的 injection-only(1.82)。但 route_inj 這類 injection 端的靜態 offset' +
       '會被積分器吸收進 u_loop,永久改變 VCO 穩態 detuning,不是「自由」的校正項。',
   },
+  exp24: {
+    plot: 'e_ZC_hw',
+    metric: 'e_ZC_hw',
+    chapters: [7, 15, 16],
+    observe:
+      '三條 e_ZC_hw[k]:(a) naive、(b) redundant_random(p=0.5)、(c) calibrated。N=3.22265625 ' +
+      'on-grid(α·G=57),e_FB_abs 全程恆 0,所以 e_ZC_hw 是純 tap mismatch(1.00° rms)+ ' +
+      'dtc_inj_gain=1.01 的誤差。以下為 2048 cycles 量測值(seed 12345;browser n_cycles 滑桿' +
+      '最多 512,只截取前段):(a) naive rms 223.8 fs、峰值 365.5 fs,完全週期(週期 256)' +
+      '→ 127 條 spur,最強 −101.2 dB @437.5 MHz(相鄰 tap 交替),α·f_ref 基頻 890.625 MHz ' +
+      '為 −111.1 dB,無 noise floor;(b) DEM 在 1084/2048 cycle 改選替代解 (j−1, c+32),' +
+      '437.5 MHz spur 降 25.1 dB(到 −126.4 dB)、spur 只剩 2 條,最強 spur 降 9.8 dB(−111.0 dB),' +
+      '但那條是 890.625 MHz 基頻,幾乎沒降(−111.1 → −111.0 dB);代價是 −129.9 dB 的 noise-like ' +
+      'floor,且 rms 反而升到 246.1 fs(+10%)、峰值 462.4 fs;(c) calibrated rms 60.3 fs、峰值 124.0 fs,' +
+      '仍是週期(127 條 spur、無 floor),最強 spur −116.3 dB(比 naive 低 15.0 dB)。' +
+      '圖上 (a)(c) 在 256 拍視窗內剛好是一個完整週期,(b) 則是隨機在兩種解之間跳動的不規則軌跡。',
+    conclusion:
+      'DEM 是把 mismatch 誤差從 spur 搬到 noise floor,不是移除:redundant_random 把 tap 交替' +
+      '產生的 437.5 MHz spur 打散,但 890.625 MHz 基頻與 875 MHz DTC-gain 鋸齒 spur ' +
+      '(−119.7 → −118.7 dB)不受影響,rms 與峰值還變大(上半段 DTC 看到最多 63 code 的 gain error)。' +
+      '若要真的縮小 rms、peak 與最強 spur,必須 calibrated(rms 223.8 → 60.3 fs、最強 spur ' +
+      '−15.0 dB,且不引入 floor),但前提是要先量得 mismatch。',
+  },
 };
 
 /* ------------------------------------------------------------------ */

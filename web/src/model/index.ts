@@ -109,7 +109,7 @@ export {
 export type { Decomposition } from './errorDecomposition';
 export { decompose } from './errorDecomposition';
 
-// experiments / presets (the 23 canonical numerical experiments)
+// experiments / presets (the 24 canonical numerical experiments)
 export type { Experiment } from './experiments';
 export { EXPERIMENTS, PRESETS, getPreset, presetConfigs } from './experiments';
 

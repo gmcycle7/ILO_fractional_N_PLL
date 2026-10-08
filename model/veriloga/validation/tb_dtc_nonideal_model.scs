@@ -1,0 +1,77 @@
+// =============================================================================
+// tb_dtc_nonideal_model.scs  --  Spectre testbench
+// STATUS: UNRUN. Written without access to Spectre (or any simulator that can
+// compile event-driven Verilog-A); never parsed by Spectre. See README.md.
+//
+// DUT     : ../dtc_nonideal_model.va (module dtc_nonideal_model)
+// Codes   : PWL from the committed command CSVs (python3 gen_stimulus.py --all)
+//             code_v125/tap_v125 <- n3p125_tap_mismatch_1deg c_INJ / j_INJ
+//             code_v130/tap_v130 <- n3p130_nearest           c_INJ / j_INJ
+// Instances and expected delay (rising out crossing - rising trig crossing
+// - t_rise/2, compared with u_INJ_analog[k] * T_vco):
+//   dtc_tap   committed n3p125_tap_mismatch_1deg (taps j*T_vco/8 + T_vco/360,
+//             T_vco = 80 ps). NOTE c_INJ == 0 on every row at N = 3.125.
+//   dtc_ideal committed n3p130_nearest (ideal DTC, c_INJ 0..31)
+//   dtc_gain  n3p130_nearest codes, gain = 1.01; expected = golden model
+//             re-run with dtc_inj_gain = 1.01 (the committed
+//             n3p125_dtc_gain_1pct is degenerate: c_INJ == 0, gain never acts)
+//   dtc_inl   n3p130_nearest codes, offset 0.01 cyc + sin INL 0.002 cyc +
+//             poly INL (0.001, -0.0005) cyc; expected = golden re-run.
+// All taps carry the NOMINAL tap phase j*T_vco/8 (VERILOGA_USAGE.md hookup
+// rule 3), so the measured delay is the full u_INJ_analog of the vector.
+// =============================================================================
+simulator lang=spectre
+global 0
+
+ahdl_include "../dtc_nonideal_model.va"
+
+// Timing plan -- MUST equal kit_common.TIMING (check_results.py --lint).
+//   tarm : trigger crossing at k*tref + tarm (codes settled since k*tref+21p)
+//   wdtc : trigger high time. Deliberately LONGER than the largest delay
+//          (~90 ps with nominal taps): dtc_nonideal_model schedules the fall
+//          through the same transition() delay, and a transition() change
+//          issued while the rising one is still pending is tool-dependent
+//          (see README "suspected .va issues").
+parameters tref=250e-12 tramp=1e-12 tarm=100e-12 wdtc=120e-12 nref=512 \
+        tstop=nref*tref tvco125=1/(3.125*4e9) tvco130=1/(3.13*4e9) \
+        tmm125=tvco125/360
+
+vtrig (trig 0) vsource type=pulse val0=0 val1=1 period=tref \
+        delay=tarm-tramp/2 rise=tramp fall=tramp width=wdtc
+
+v_code125 (code_v125 0) vsource type=pwl file="build/stim/n3p125_tap_mismatch_1deg__c_INJ.pwl"
+v_tap125  (tap_v125 0)  vsource type=pwl file="build/stim/n3p125_tap_mismatch_1deg__j_INJ.pwl"
+v_code130 (code_v130 0) vsource type=pwl file="build/stim/n3p130_nearest__c_INJ.pwl"
+v_tap130  (tap_v130 0)  vsource type=pwl file="build/stim/n3p130_nearest__j_INJ.pwl"
+
+// --- ports: trig_in code_in tap_sel_in trig_out ------------------------------
+dtc_tap (trig code_v125 tap_v125 dtc_tap_out) dtc_nonideal_model \
+        lsb_s=tvco125/256 gain=1.0 offset_s=0 use_tap=1 n_codes=64 \
+        tap0=0*tvco125/8+tmm125 tap1=1*tvco125/8+tmm125 \
+        tap2=2*tvco125/8+tmm125 tap3=3*tvco125/8+tmm125 \
+        tap4=4*tvco125/8+tmm125 tap5=5*tvco125/8+tmm125 \
+        tap6=6*tvco125/8+tmm125 tap7=7*tvco125/8+tmm125 \
+        vth=0.5 v_per_code=1 vhi=1 vlo=0 t_rise=1e-12
+
+dtc_ideal (trig code_v130 tap_v130 dtc_ideal_out) dtc_nonideal_model \
+        lsb_s=tvco130/256 gain=1.0 offset_s=0 use_tap=1 n_codes=64 \
+        tap0=0*tvco130/8 tap1=1*tvco130/8 tap2=2*tvco130/8 tap3=3*tvco130/8 \
+        tap4=4*tvco130/8 tap5=5*tvco130/8 tap6=6*tvco130/8 tap7=7*tvco130/8 \
+        vth=0.5 v_per_code=1 vhi=1 vlo=0 t_rise=1e-12
+
+dtc_gain (trig code_v130 tap_v130 dtc_gain_out) dtc_nonideal_model \
+        lsb_s=tvco130/256 gain=1.01 offset_s=0 use_tap=1 n_codes=64 \
+        tap0=0*tvco130/8 tap1=1*tvco130/8 tap2=2*tvco130/8 tap3=3*tvco130/8 \
+        tap4=4*tvco130/8 tap5=5*tvco130/8 tap6=6*tvco130/8 tap7=7*tvco130/8 \
+        vth=0.5 v_per_code=1 vhi=1 vlo=0 t_rise=1e-12
+
+dtc_inl (trig code_v130 tap_v130 dtc_inl_out) dtc_nonideal_model \
+        lsb_s=tvco130/256 gain=1.0 offset_s=0.01*tvco130 \
+        inl_sin_amp_s=0.002*tvco130 p2_s=0.001*tvco130 p3_s=-0.0005*tvco130 \
+        use_tap=1 n_codes=64 \
+        tap0=0*tvco130/8 tap1=1*tvco130/8 tap2=2*tvco130/8 tap3=3*tvco130/8 \
+        tap4=4*tvco130/8 tap5=5*tvco130/8 tap6=6*tvco130/8 tap7=7*tvco130/8 \
+        vth=0.5 v_per_code=1 vhi=1 vlo=0 t_rise=1e-12
+
+// Output format is chosen on the command line (run_all.sh: -format psfbin).
+tran tran stop=tstop errpreset=conservative

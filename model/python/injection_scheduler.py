@@ -42,6 +42,21 @@ Mappings (input digital code R_INJ; target u_target = R_INJ/G):
                  then smaller j (candidates enumerated c-major so argmin's
                  first-minimum rule implements the tie-break exactly)
     calibrated : argmin using actual tap + DTC + route models.
+    redundant_random (spec section 8 item 4; redundancy-based dynamic
+                 element matching, DEM): per computed command k (ascending),
+                 draw ONE uniform u from the 'map_inj' PRNG stream (section
+                 12, offset 11) — the draw is consumed on every cycle, also
+                 when map_rand_p is 0 or 1 — and with
+                 j0 = floor(R/32), c0 = R mod 32:
+                     u <  map_rand_p -> (j, c) = ((j0 - 1) mod 8, c0 + 32)
+                     u >= map_rand_p -> (j, c) = (j0, c0)        (= naive)
+                 Both representations decode to the same digital phase
+                 ((32*j + c) mod 256 == R), so u_INJ_digital and every
+                 digital error are identical to 'naive'; only the analog
+                 layer (tap mismatch / DTC gain, INL) sees the choice.
+                 p = 0 reproduces naive exactly, p = 1 always uses the upper
+                 DTC half (c in 32..63).  'dsm_only' has no decode, so no
+                 'map_inj' draws are consumed there.
 
 [Resolved ambiguity: spec section 8 allows the mapping input to be either the
 digital code R_INJ or a real target; this model always uses the digital
@@ -53,6 +68,7 @@ the real u_INJ_ideal.]
 import numpy as np
 
 from .feedback_scheduler import make_quantizer
+from .noise_models import make_stream
 from .phase_math import wrap01_arr, wrap_cycles_arr
 
 
@@ -79,8 +95,13 @@ def _candidates(cfg, dtc_inj, tap_tbl, calibrated: bool):
 
 def run_injection(cfg, x_nominal: np.ndarray, r_fb: np.ndarray,
                   dtc_inj, tap_tbl, dither_stream=None,
-                  dsm_stream=None) -> dict:
-    """Produce injection command stream (computed-domain, pre-latency)."""
+                  dsm_stream=None, map_stream=None) -> dict:
+    """Produce injection command stream (computed-domain, pre-latency).
+
+    ``map_stream`` is the 'map_inj' PRNG stream used by the
+    'redundant_random' mapping (spec section 8 item 4); when omitted it is
+    built from cfg.seed so direct callers stay deterministic.
+    """
     g = cfg.g
     n = len(x_nominal)
     tap_step = g // cfg.n_tap  # 32 LSB
@@ -133,6 +154,22 @@ def run_injection(cfg, x_nominal: np.ndarray, r_fb: np.ndarray,
     if cfg.inj_mapping == "naive":
         j_inj[:] = r_inj // tap_step
         c_inj[:] = r_inj % tap_step
+    elif cfg.inj_mapping == "redundant_random":
+        # spec section 8 item 4: one 'map_inj' draw per cycle (always
+        # consumed); alternative representation iff u < map_rand_p
+        if map_stream is None:
+            map_stream = make_stream("map_inj", cfg.seed)
+        p_alt = cfg.map_rand_p
+        for k in range(n):
+            j0 = int(r_inj[k]) // tap_step
+            c0 = int(r_inj[k]) % tap_step
+            u = map_stream.next()
+            if u < p_alt:
+                j_inj[k] = (j0 - 1) % cfg.n_tap
+                c_inj[k] = c0 + tap_step
+            else:
+                j_inj[k] = j0
+                c_inj[k] = c0
     else:
         calibrated = cfg.inj_mapping == "calibrated"
         js, cs, us = _candidates(cfg, dtc_inj, tap_tbl, calibrated)

@@ -1,5 +1,5 @@
 /**
- * The 23 canonical numerical experiments.
+ * The 24 canonical numerical experiments.
  * Mirror of model/python/experiments.py — SAME ids and configs.
  *
  * Each entry: id, name_zh, name_en, description, config (single SimConfig)
@@ -14,6 +14,10 @@ import { fromPartial } from './config';
 
 const ALPHA_0P3 = 3.0 + 32.3 / 256.0; // frac fine code offset 0.3 LSB (base 32)
 const DEG = 1.0 / 360.0; // 1 degree in cycles
+
+// exp24: fixed deterministic tap mismatch (cycles; literal list, no RNG),
+// rms 0.002781 cycle = 1.001 deg, mean 0.000075 cycle
+const EXP24_TAP = [0.0032, -0.0027, 0.0011, -0.0038, 0.003, -0.0013, 0.0035, -0.0024];
 
 function mk(kw: Partial<SimConfig>): SimConfig {
   return fromPartial(kw);
@@ -466,6 +470,71 @@ export const EXPERIMENTS: Experiment[] = [
       'mean theta_plus -0.0134 rad ~ -K_inj*sin(2*pi*0.01) = -0.0188, mean ' +
       'e_inj 0.071 ~ 2*pi*0.01 = 0.0628, u_loop end -0.3739 = ' +
       '-2*pi*Delta_f*T_ref + K_inj*sin(2*pi*0.01).',
+  },
+  {
+    id: 'exp24',
+    name_zh: '冗餘表示 DEM:naive vs redundant_random vs calibrated',
+    name_en: 'Redundancy DEM: naive vs redundant_random vs calibrated',
+    description:
+      'On-grid N=3.22265625 (alpha*G = 57 exactly: quantization error ' +
+      'identically zero while R_INJ sweeps 57 LSB per cycle, period 256), mode ' +
+      'D, nearest, fixed tap mismatch [0.0032, -0.0027, 0.0011, -0.0038, 0.0030, ' +
+      '-0.0013, 0.0035, -0.0024] cycle (1.00 deg rms, no RNG), ' +
+      'dtc_inj_gain=1.01, 2048 cycles, so e_ZC_hw is pure mismatch error: (a) ' +
+      'naive decode, (b) redundant_random p=0.5 (per-cycle random choice between ' +
+      "(j0, c0) and (j0-1 mod 8, c0+32), stream 'map_inj'), (c) calibrated.",
+    configs: [
+      mk({
+        n_div: 3.22265625,
+        arch_mode: 'D',
+        quantizer: 'nearest',
+        inj_mapping: 'naive',
+        tap_mismatch_cycles: EXP24_TAP,
+        dtc_inj_gain: 1.01,
+        n_cycles: 2048,
+      }),
+      mk({
+        n_div: 3.22265625,
+        arch_mode: 'D',
+        quantizer: 'nearest',
+        inj_mapping: 'redundant_random',
+        map_rand_p: 0.5,
+        tap_mismatch_cycles: EXP24_TAP,
+        dtc_inj_gain: 1.01,
+        n_cycles: 2048,
+      }),
+      mk({
+        n_div: 3.22265625,
+        arch_mode: 'D',
+        quantizer: 'nearest',
+        inj_mapping: 'calibrated',
+        tap_mismatch_cycles: EXP24_TAP,
+        dtc_inj_gain: 1.01,
+        n_cycles: 2048,
+      }),
+    ],
+    expected_result:
+      'All measured on e_ZC_hw, 2048 cycles, seed 12345, T_vco = 77.576 ps (1 ' +
+      'LSB = 303.03 fs); spectrum = Hann periodogram of 2*pi*e_ZC_hw at f_ref, ' +
+      'levels in dB re rad^2/Hz, spurs via detect_spurs (median + 10 dB; peaks ' +
+      'below -200 dB are FFT round-off and not counted). (a) naive: rms 223.8 ' +
+      'fs, peak 365.5 fs, mean 52.8 fs; purely periodic (period 256): 127 spurs, ' +
+      'strongest -101.2 dB at 437.5 MHz (adjacent-tap alternation), alpha*f_ref ' +
+      'fundamental 890.625 MHz at -111.1 dB; no noise floor (median bin is ' +
+      'numerical zero, below -400 dB). (b) redundant_random p=0.5 (alternative ' +
+      'on 1084/2048 cycles): the 437.5 MHz spur drops 25.1 dB to -126.4 dB ' +
+      '(below detection) and only 2 spurs remain, so the strongest spur falls ' +
+      '9.8 dB to -111.0 dB - but that is the 890.625 MHz fundamental, which is ' +
+      'NOT reduced (-111.1 -> -111.0 dB), nor is the 875 MHz DTC-gain sawtooth ' +
+      'spur (-119.7 -> -118.7 dB). The price: a noise-like floor appears at ' +
+      '-129.9 dB median (from numerical zero; spur-to-floor 18.9 dB) and the ' +
+      'error gets LARGER, not smaller: rms 246.1 fs (+10%), peak 462.4 fs, mean ' +
+      '105.3 fs (upper DTC half sees up to 63 codes of gain error); AC rms 217.5 ' +
+      '-> 222.5 fs. DEM redistributes mismatch error, it does not remove it. (c) ' +
+      'calibrated: rms 60.3 fs, peak 124.0 fs, mean 3.6 fs; still periodic (127 ' +
+      'spurs, no floor), strongest spur -116.3 dB (-15.0 dB vs naive), ' +
+      'fundamental -124.5 dB (-13.4 dB) - lower rms, peak and strongest spur ' +
+      'than DEM with no added floor, but it requires knowing the mismatch.',
   },
 ];
 

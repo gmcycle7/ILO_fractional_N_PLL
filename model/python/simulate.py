@@ -144,7 +144,8 @@ def simulate(cfg: SimConfig) -> SimResult:
     fb = run_feedback(cfg, a_id, s_id, dither_stream=streams["dither_fb"])
     inj = run_injection(cfg, x_id, fb["R_FB"], dtc_inj, tap_tbl,
                         dither_stream=streams["dither_inj"],
-                        dsm_stream=streams["dsm_inj"])
+                        dsm_stream=streams["dsm_inj"],
+                        map_stream=streams["map_inj"])
 
     # --- latency pipeline (section 13) ---
     lat = apply_latency(cfg, n, lat_stream=streams["lat"])

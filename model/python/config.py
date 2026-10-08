@@ -10,7 +10,7 @@ from typing import Optional, List
 
 _QUANTIZERS = ("floor", "nearest", "truncate", "ef1", "mash11", "mash111")
 _ARCH_MODES = ("A", "B", "C", "D")
-_INJ_MAPPINGS = ("naive", "nearest", "calibrated")
+_INJ_MAPPINGS = ("naive", "nearest", "calibrated", "redundant_random")
 _DTC_MODES = ("normalized", "fixed_time")
 _INJ_MODELS = ("none", "reset", "linear", "sin", "lut")
 _ACTUATOR_MODES = ("full", "dsm_only", "qnc")
@@ -32,7 +32,12 @@ _SCHEMA_V3_FIELDS = ("qnc_gain",)
 #: omit-at-default serialization rule as the schema-v2/v3 fields.
 _SCHEMA_V4_FIELDS = ("loop_mode", "loop_kp", "loop_ki")
 
-_OMIT_DEFAULT_FIELDS = _SCHEMA_V2_FIELDS + _SCHEMA_V3_FIELDS + _SCHEMA_V4_FIELDS
+#: redundancy-based DEM mapping field (MODEL_SPEC section 8 item 4); same
+#: omit-at-default serialization rule as the schema-v2/v3/v4 fields.
+_SCHEMA_V5_FIELDS = ("map_rand_p",)
+
+_OMIT_DEFAULT_FIELDS = (_SCHEMA_V2_FIELDS + _SCHEMA_V3_FIELDS
+                        + _SCHEMA_V4_FIELDS + _SCHEMA_V5_FIELDS)
 
 
 @dataclass
@@ -59,7 +64,12 @@ class SimConfig:
                                    # quantization-noise cancellation)
     qnc_gain: float = 1.0          # QNC cancellation-DTC gain (section 7.2;
                                    # only used when actuator_mode == 'qnc')
-    inj_mapping: str = "naive"     # naive|nearest|calibrated (section 8)
+    inj_mapping: str = "naive"     # naive|nearest|calibrated|redundant_random
+                                   # (section 8)
+    map_rand_p: float = 0.5        # 'redundant_random' only: probability of
+                                   # picking the alternative representation
+                                   # (j-1 mod n_tap, c+tap_step); one 'map_inj'
+                                   # draw per cycle (section 8 item 4)
     dtc_mode: str = "normalized"   # normalized|fixed_time (section 11)
     dtc_lsb_fs: float = 312.5      # fixed_time DTC LSB in fs [B2]
     latency_cycles: int = 0        # fixed digital latency L (reference cycles) [B3]
@@ -122,6 +132,13 @@ class SimConfig:
             raise ValueError("pmux_mismatch_cycles must have n_pmux entries")
         if self.inl_lut is not None and len(self.inl_lut) != (1 << self.b_dtc):
             raise ValueError("inl_lut must have 2^b_dtc entries")
+        if not (0.0 <= self.map_rand_p <= 1.0):
+            raise ValueError("map_rand_p must be in [0, 1]")
+        if (self.inj_mapping == "redundant_random"
+                and 2 * (self.g // self.n_tap) > (1 << self.b_dtc)):
+            raise ValueError("inj_mapping 'redundant_random' requires the DTC "
+                             "range to cover two tap steps "
+                             "(2*(G/n_tap) <= 2^b_dtc)")
 
     # --- derived quantities ---
     @property
@@ -144,7 +161,7 @@ class SimConfig:
 
     # --- JSON round-trip ---
     def to_dict(self) -> dict:
-        """Full config dict, minus schema-v2/v3/v4 fields at their default
+        """Full config dict, minus schema-v2/v3/v4/v5 fields at their default
         values (keeps the committed earlier-schema test vectors byte-identical;
         ``from_dict`` restores the defaults so the round-trip is exact)."""
         d = asdict(self)
@@ -165,6 +182,6 @@ class SimConfig:
         return SimConfig.from_dict(d)
 
 
-#: default values of the schema-v2/v3/v4 fields (see _OMIT_DEFAULT_FIELDS / to_dict)
+#: default values of the schema-v2..v5 fields (see _OMIT_DEFAULT_FIELDS / to_dict)
 _OMIT_DEFAULT_DEFAULTS = {f.name: f.default for f in fields(SimConfig)
                           if f.name in _OMIT_DEFAULT_FIELDS}

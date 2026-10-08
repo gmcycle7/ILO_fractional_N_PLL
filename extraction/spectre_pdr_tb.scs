@@ -1,0 +1,213 @@
+// =============================================================================
+// spectre_pdr_tb.scs -- PDR/PRC extraction testbench (transient single kick)
+// -----------------------------------------------------------------------------
+//
+//   ***************************************************************************
+//   ***  TEMPLATE -- NOT RUN.  No circuit simulator was available when this ***
+//   ***  file was written; it has never been parsed by Spectre.  Primitive   ***
+//   ***  names/parameters follow the Spectre manual from memory: check every ***
+//   ***  one with `spectre -h <name>` (vsource, isource, tran, relay,        ***
+//   ***  bsource, paramset, sweep, options) before trusting it.              ***
+//   ***************************************************************************
+//
+// PURPOSE
+//   Measure the phase response (PDR / PRC) of YOUR VCO to ONE injection pulse
+//   whose CENTER sits phi_inj cycles after a target zero crossing of the
+//   settled oscillator.  The result feeds MODEL_SPEC.md section 14
+//   (inj_model='lut', two-column CSV e_inj_rad, delta_theta_rad).
+//   Full recipe: PDR_EXTRACTION.md.  Driver: extraction/run_sweep.py.
+//   Post-processing (REAL, tested): extraction/postprocess_pdr.py.
+//
+// MEASUREMENT PRINCIPLE (twin runs of this SAME netlist)
+//   pass 0  ANCHOR run : inj_en=0, measures t_anchor (first target-type zero
+//                        crossing after n_settle nominal cycles) and the
+//                        settled period t_vco_meas.
+//   pass 1  for every phi_inj in [0, 1] (>= 64 uniform steps):
+//             REF run  : inj_en=0  (pulse source PRESENT with zero swing, so
+//                        both runs have the same breakpoints / time grid)
+//             INJ run  : inj_en=1  (one pulse, center at
+//                        t_anchor + phi_inj*t_vco_meas)
+//           Both runs are identical until the pulse (deterministic, tran
+//           noise OFF).  Read the SAME late target-type crossing, n_meas
+//           cycles after the anchor (n_meas < n_post, after amplitude
+//           settling):
+//               dt              = t_cross_inj - t_cross_ref           [s]
+//               e_inj_rad       = wrapRadians(2*pi*phi_inj)           [rad]
+//               delta_theta_rad = wrapRadians(-2*pi*dt/t_vco_meas)    [rad]
+//           (pulse late -> e > 0; injected edge later -> delta_theta < 0;
+//            see PDR_EXTRACTION.md section 1 for the derivation.)
+//
+// TARGET ZERO CROSSING
+//   Default: RISING crossing of v(outp) - v(outn) through 0 V -- the crossing
+//   at which the scheduler aims the pulse (MODEL_SPEC z0_cycles).  If your
+//   injection tap aims at another crossing (falling, single-ended, a tap of a
+//   ring), measure THAT crossing type everywhere (anchor and late edge).
+//   A perfectly symmetric differential shorting switch has a pi-periodic PDR
+//   (rising and falling crossings are equivalent) -- see PDR_EXTRACTION.md
+//   pitfalls.
+// =============================================================================
+
+simulator lang=spectre
+global 0
+
+// -----------------------------------------------------------------------------
+// 1. USER CIRCUIT -- replace the placeholders
+// -----------------------------------------------------------------------------
+// Use ABSOLUTE paths: run_sweep.py --render copies this file into per-run
+// directories, so relative includes would break.
+//
+// include "/ABS/PATH/pdk/models.scs" section=tt      // USER: PDK + corner
+// include "/ABS/PATH/vco_core.scs"                   // USER: subckt vco_core
+// include "/ABS/PATH/inj_switch.scs"                 // USER: subckt inj_switch
+//
+// Expected port order (edit the instances in section 3 if yours differs):
+//   subckt vco_core   (outp outn vdd vss vtune)  -- the VCO core incl. tank
+//                                                    and layout parasitics
+//   subckt inj_switch (outp outn gate vss)        -- the REAL injection
+//                                                    device(s) incl. gate
+//                                                    driver parasitics
+//
+
+// -----------------------------------------------------------------------------
+// 2. PARAMETERS (units in brackets)
+// -----------------------------------------------------------------------------
+// --- user / circuit ---
+parameters f_vco_nom=12.5G        // [Hz] nominal VCO freq = N*f_ref
+                                  //      (MODEL_SPEC sec.1: 3.125 x 4 GHz)
+parameters t_vco_nom=1/f_vco_nom  // [s]
+parameters vdd_v=0.9              // [V]  supply  (corner: see PDR_EXTRACTION.md)
+parameters vtune_v=0.45           // [V]  tuning voltage at the lock point
+parameters temp_c=27              // [degC]
+parameters i_kick=200u            // [A]  start-up current kick (t ~ 10 ps)
+// --- injection pulse = the strength knobs (the PDR depends on BOTH) ---
+parameters pw_inj=5p              // [s]  FLAT-TOP width of the gate pulse;
+                                  //      FWHM = pw_inj + tr_inj
+parameters tr_inj=1p              // [s]  gate rise = fall time
+parameters v_gate_on=0.9          // [V]  gate high level (drive strength)
+parameters v_gate_off=0           // [V]  gate low level
+parameters v_gate_th=0.45         // [V]  placeholder relay threshold only
+// --- accuracy ---
+parameters maxstep_div=200        // [-]  maxstep = t_vco_nom/maxstep_div
+                                  //      (>= 200 -> <= 1.8 deg per step)
+//
+// run_sweep.py --render rewrites ONLY the lines between the two marker
+// lines below (keep the markers; parameters outside are left untouched).
+// @SWEEP-PARAMS-BEGIN
+parameters n_settle=3000          // [cycles] nominal cycles before the anchor
+parameters n_post=200             // [cycles] simulated after the anchor;
+                                  //      measured edges must be < n_post
+parameters phi_inj=0.25           // [cycles of T_vco] pulse CENTER after the
+                                  //      anchor crossing; swept 0..1
+parameters inj_en=1               // [-]  1 = INJ run, 0 = REF / ANCHOR run
+parameters t_anchor=n_settle*t_vco_nom   // [s] from pass 0 (run_sweep --anchor)
+parameters t_vco_meas=t_vco_nom          // [s] settled period from pass 0
+// @SWEEP-PARAMS-END
+//
+// --- derived ---
+parameters t_center=t_anchor+phi_inj*t_vco_meas    // [s] pulse center
+parameters t_delay=t_center-tr_inj-pw_inj/2        // [s] vsource pulse delay
+parameters t_stop=t_anchor+(n_post+2)*t_vco_meas   // [s]
+parameters t_save=t_anchor-4*t_vco_meas            // [s] start of saved window
+
+// -----------------------------------------------------------------------------
+// 2b. FLOW-DEBUG PLACEHOLDERS (placed after section 2 because they use its
+//     parameters) -- DELETE once your circuit is included in section 1
+// -----------------------------------------------------------------------------
+// A behavioral LC oscillator + ideal relay so the twin-run flow and the
+// post-processing can be debugged without a PDK.  Its PDR is NOT your
+// circuit's PDR.  bsource / relay syntax unverified (`spectre -h bsource`,
+// `spectre -h relay`).
+subckt vco_core (outp outn vdd vss vtune)
+parameters l_tank=1n c_tank=1/(4*M_PI*M_PI*f_vco_nom*f_vco_nom*l_tank) \
+           r_par=500 g_neg=3m v_lim=0.3
+    LT  (outp outn) inductor l=l_tank
+    CT  (outp outn) capacitor c=c_tank
+    RP  (outp outn) resistor  r=r_par
+    // amplitude-limited negative conductance: i = -g_neg*v_lim*tanh(v/v_lim)
+    GN  (outp outn) bsource i=-g_neg*v_lim*tanh(v(outp,outn)/v_lim)
+    RCM1 (outp vss) resistor r=1M          // DC path to ground
+    RCM2 (outn vss) resistor r=1M
+ends vco_core
+
+subckt inj_switch (outp outn gate vss)
+parameters r_on=50 r_off=1G
+    // ideal shorting switch closed while v(gate) > v_gate_th
+    SW  (outp outn gate vss) relay vt1=v_gate_th vt2=v_gate_th \
+        ropen=r_off rclosed=r_on
+ends inj_switch
+// ---- end of placeholders ----------------------------------------------------
+
+// -----------------------------------------------------------------------------
+// 3. INSTANCES
+// -----------------------------------------------------------------------------
+VDD   (vdd 0)   vsource dc=vdd_v
+VTUNE (vtune 0) vsource dc=vtune_v
+XVCO  (outp outn vdd 0 vtune) vco_core
+XINJ  (outp outn gate 0)      inj_switch
+
+// ONE trapezoidal gate pulse.  vsource pulse shape: delay -> rise -> width
+// (flat) -> fall, so its center is delay + rise + width/2 = t_center.
+// inj_en=0 keeps the source (same breakpoints, same time grid) with zero swing.
+// period >> t_stop makes it a single pulse.
+VGATE (gate 0) vsource type=pulse val0=v_gate_off \
+      val1=v_gate_off+inj_en*(v_gate_on-v_gate_off) \
+      delay=t_delay rise=tr_inj fall=tr_inj width=pw_inj period=1
+
+// Deterministic start-up: a short differential current kick.  Identical in
+// every run, so the anchor crossing is identical in every run.
+IKICK (outp outn) isource type=pulse val0=0 val1=i_kick \
+      delay=10p rise=2p fall=2p width=10p period=1
+
+// -----------------------------------------------------------------------------
+// 4. OPTIONS + ANALYSIS -- accuracy notes
+// -----------------------------------------------------------------------------
+// * Transient NOISE must stay OFF (do not set noisefmax / noiseseed): the
+//   method relies on REF and INJ runs being identical until the pulse.
+// * method=traponly: gear2 adds numerical damping that distorts the
+//   amplitude restoration of a high-Q tank (and hence the AM->PM part of the
+//   PDR).  errpreset=conservative tightens reltol/LTE; explicit settings
+//   below override the preset.  Verify with `spectre -h tran`.
+// * maxstep = t_vco_nom/maxstep_div (200 -> 0.4 ps at 12.5 GHz) bounds the
+//   phase step to 1.8 deg; the pulse edges add their own breakpoints.
+//   CONVERGENCE CHECK (PDR_EXTRACTION.md sec.5): rerun ~5 phi points with
+//   maxstep_div=400 and reltol 10x tighter; the PDR must move by < 1% of
+//   max|kick|.  Also run inj_en=1 with v_gate_on=v_gate_off: the measured
+//   delta_theta is your numerical noise floor (expect << 1 mrad).
+// * cmin (minimum node capacitance) aids convergence of floating nodes but
+//   LOADS the tank: keep it 0 or << 0.1% of the tank capacitance, and
+//   identical in all runs.
+// * Settle cycles: n_settle >= 10x the slowest settling time constant in the
+//   VCO (tank amplitude tau_A ~ Q/(pi*f0); bias/amplitude-control loops,
+//   supply decoupling are usually slower).  run_sweep.py --anchor reports
+//   the period drift over the 50 cycles after the anchor: need < 1e-6 rel.
+// * n_post / measured edge: the AM->PM transient after the kick must have
+//   died out.  run_sweep.py measures TWO late edges (default 100 and 190)
+//   and postprocess_pdr.py reports their residual (settling check).
+// * outputstart=t_save saves only the window needed for the crossings.
+simOpts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 gmin=1e-15 \
+        temp=temp_c tnom=27 rawfmt=psfxl
+
+// run_sweep.py --mode paramset wraps the lines between the two markers
+// below in a paramset sweep (keep the marker lines).
+// @ANALYSIS-BEGIN
+tran_pdr tran stop=t_stop maxstep=t_vco_nom/maxstep_div errpreset=conservative \
+         method=traponly cmin=0 outputstart=t_save skipdc=no annotate=status
+// @ANALYSIS-END
+
+// Saved signals: the differential output is what the crossings are taken
+// from; the gate is saved to verify the pulse center (t_center).
+save outp outn gate
+
+// -----------------------------------------------------------------------------
+// 5. EXPORT FOR extraction/run_sweep.py --collect
+// -----------------------------------------------------------------------------
+// After each run export v(outp)-v(outn) over [t_save, t_stop] to
+// <run dir>/vdiff.csv as two numeric columns "time_s, v_diff_V" with >= 12
+// significant digits (header / text lines are skipped).  Ocean example
+// (unverified):
+//   openResults("<run dir>/psf")  selectResult('tran_pdr)
+//   ocnPrint(?output "<run dir>/vdiff.csv" ?numberNotation 'scientific
+//            ?precision 15 VT("/outp")-VT("/outn"))
+// Alternatively measure the crossings in-simulator (Spectre MDL cross()
+// with dir='rise, thresh=0) and write the raw CSV of
+// extraction/postprocess_pdr.py directly.

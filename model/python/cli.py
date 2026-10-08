@@ -8,7 +8,7 @@
 (comparison presets additionally write timeseries_<i>.csv / psd_<i>.csv per
 variant; index 0 also gets the unsuffixed names).
 
---emit-vectors writes the 15 canonical JSON vectors of MODEL_SPEC section 18
+--emit-vectors writes the 16 canonical JSON vectors of MODEL_SPEC section 18
 (512 cycles each, full float precision) plus per-cycle command CSVs under
 DIR/csv/ with columns k,t_ref_ns,n_int,m_FB,c_FB,j_INJ,c_INJ,R_FB,R_INJ,seq_id.
 
@@ -16,7 +16,10 @@ Schema stability: the 12 schema-v1 vectors keep their original column list
 (byte-identical files); the schema-v2 vectors (n3p130_mash111,
 n3p130_dsm_only_gated) additionally carry the 'inj_fired' int column; the
 schema-v4 vector (n3p130_loop_both) additionally carries the 'u_loop' and
-'pd_e' float columns (MODEL_SPEC section 14.1).
+'pd_e' float columns (MODEL_SPEC section 14.1); the schema-v5 vector
+(n3p222_redundant_random, the exp24b config at 512 cycles) uses the original
+schema-v1 column list — the DEM mapping choice is already visible in
+j_INJ / c_INJ / u_INJ_analog / e_ZC_hw (MODEL_SPEC section 8 item 4).
 """
 
 import argparse
@@ -56,6 +59,12 @@ VECTOR_CONFIGS = {
     "n3p130_loop_both": SimConfig(
         n_div=3.13, inj_model="sin", k_inj=0.3, delta_f_hz=250e6,
         sigma_vco_w_rad=0.02, loop_mode="pi"),
+    # schema-v5 vector: redundancy-based DEM mapping (section 8 item 4);
+    # exactly the exp24b config (N=3.22265625, mode D, nearest,
+    # inj_mapping='redundant_random', map_rand_p=0.5, fixed tap mismatch,
+    # dtc_inj_gain=1.01) at 512 cycles; schema-v1 column list
+    "n3p222_redundant_random": PRESETS["exp24"]["configs"][1].replace(
+        n_cycles=512),
 }
 
 #: columns exported in the JSON vectors ("e_pair" == e_pair_digital)
@@ -133,7 +142,7 @@ def _write_command_csv(path: str, res) -> None:
 
 
 def emit_vectors(out_dir: str) -> list:
-    """Write the 15 canonical JSON vectors + command CSVs. Returns paths."""
+    """Write the 16 canonical JSON vectors + command CSVs. Returns paths."""
     os.makedirs(out_dir, exist_ok=True)
     csv_dir = os.path.join(out_dir, "csv")
     os.makedirs(csv_dir, exist_ok=True)
@@ -211,7 +220,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default="results",
                    help="output root for --preset (default: results)")
     p.add_argument("--emit-vectors", metavar="DIR",
-                   help="write the 15 canonical JSON test vectors + CSVs")
+                   help="write the 16 canonical JSON test vectors + CSVs")
     return p
 
 

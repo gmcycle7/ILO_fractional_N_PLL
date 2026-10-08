@@ -15,6 +15,7 @@ import {
 import EChart from '../components/EChart';
 import EpistemicTag from '../components/EpistemicTag';
 import Callout from '../components/Callout';
+import CodeBlock from '../components/CodeBlock';
 import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { M, MathBlock } from '../components/Math';
 import { ParamPanel, SelectControl, Slider, Toggle, PresetButtons } from '../components/controls';
@@ -174,6 +175,82 @@ const SIMDEP_ROWS: [string, string, string][] = [
   ['real 沒有 % 運算子', '所有 mod', '一律寫成 a − b·floor(a/b)'],
   ['PRNG parity', '全部', '§12 mulberry32 streams 不實作;$rdist_* 每 timestep 呼叫次數 tool-dependent,刻意不用 → Verilog-A 模型完全 deterministic'],
 ];
+
+/** Validation kit 元件(model/veriloga/validation/;faithful to its README.md)。 */
+const KIT_ROWS: [string, string, string][] = [
+  [
+    'tb_fractional_phase_scheduler.scs',
+    'UNRUN',
+    '3 個 DUT instance:nearest α=0.13 / nearest α=0.125 / ef1 shared ↔ n3p130_nearest / n3p125_nearest / n3p130_ef1_shared',
+  ],
+  [
+    'tb_reverse_injection_scheduler.scs',
+    'UNRUN',
+    '6 個 DUT instance:Mode D(R_FB 來自 PWL,以及來自 live feedback scheduler、clock 延後 T_ref/4)、' +
+      'seeded Mode-B ef1、L=1 的 bug / look-ahead ↔ n3p130_nearest / n3p130_ef1_independent / n3p130_latency_bug / n3p130_lookahead',
+  ],
+  [
+    'tb_dtc_nonideal_model.scs',
+    'UNRUN',
+    '4 個 DUT instance:nominal tap + 1° skew、ideal、gain 1.01、offset+INL ↔ n3p125_tap_mismatch_1deg / n3p130_nearest / golden 重跑',
+  ],
+  [
+    'tb_pulsed_injection_phase_model.scs',
+    'UNRUN',
+    '3 個 DUT instance:sin / linear / ideal-reset kick(inj_map 1/0/2),參數取自 n3p130_dynamics_sin ↔ golden run_dynamics(noise off)',
+  ],
+  [
+    'gen_stimulus.py',
+    '已執行',
+    'committed CSV vectors → Spectre PWL 檔 + 各 bench 的 Ocean export script;--verify 回讀每個 PWL',
+  ],
+  [
+    'check_results.py',
+    '已執行',
+    'Ocean 匯出的結果 CSV vs committed vectors / golden;--lint(netlist ↔ manifest ↔ .va ports/params ↔ vector configs)、--self-test、--all',
+  ],
+  [
+    'run_all.sh',
+    '只用 stub 測過',
+    'gen → lint → spectre → ocean → check,結束碼 0 = 全 PASS、1 = 有 FAIL、2 = 工具/匯出錯誤;用 stub spectre/ocean 只驗證 shell plumbing',
+  ],
+];
+
+/** .va 所依賴、但 OpenVAF/OSDI 的 compact-model 子集不支援的 constructs。 */
+const OSDI_ROWS: [string, string, string][] = [
+  [
+    '@(cross(...)) 事件',
+    '四個模組全部(ref / trigger edge 偵測)',
+    '整個 scheduler 與 DTC 的「每個 edge 更新一次」語意都建立在 analog event 上',
+  ],
+  [
+    'transition()',
+    '四個模組全部(code-as-voltage 輸出、DTC 變動延遲、kick 平滑)',
+    '屬 analog filter/operator,不在 compact-model 子集;DTC 的逐 edge 變動延遲也無法改用只吃常數延遲的 absdelay()',
+  ],
+  [
+    'idtmod()',
+    'pulsed_injection_phase_model(free-running VCO 相位)',
+    'solver-owned wrapped integrator,同屬子集之外',
+  ],
+  [
+    '事件之間保存的 analog state',
+    '四個模組全部(ef1 error state、pipe[]、k_real)',
+    'state 只在 @(cross) 事件內更新;沒有 analog event 就沒有更新時機',
+  ],
+];
+
+const KIT_CMDS = `cd model/veriloga/validation
+
+# (A) 任何機器、不需 simulator —— 本 checkout 已執行,皆 PASS
+python3 gen_stimulus.py --all --verify
+python3 check_results.py --lint
+python3 check_results.py --self-test
+
+# (B) 有 Cadence 的機器 —— UNRUN;exit 0 = 四個 bench 全 PASS
+./run_all.sh
+./run_all.sh dtc_nonideal_model            # 只跑單一 bench
+SPECTRE_ARGS="+aps" CHECK_ARGS="--tol-delay-fs 20" ./run_all.sh`;
 
 const VA_SCHED_EXCERPT = `// fractional_phase_scheduler.va — @(cross(V(ref_clk)-vth, +1)) 內核(逐字節錄)
 s_now      = s0 + k_real * n_frac;
@@ -763,6 +840,109 @@ export default function Chapter19() {
         </div>
       </SectionFigure>
 
+      <SectionFigure
+        title="Validation kit 與開源工具限制(model/veriloga/validation/)"
+        caption={
+          <span>
+            kit 把「四個 .va ↔ committed vectors / golden model」的比對收斂成一個指令,
+            但 simulator 端從未執行。表中「UNRUN」指 Spectre / Ocean 從未跑過該檔;「已執行」指
+            純 Python 部分已在本 checkout 跑過。
+          </span>
+        }
+      >
+        <Callout type="honesty" title="Kit 的 simulator 端同樣是 UNRUN">
+          <p>
+            撰寫 kit 的環境沒有任何能編譯這些 Verilog-A 的 simulator。四個 Spectre testbench、
+            Ocean export script、<code>run_all.sh</code> 都<strong>從未被 Spectre 或 Ocean 執行</strong>;
+            第一次實跑預期要修 netlist 或 .va。實際跑過的只有:
+            <code>gen_stimulus.py --all --verify</code>(<code>stimulus verification: PASS</code>)、
+            <code>check_results.py --lint</code>(<code>LINT PASS</code>)、
+            <code>check_results.py --self-test</code>(<code>SELF-TEST PASS</code>),
+            以及用 stub <code>spectre</code>/<code>ocean</code> 驗證 <code>run_all.sh</code> 的 shell plumbing
+            與結束碼。<EpistemicTag kind="EXPERIMENT" />
+          </p>
+        </Callout>
+
+        <div style={{ overflowX: 'auto', marginTop: 12, marginBottom: 12 }}>
+          <table className="data-table">
+            <thead>
+              <tr><th>檔案</th><th>狀態</th><th>內容(instance ↔ reference)</th></tr>
+            </thead>
+            <tbody>
+              {KIT_ROWS.map((r) => (
+                <tr key={r[0]}>
+                  <td><code>{r[0]}</code></td>
+                  <td>{r[1]}</td>
+                  <td>{r[2]}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p>
+          另有 <code>kit_common.py</code>(單一 manifest:timing plan、instance ↔ vector 對照、probe 清單)與
+          <code>va_emulator.py</code>(把 .va 的 event 數學逐句轉寫成 Python)。後者<strong>不是 simulator</strong>:
+          只用來偽造 self-test 的匯出檔,並證明 .va「如寫」的算術重現 committed vectors ——
+          self-test 中 scheduler 的 code 誤差 0 LSB、injection 與 golden recursion 的差為 4.3e-12 rad。
+          它不涵蓋 simulator 的 event 處理,那一塊只有 Spectre 實跑才能驗證。<EpistemicTag kind="EXPERIMENT" />
+        </p>
+        <CodeBlock language="bash" title="Validation kit 用法" code={KIT_CMDS} />
+
+        <p style={{ marginTop: 12 }}>
+          <strong>PASS 的定義</strong>(每個 bench 跑 512 個 ref cycle = 128 ns,逐 edge 比對):
+        </p>
+        <ul>
+          <li>scheduler 的 integer codes 必須與 committed vectors <strong>完全相等</strong>
+            (且電壓離整數 ≤ 0.25 LSB,否則視為取樣到 ramp);浮點 debug 量容差 1e-6。<EpistemicTag kind="EXACT" /></li>
+          <li>DTC:量到的延遲 = t<sub>cross</sub>(out) − t<sub>cross</sub>(trig) − t_rise/2,與
+            <code>u_INJ_analog·T_vco</code> 差 ≤ 10 fs(受測的 impairment 約為 97 fs gain、160 fs sin-INL 振幅、222 fs tap)。</li>
+          <li>injection:<code>e_inj_dbg</code>、<code>dtheta_dbg</code>、<code>theta_dbg</code> 與 golden
+            <code>run_dynamics</code>(noise off)差 ≤ 5e-4 rad(12.52 GHz 下約 6.4 fs)。
+            連續時間 .va 與離散 §14 map 的差異 —— pulse 在 cycle 內等待期間累積的 detuning 相位,
+            此處最大 1.07e-3 rad —— 由 checker 加進 <M>{'\\varepsilon_{hw}'}</M> 修正,而非忽略。
+            <EpistemicTag kind="APPROX" /></li>
+        </ul>
+        <p>
+          結束碼:0 = 全 PASS、1 = 有 mismatch(印出第一個不符的 k、欄位、量測值、期望值與來源)、
+          2 = 輸入格式錯誤或工具/匯出失敗。
+        </p>
+
+        <Callout type="warn" title="為什麼不能用 OpenVAF/OSDI + ngspice(或 Xyce)來驗證">
+          <p>
+            開源流程 OpenVAF 把 Verilog-A 編成 OSDI,供 ngspice 或 Xyce 載入;它支援的是
+            <strong>compact-model 子集</strong>:沒有 analog event(<code>@(cross)</code>、<code>@(timer)</code>
+            等),也沒有 <code>transition()</code>、<code>idtmod()</code> 這類 analog filter/operator。
+            這四個 .va 是 event-driven 的 behavioral model,整個行為都建立在這些 constructs 上
+            (下表),所以<strong>無法被 OpenVAF 編譯</strong>。
+            <EpistemicTag kind="INFERENCE" />
+          </p>
+          <p>
+            這是依該子集的文件範圍所做的判斷;本 checkout 沒有安裝 OpenVAF、ngspice、Xyce,
+            也就沒有實際嘗試編譯。改寫成 <code>@(timer)</code> 迴圈並不能繞過 —— timer 同樣是 analog event。
+            因此驗證需要完整的 Verilog-A simulator:Spectre(含 APS/X)、Siemens AFS 或
+            Xcelium/AMS Designer,即<strong>必須使用商用 analog simulator</strong>。kit 只針對
+            Spectre + Ocean;其他 simulator 需自備 netlist,但 CSV 欄位契約與
+            <code>check_results.py</code> 仍可沿用。<EpistemicTag kind="ASSUMPTION" />
+          </p>
+        </Callout>
+        <div style={{ overflowX: 'auto', marginTop: 12 }}>
+          <table className="data-table">
+            <thead>
+              <tr><th>construct</th><th>出現處</th><th>為什麼擋住 OSDI</th></tr>
+            </thead>
+            <tbody>
+              {OSDI_ROWS.map((r) => (
+                <tr key={r[0]}>
+                  <td><code>{r[0]}</code></td>
+                  <td>{r[1]}</td>
+                  <td>{r[2]}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </SectionFigure>
+
       <SectionCode language="verilog" title="節錄 1 — fractional_phase_scheduler.va:look-ahead 量化與 decode" code={VA_SCHED_EXCERPT} />
       <SectionCode language="verilog" title="節錄 2 — reverse_injection_scheduler.va:Mode D + latency shift register" code={VA_REVERSE_EXCERPT} />
       <SectionCode language="verilog" title="節錄 3 — pulsed_injection_phase_model.va:injection kick 事件" code={VA_KICK_EXCERPT} />
@@ -894,6 +1074,27 @@ export default function Chapter19() {
           <ul>
             <li><strong>未跑 Spectre</strong>:四個 .va 均未經任何 simulator 驗證;
               語法與事件語意風險由 simulator-dependent 清單逐項標示,但只有實跑才能關閉。</li>
+            <li><strong>Validation kit 的 simulator 端也是 UNRUN</strong>:四個 Spectre testbench、
+              Ocean export script、<code>run_all.sh</code> 從未被 Spectre/Ocean 執行(<code>run_all.sh</code>
+              只用 stub 驗證過 plumbing);已執行的僅 Python 部分(<code>--lint</code>、<code>--self-test</code>、
+              <code>gen_stimulus.py --verify</code>)。<code>va_emulator.py</code> 證明 .va 算術如寫時重現 vectors,
+              不代表 simulator 行為。</li>
+            <li><strong>必須使用商用 analog simulator</strong>:OpenVAF/OSDI + ngspice(或 Xyce)只支援
+              compact-model 子集,沒有 <code>@(cross)</code>/<code>@(timer)</code> 等 analog event,也沒有
+              <code>transition()</code>/<code>idtmod()</code>,編不了這些 .va <EpistemicTag kind="INFERENCE" />(依該子集的文件範圍判斷;本環境未安裝亦未嘗試編譯)。
+              要驗證須有 Spectre(含 APS/X)、Siemens AFS 或 Xcelium/AMS Designer,而 kit 只提供 Spectre + Ocean 版。</li>
+            <li><strong>kit 未涵蓋</strong>:任何 noise/jitter(.va 無 PRNG)、PDR/PRC realism(kick 是 §14 behavioral map)、
+              <code>map_mode=1</code>、<code>out_mode=1</code>、DTC falling-edge delay、<code>r_zero≠0</code>、
+              scheduler→DTC→ILO 的 closed chain,以及超過 512 cycle 的長跑。</li>
+            <li><strong>kit 建置時發現、尚未修的兩個 .va 疑點</strong>(.va 未更動):
+              (1) <code>pulsed_injection_phase_model</code> 的 <code>theta_c</code> 在 wrap 時,±1 cycle 的跳變被
+              <code>transition()</code> 在 t_kick = 0.1 ps 內抹平,<code>vco_out</code> 會瞬間多掃一整圈;
+              Δf = 1 MHz 時 <code>theta_c</code> 每 ref cycle 漂移 −2.5e-4 cycle,約 2000 cycle(0.5 µs)後 wrap,
+              任何數 <code>vco_out</code> edge 的 divider 都會數錯;512-cycle bench 碰不到。
+              (2) <code>dtc_nonideal_model</code> 的 falling edge 沿用同一個 <code>transition()</code> 延遲,
+              而 hookup rule 3 把 nominal tap 相位折進 tap0..tap7 後 t_d 可達約 90 ps,長於 5–20 ps 的
+              injection pulse;<code>transition()</code> 並非 transport delay,新目標可能取消或合併尚未開始的前一次轉換,
+              實際 pulse 可能被吃掉或縮短。bench 以 120 ps 的 trigger 高電位時間避開此情況。</li>
             <li>Verilog-A 端功能子集:mash11、triangular dither、calibrated mapping、
               64-entry LUT INL、frozen DNL、全部 random noise 皆為 Python-only。</li>
             <li>shared mode 的 look-ahead 必須由 feedback 端補償(此模組只有 transport

@@ -3,7 +3,8 @@
  *
  * MODEL_SPEC.md §8:tap spacing 32 LSB vs DTC range 64 LSB → redundancy;
  * naive / nearest / calibrated 三種 mapping;u_target = 0.40 手算例;
- * 互動圖 #3(8-tap phase wheel)、#10(tap code)、#11(injection DTC code)。
+ * 互動圖 #3(8-tap phase wheel)、#10(tap code)、#11(injection DTC code);
+ * Redundancy DEM 一節(§8 mapping 4 redundant_random,exp24 設定互動重現)。
  */
 
 import { useEffect, useMemo, useState } from 'react';
@@ -33,7 +34,7 @@ import DebugTable from '../components/DebugTable';
 import ExampleProblem, { fmt } from '../components/ExampleProblem';
 import { makeLineOption, makeMarkLine } from '../lib/chartOptions';
 import { useChartTheme } from '../lib/useChartTheme';
-import { formatPhase, trimNumber } from '../lib/format';
+import { formatPhase, formatSiTime, trimNumber } from '../lib/format';
 import { useSimStatus } from '../SimStatusContext';
 import { chapterById } from './index';
 import {
@@ -50,7 +51,16 @@ import {
   qNearest,
   qFloor,
   pymod,
+  TWO_PI,
+  getPreset,
+  presetConfigs,
+  replaceConfig,
+  periodogramPsd,
+  detectSpurs,
+  rms,
+  mean,
   type InjMapping,
+  type Spur,
 } from '../model';
 
 const meta = chapterById(7)!;
@@ -90,6 +100,52 @@ const MAPPING_OPTIONS: { value: InjMapping; label: string }[] = [
   { value: 'calibrated', label: 'calibrated' },
 ];
 
+/* --- Redundancy DEM 圖(exp24 設定)--- */
+type DemMapping = 'naive' | 'redundant_random' | 'calibrated';
+/** 與 exp24 configs 同序:(a) naive、(b) redundant_random、(c) calibrated */
+const DEM_MAPPINGS: readonly DemMapping[] = ['naive', 'redundant_random', 'calibrated'];
+/** 圖例用短名(窄螢幕不換行) */
+const DEM_SHORT: Record<DemMapping, string> = {
+  naive: 'naive',
+  redundant_random: 'DEM',
+  calibrated: 'calibrated',
+};
+const DEM_OPTIONS: { value: DemMapping; label: string }[] = [
+  { value: 'naive', label: 'naive floor(exp24a)' },
+  { value: 'redundant_random', label: 'redundant_random DEM(exp24b)' },
+  { value: 'calibrated', label: 'calibrated(exp24c)' },
+];
+/** PSD 顯示下限:低於此值的 bin(週期情況下為數值零)貼底畫 */
+const DEM_PSD_FLOOR_DB = -180;
+/** PSD 顯示上限(slider 最大 mismatch 下最強 spur 仍在其下) */
+const DEM_PSD_TOP_DB = -80;
+/** 與 exp24 量測同一規則:低於 -200 dB 的局部極大是 FFT round-off,不算 spur */
+const DEM_SPUR_MIN_DB = -200;
+/** detectSpurs 的 dB clamp(float64 最小正規數),使 median floor 與其一致 */
+const FLOAT64_TINY = 2.2250738585072014e-308;
+
+interface DemRun {
+  mapping: DemMapping;
+  e: Float64Array; // e_ZC_hw (cycles)
+  freqsMHz: Float64Array;
+  pDb: Float64Array; // dB re rad^2/Hz
+  rmsCyc: number;
+  peakCyc: number;
+  meanCyc: number;
+  spurs: Spur[];
+  floorDb: number; // median bin (dB)
+  nAlt: number; // c_INJ >= 32 的拍數(走 DTC 上半 range)
+  tVco: number;
+}
+
+/** numpy 式 median(display 統計,對齊 detectSpurs 的 floor 定義) */
+function medianOf(x: Float64Array): number {
+  const s = Float64Array.from(x).sort();
+  const n = s.length;
+  const mid = n >> 1;
+  return n % 2 === 1 ? s[mid] : 0.5 * (s[mid - 1] + s[mid]);
+}
+
 export default function Chapter07() {
   const [uTarget, setUTarget] = useState(0.4);
   const [mapping, setMapping] = useState<InjMapping>('naive');
@@ -103,6 +159,11 @@ export default function Chapter07() {
   const [basinScenario, setBasinScenario] = useState<BasinScenario>('off');
   const [basinK, setBasinK] = useState(0);
   const [basinPlaying, setBasinPlaying] = useState(false);
+  // Redundancy DEM 圖:預設 = exp24b
+  const [demMapping, setDemMapping] = useState<DemMapping>('redundant_random');
+  const [demP, setDemP] = useState(0.5);
+  const [demTapScale, setDemTapScale] = useState(1);
+  const [demGain, setDemGain] = useState(1.01);
   const { unit } = useUnit();
   const ct = useChartTheme();
   const { setStatus } = useSimStatus();
@@ -332,6 +393,137 @@ export default function Chapter07() {
   const pullColor = falseLock ? 'var(--warn-border)' : 'var(--accent)';
   const xOf = (u: number) => 40 + u * 680; // phase axis 0..1 cycle -> px
 
+  // --- Redundancy DEM 圖:exp24 三組 config(naive / redundant_random / calibrated)同時重算 ---
+  // N = 3.22265625 on-grid(α·G = 57)→ quantization error ≡ 0,e_ZC_hw 為純 mismatch error;
+  // 2048 拍 = exp24 原設定(三組合計約數十 ms),slider 只改 tap 縮放 / INJ DTC gain / map_rand_p。
+  const demRuns = useMemo<DemRun[]>(() => {
+    const base = presetConfigs(getPreset('exp24'));
+    return base.map((cfg0, i) => {
+      const cfg = replaceConfig(cfg0, {
+        tap_mismatch_cycles: cfg0.tap_mismatch_cycles.map((t) => t * demTapScale),
+        dtc_inj_gain: demGain,
+        map_rand_p: demP,
+      });
+      const res = simulate(cfg);
+      const e = res.data.e_ZC_hw;
+      const { freqsHz, psd } = periodogramPsd(
+        Float64Array.from(e, (v) => TWO_PI * v),
+        cfg.f_ref_hz,
+      );
+      const pDb = Float64Array.from(psd, (v) => 10 * Math.log10(Math.max(v, FLOAT64_TINY)));
+      let peak = 0;
+      for (let k = 0; k < e.length; k++) peak = Math.max(peak, Math.abs(e[k]));
+      let nAlt = 0;
+      for (let k = 0; k < res.data.c_INJ.length; k++) if (res.data.c_INJ[k] >= 32) nAlt += 1;
+      return {
+        mapping: DEM_MAPPINGS[i],
+        e,
+        freqsMHz: Float64Array.from(freqsHz, (f) => f / 1e6),
+        pDb,
+        rmsCyc: rms(e),
+        peakCyc: peak,
+        meanCyc: mean(e),
+        spurs: detectSpurs(freqsHz, psd).filter((s) => s.psdDb > DEM_SPUR_MIN_DB),
+        floorDb: medianOf(pDb),
+        nAlt,
+        tVco: res.t_vco_s,
+      };
+    });
+  }, [demP, demTapScale, demGain]);
+
+  useEffect(() => {
+    setStatus('done', `Ch7 DEM: 3 × ${demRuns[0].e.length} cycles(exp24 設定)`);
+  }, [demRuns, setStatus]);
+
+  const demIdx = DEM_MAPPINGS.indexOf(demMapping);
+  const demTVco = demRuns[0].tVco;
+  // 時序圖的顯示換算(資料一律以 cycles 計算;fs 與 metrics 表同單位)
+  const demScale = unit === 'cycles' ? 1 : unit === 'deg' ? 360 : demTVco / 1e-15;
+  const demUnitLabel = unit === 'cycles' ? 'cycles' : unit === 'deg' ? 'deg' : 'fs';
+
+  const demTimeOption = useMemo(() => {
+    const toUnit = (a: Float64Array): [number, number][] =>
+      Array.from(a, (v, k) => [k, v * demScale] as [number, number]);
+    const series: Parameters<typeof makeLineOption>[0]['series'] = [];
+    if (demIdx !== 0) {
+      series.push({
+        name: 'naive(參考)',
+        data: toUnit(demRuns[0].e),
+        color: ct.series[0],
+        width: 1,
+        dashed: true,
+      });
+    }
+    series.push({
+      name: DEM_SHORT[DEM_MAPPINGS[demIdx]],
+      data: toUnit(demRuns[demIdx].e),
+      color: ct.series[demIdx],
+      width: 1.4,
+    });
+    const nK = demRuns[demIdx].e.length;
+    const opt = makeLineOption({
+      xLabel: 'k (reference cycle)',
+      yLabel: `e_ZC_hw (${demUnitLabel})`,
+      xMin: 0,
+      xMax: nK - 1,
+      legend: true,
+      series,
+    });
+    // 預設 zoom 到前 512 拍(= 2 個 256 拍週期),slider 可拉回全部 2048 拍
+    const dz = (opt as unknown as { dataZoom?: Record<string, unknown>[] }).dataZoom;
+    if (dz) {
+      for (const z of dz) {
+        z.startValue = 0;
+        z.endValue = 511;
+      }
+    }
+    return opt;
+  }, [demRuns, demIdx, demScale, demUnitLabel, ct]);
+
+  const demPsdOption = useMemo(() => {
+    // 選中的 mapping 放最後(畫在最上層)並加粗;顏色固定對應 mapping
+    const order = [0, 1, 2].filter((i) => i !== demIdx).concat(demIdx);
+    const opt = makeLineOption({
+      xLabel: 'f (MHz)',
+      yLabel: 'dB re rad²/Hz',
+      xMin: 0,
+      xMax: 2000,
+      yMin: DEM_PSD_FLOOR_DB,
+      yMax: DEM_PSD_TOP_DB,
+      series: order.map((i) => ({
+        name: DEM_SHORT[demRuns[i].mapping],
+        data: Array.from(
+          demRuns[i].pDb,
+          (v, b) => [demRuns[i].freqsMHz[b], Math.max(v, DEM_PSD_FLOOR_DB)] as [number, number],
+        ),
+        color: ct.series[i],
+        width: i === demIdx ? 1.8 : 0.8,
+      })),
+    });
+    return withMarkLine(
+      opt,
+      2,
+      makeMarkLine([
+        { x: 437.5, label: '437.5 MHz' },
+        { x: 890.625, label: 'α·f_ref' },
+      ]),
+    );
+  }, [demRuns, demIdx, ct]);
+
+  const setDemPreset = (m: DemMapping, scale: number, gain: number) => {
+    setDemMapping(m);
+    setDemP(0.5);
+    setDemTapScale(scale);
+    setDemGain(gain);
+  };
+
+  const fsOf = (cyc: number) => (cyc === 0 ? '0 fs' : formatSiTime(cyc * demTVco, 4));
+  const pctVsNaive = (v: number) => {
+    const pct = 100 * (v / demRuns[0].rmsCyc - 1);
+    return `${pct >= 0 ? '+' : ''}${trimNumber(pct, 3)}%`;
+  };
+  const topSpurDb = (r: DemRun): number | undefined => r.spurs[0]?.psdDb;
+
   const tableRows = useMemo(() => {
     const d = codeRes.data;
     return Array.from({ length: 16 }, (_, i) => ({
@@ -426,6 +618,11 @@ export default function Chapter07() {
           理想參數下(<M>{'\\delta_{tap} = 0'}</M>、DTC exact)nearest 的兩個零誤差解正是 redundancy
           pair,tie-break 選 <M>{'c \\le 31'}</M> 那組 —— 所以 <strong>nearest 與 naive 輸出相同</strong>;
           兩者只在 calibrated(拿 actual 表)時才會分道揚鑣。<EpistemicTag kind="EXACT" />
+        </p>
+        <p>
+          §8 另有第四種 mapping <code>redundant_random</code>:不做 argmin,而是每拍隨機在 redundancy
+          pair 之間二選一(redundancy-based DEM)。定義、理想系統下的 no-op 證明與 mismatch 下的
+          spur / floor trade-off 見下方互動圖節「Redundancy DEM」。
         </p>
       </SectionMath>
 
@@ -1029,6 +1226,257 @@ export default function Chapter07() {
       </SectionFigure>
 
       <SectionFigure
+        title="Redundancy DEM: 用冗餘表示打散 mismatch spur"
+        caption={
+          <span>
+            exp24 設定:N = 3.22265625(α·G = 57,on-grid → quantization error ≡ 0)、Mode D、nearest、
+            exp24 固定 8-tap mismatch 列表(1.00° rms)× 縮放、INJ DTC gain g、2048 拍、seed
+            12345;三種 mapping 每次同時重算(map_rand_p 只影響 DEM 列)。上圖:選中 mapping 的{' '}
+            e<sub>ZC,hw</sub>[k](虛線 = naive 參考;x = reference cycle k,y 單位跟隨{' '}
+            <UnitSwitch />,time 模式以 fs 顯示;預設 zoom 在前 512 拍 = 2 個 256 拍週期,拉
+            slider 看全部)。中圖:2π·e<sub>ZC,hw</sub> 的 Hann periodogram(sample rate ={' '}
+            f<sub>ref</sub> = 4 GHz,x 軸 0–2000 MHz,y 軸 dB re rad²/Hz),三條疊圖(圖例 DEM ={' '}
+            redundant_random)、選中者加粗;低於 −180 dB 的 bin(週期情況下為數值零)貼底顯示;
+            豎虛線 = 437.5 MHz 與{' '}
+            α·f<sub>ref</sub> = 890.625 MHz。下表:rms / peak / mean(fs)、最強 spur(detectSpurs:
+            median + 10 dB 的局部極大,低於 −200 dB 的 FFT round-off 不計,同 exp24 量測規則)、
+            median floor、走 DTC 上半 range(c ≥ 32)的拍數。
+          </span>
+        }
+      >
+        <p>
+          <strong>兩種表示。</strong>回到 redundancy identity:每個 <M>{'R_{INJ}'}</M> 都恰有兩組{' '}
+          <M>{'(j, c)'}</M> —— naive 的 <M>{'(j_0, c_0)'}</M> 只用 DTC 下半 range;alternative{' '}
+          <M>{'((j_0-1) \\bmod 8,\\; c_0+32)'}</M> 改走前一個 tap、用 DTC 上半 range。calibrated
+          拿 actual 表「挑對的那一組」;§8 的第四種 mapping <code>redundant_random</code>{' '}
+          則完全不看表,每拍擲一次硬幣(<M>{'j_0 = \\lfloor R_{INJ}/32 \\rfloor'}</M>、
+          <M>{'c_0 = R_{INJ} \\bmod 32'}</M>):
+        </p>
+        <MathBlock>
+          {'(j, c)[k] = \\begin{cases} \\big((j_0 - 1) \\bmod 8,\\; c_0 + 32\\big) & u[k] < p \\\\ (j_0,\\; c_0) & u[k] \\ge p \\end{cases}'}
+        </MathBlock>
+        <p>
+          <M>{'u[k]'}</M> 取自 <code>map_inj</code> PRNG stream,每拍恰好消耗一個 draw(p = 0 或 1
+          也照樣消耗,保持 determinism);p = <code>map_rand_p</code> = 0 逐位重現 naive,p = 1
+          恆走 alternative。<EpistemicTag kind="EXACT" /> 這就是 multi-bit DAC 的 dynamic element
+          matching(DEM):同一個 code 有多組名義上等價的 element 組合,隨機輪替使用,讓 element
+          mismatch 不再與 code 綁死 —— 這裡的兩個「element」就是「tap j<sub>0</sub> + DTC 下半」與
+          「tap j<sub>0</sub>−1 + DTC 上半」兩條 analog 路徑。<EpistemicTag kind="INFERENCE" />
+        </p>
+        <p>
+          <strong>理想系統裡隨機化是 no-op。</strong>δ<sub>tap</sub> = 0、DTC gain = 1 時兩條路徑的
+          analog 落點相同:
+        </p>
+        <MathBlock>
+          {'\\frac{j_0 - 1}{8} + \\frac{c_0 + 32}{256} \\;=\\; \\frac{j_0}{8} + \\frac{c_0}{256}'}
+        </MathBlock>
+        <p>
+          兩邊都是分母為 2 的冪的有理數,float64 逐位相等。所以不論 p,e<sub>ZC,hw</sub>、
+          u<sub>INJ,digital</sub> 與所有 digital column 都與 naive 逐位相同(u<sub>INJ,analog</sub>{' '}
+          只在 j<sub>0</sub> = 0 時差整數 1 cycle —— alternative 落在 7/8 + (c<sub>0</sub>+32)/256 ≥ 1 ——
+          wrap 後相同;§19 Test 20)。下圖按「ideal」即可看到三列全為 0。
+          <EpistemicTag kind="EXACT" />
+        </p>
+        <p>
+          <strong>有 mismatch 時:spur 換 floor,不是消除。</strong>令{' '}
+          <M>{'\\Delta[k] = e_{alt}[k] - e_{naive}[k]'}</M>(兩條路徑 analog 誤差之差,純由 mismatch
+          決定)、<M>{'b[k] \\in \\{0, 1\\}'}</M> 為第 k 拍是否走 alternative(<M>{'P(b{=}1) = p'}</M>,
+          逐拍獨立):
+        </p>
+        <MathBlock>
+          {'e_{DEM}[k] = \\underbrace{e_{naive}[k] + p\\,\\Delta[k]}_{\\text{deterministic, periodic in } R_{INJ}} \\;+\\; \\underbrace{(b[k] - p)\\,\\Delta[k]}_{\\text{zero-mean, uncorrelated in } k}'}
+        </MathBlock>
+        <MathBlock>
+          {'\\mathbb{E}_b\\big[e_{DEM}^2[k]\\big] = (1 - p)\\, e_{naive}^2[k] + p\\, e_{alt}^2[k], \\qquad \\sigma_{white}^2 = p(1 - p)\\, \\overline{\\Delta^2}'}
+        </MathBlock>
+        <p>
+          第一項仍是 code 的函數 → 仍是 spur,只是被「平均」過;第二項是白色 floor。逐拍的
+          mean-square 恆等式說明 DEM 的總誤差 power 只是兩種表示 power 的加權平均,
+          <strong>不可能低於兩者中較小者</strong>:DEM 把 error power 從 spur 搬到 floor,並不移除它。
+          <EpistemicTag kind="EXACT" />
+        </p>
+        <p>
+          <strong>exp24 的結構。</strong>DTC 只有 gain error(g)時,alternative 的落點誤差在 code
+          域恰是 naive 平移一個 tap(32 code)再加常數:
+        </p>
+        <MathBlock>
+          {'e_{alt}(R) = e_{naive}(R - 32) + C, \\qquad C = (g - 1)\\cdot\\tfrac{32}{256}\\ \\text{cycle}'}
+        </MathBlock>
+        <p>
+          (g = 1.01 → C = 0.00125 cycle = 96.97 fs。)exp24 的 R<sub>INJ</sub> 每拍 −57 LSB、週期
+          256 拍掃過全部 code,於是時域上 <M>{'e_{alt}[k] = e_{naive}[k + 32] + C'}</M>(python
+          逐拍驗證偏差 ≤ 3e−16 cycle)。<EpistemicTag kind="EXACT" /> 因此 deterministic 項在第 h
+          根諧波 <M>{'f_h = h \\cdot f_{ref}/256 = h \\times 15.625\\ \\text{MHz}'}</M>{' '}
+          的期望振幅被乘上
+        </p>
+        <MathBlock>
+          {'|H_h| = \\big|\\,1 - p + p\\, e^{\\,\\mathrm{j}\\pi h/4}\\big| \\;\\xrightarrow{\\;p\\,=\\,0.5\\;}\\; |\\cos(\\pi h/8)|'}
+        </MathBlock>
+        <p>
+          p = 0.5 時:h ≡ 4 (mod 8) 被 null —— 437.5 MHz(h = 28,code 域每兩個 tap 一循環的相鄰
+          tap 交替圖樣)正是 naive 的最強 spur;h ≡ 0 (mod 8) 原封不動 —— 875 MHz(h = 56,每個 tap
+          內的 DTC gain 鋸齒);α·f<sub>ref</sub> fundamental 890.625 MHz(h = 57,整圈 code 的基頻)
+          只乘 0.924(−0.69 dB)。而 p = 1(恆走 alternative)只是時間平移 + DC,spur 與 naive
+          一模一樣(實測 127 根、437.5 MHz 同為 −101.2 dB)—— 打散 spur 的是<strong>隨機</strong>,
+          不是上半 range。<EpistemicTag kind="EXACT" />
+          (期望值;單一 realization 的 bin 另疊加 floor 的隨機分量)
+        </p>
+        <p>
+          <strong>exp24 實測</strong>(2048 拍、seed 12345、T<sub>vco</sub> = 77.576 ps,1 LSB =
+          303.03 fs):(a) <strong>naive</strong>:rms 223.8 fs、peak 365.5 fs、mean 52.8 fs;純週期
+          (period 256)→ 127 根 f<sub>ref</sub>/256 諧波 spur,最強 −101.2 dB @ 437.5 MHz,
+          fundamental 890.625 MHz 為 −111.1 dB,沒有 floor(median bin 為數值零)。(b){' '}
+          <strong>redundant_random p = 0.5</strong>(1084/2048 拍走 alternative):437.5 MHz 那根降
+          25.1 dB 到 −126.4 dB(沒入 floor),spur 只剩 2 根,最強 spur 降 9.8 dB 到 −111.0 dB ——
+          但那是<strong>沒有被降低</strong>的 890.625 MHz fundamental(−111.1 → −111.0 dB),875 MHz
+          鋸齒 spur 也沒降(−119.7 → −118.7 dB)。代價:冒出 median −129.9 dB 的 noise-like floor
+          (spur-to-floor 18.9 dB),而且誤差<strong>變大</strong>:rms 246.1 fs(+10%)、peak 462.4
+          fs、mean 105.3 fs —— 走 alternative 的拍子用 DTC 上半 range,多吃 32 個 code 的 gain
+          error。(c) <strong>calibrated</strong>:rms 60.3 fs(−73%)、peak 124.0 fs、mean 3.6 fs;
+          仍是週期性(127 根、無 floor),最強 spur −116.3 dB(比 naive 低 15.0 dB),fundamental
+          −124.5 dB(−13.4 dB)。<EpistemicTag kind="EXPERIMENT" />
+        </p>
+        <p>
+          兩條公式與實測對得上:mixture 恆等式以 p = 0 / p = 1 的實測 rms(223.8 / 264.1 fs)給出
+          p = 0.5 的期望 rms <M>{'\\sqrt{0.5 \\cdot 223.8^2 + 0.5 \\cdot 264.1^2} = 244.8'}</M> fs,
+          單一 realization 實測 246.1 fs;白色項預測 floor 平均 −128.3 dB,依 exponential 分佈取
+          median(× ln 2)為 −129.9 dB,實測 −129.86 dB。<EpistemicTag kind="APPROX" />{' '}
+          一句話:<strong>DEM 搬移 error power,calibration 移除 error power</strong>。
+          <EpistemicTag kind="INFERENCE" />
+        </p>
+
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+            columnGap: 16,
+            marginTop: 12,
+          }}
+        >
+          <SelectControl<DemMapping>
+            label="mapping(時序圖)"
+            value={demMapping}
+            options={DEM_OPTIONS}
+            onChange={setDemMapping}
+          />
+          <Slider
+            label="map_rand_p"
+            value={demP}
+            min={0}
+            max={1}
+            step={0.01}
+            onChange={setDemP}
+          />
+          <Slider
+            label="tap mismatch 縮放"
+            value={demTapScale}
+            min={0}
+            max={3}
+            step={0.05}
+            unit="×"
+            onChange={setDemTapScale}
+          />
+          <Slider
+            label="INJ DTC gain g"
+            value={demGain}
+            min={0.97}
+            max={1.03}
+            step={0.001}
+            onChange={setDemGain}
+          />
+        </div>
+        <PresetButtons
+          label="一鍵 exp24(p = 0.5、縮放 1、g = 1.01)"
+          presets={[
+            { label: 'exp24 (a) naive', onClick: () => setDemPreset('naive', 1, 1.01) },
+            {
+              label: 'exp24 (b) DEM p=0.5',
+              onClick: () => setDemPreset('redundant_random', 1, 1.01),
+            },
+            { label: 'exp24 (c) calibrated', onClick: () => setDemPreset('calibrated', 1, 1.01) },
+          ]}
+        />
+        <PresetButtons
+          label="拆解 mismatch(p = 0.5)"
+          presets={[
+            { label: 'ideal(縮放 0、g = 1)', onClick: () => setDemPreset(demMapping, 0, 1) },
+            { label: '只有 tap(g = 1)', onClick: () => setDemPreset(demMapping, 1, 1) },
+            { label: '只有 DTC gain(縮放 0)', onClick: () => setDemPreset(demMapping, 0, 1.01) },
+          ]}
+        />
+        <EChart option={demTimeOption} height={260} />
+        <EChart option={demPsdOption} height={320} />
+        <div style={{ overflowX: 'auto', marginTop: 8 }}>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>mapping</th>
+                <th>rms</th>
+                <th>peak</th>
+                <th>mean</th>
+                <th>最強 spur</th>
+                <th>spur 數</th>
+                <th>median floor</th>
+                <th>c ≥ 32 拍數</th>
+              </tr>
+            </thead>
+            <tbody>
+              {demRuns.map((r, i) => (
+                <tr key={r.mapping} style={i === demIdx ? { fontWeight: 600 } : undefined}>
+                  <td>{r.mapping}</td>
+                  <td>{fsOf(r.rmsCyc)}</td>
+                  <td>{fsOf(r.peakCyc)}</td>
+                  <td>{fsOf(r.meanCyc)}</td>
+                  <td>
+                    {r.spurs.length > 0
+                      ? `${trimNumber(r.spurs[0].psdDb, 4)} dB @ ${trimNumber(r.spurs[0].freqHz / 1e6, 6)} MHz`
+                      : '—'}
+                  </td>
+                  <td>{r.spurs.length}</td>
+                  <td>
+                    {r.floorDb < DEM_SPUR_MIN_DB
+                      ? '數值零(< −200 dB)'
+                      : `${trimNumber(r.floorDb, 4)} dB`}
+                  </td>
+                  <td>
+                    {r.nAlt} / {r.e.length}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {demRuns.every((r) => r.rmsCyc === 0) ? (
+          <p style={{ marginTop: 8, fontSize: '0.9rem' }}>
+            三列 e<sub>ZC,hw</sub> 全為 0:沒有 mismatch 時兩種表示的 analog 落點相同,隨機化是
+            no-op —— DEM 照樣有 {demRuns[1].nAlt} 拍走 alternative,e<sub>ZC,hw</sub>{' '}
+            卻與 naive 逐位一致。<EpistemicTag kind="EXACT" />
+          </p>
+        ) : (
+          <p style={{ marginTop: 8, fontSize: '0.9rem' }}>
+            目前設定:rms 相對 naive —— DEM{' '}
+            {demRuns[0].rmsCyc > 0 ? pctVsNaive(demRuns[1].rmsCyc) : '—'}、calibrated{' '}
+            {demRuns[0].rmsCyc > 0 ? pctVsNaive(demRuns[2].rmsCyc) : '—'};最強 spur 相對 naive ——
+            DEM{' '}
+            {(() => {
+              const s0 = topSpurDb(demRuns[0]);
+              const s1 = topSpurDb(demRuns[1]);
+              return s0 !== undefined && s1 !== undefined ? `${trimNumber(s1 - s0, 3)} dB` : '—';
+            })()}
+            、calibrated{' '}
+            {(() => {
+              const s0 = topSpurDb(demRuns[0]);
+              const s2 = topSpurDb(demRuns[2]);
+              return s0 !== undefined && s2 !== undefined ? `${trimNumber(s2 - s0, 3)} dB` : '—';
+            })()}
+
+            。(DEM 的期望 mean-square 恆為兩種表示的加權平均,見上式;
+            只有 calibrated 能把它壓到兩者之下。)
+          </p>
+        )}
+      </SectionFigure>
+
+      <SectionFigure
         title="1/8-cycle 對位模糊與 false-lock 風險:8 個 crossing 的 basins of attraction"
         caption={
           <span>
@@ -1543,6 +1991,19 @@ if (cfg.inj_mapping === 'naive') {
             安靜的 false lock;情境 (b) 的 pulse 逐拍掃過整個 phase 軸,histogram 八根均勻長高
             —— 每拍換 basin → unlock。<EpistemicTag kind="EXPERIMENT" />
           </li>
+          <li>
+            <strong>Redundancy DEM 圖</strong>:exp24 (a) → (b),PSD 由 127 根 f<sub>ref</sub>/256
+            梳狀 spur 變成 2 根 + median −129.9 dB 的 floor;437.5 MHz 那根沉入 floor(−25.1 dB),
+            890.625 MHz fundamental 與 875 MHz 鋸齒 spur 原地不動;同時表中 rms 223.8 → 246.1 fs、
+            peak 365.5 → 462.4 fs 都<strong>變大</strong>。(c) calibrated:rms 60.3 fs、最強 spur
+            −15.0 dB、沒有 floor。拆解 mismatch:ideal → 三列全 0(no-op);只有 tap(g = 1)→ DEM
+            rms ≈ naive(215.8 vs 215.8 fs,alternative 只是平移)但 spur 照樣被打散;只有 DTC gain
+            → DEM rms 54.7 → 112.8 fs(上半 range 的 code 大 32,gain error 跟著放大),而 875 MHz
+            鋸齒 spur 幾乎不動(−119.7 → −119.9 dB;h = 56 ≡ 0 mod 8)。map_rand_p
+            掃 0 / 0.25 / 0.5 / 0.75 / 1:rms 223.8 / 237.5 / 246.1 / 255.9 / 264.1 fs 單調上升;
+            437.5 MHz spur 為 −101.2 / −107.3 / −126.4 / −107.3 / −101.2 dB(p = 0.25、0.75 時{' '}
+            <M>{'|H_{28}| = 0.5'}</M>,預測 −6.02 dB)。<EpistemicTag kind="EXPERIMENT" />
+          </li>
         </ul>
       </SectionObserve>
 
@@ -1587,6 +2048,15 @@ if (cfg.inj_mapping === 'naive') {
             margin;latency 類 bug(33.28 LSB)與 dsm_only 無 gating(±0.5 cycle)直接跨
             basin → false lock / unlock。look-ahead(Ch12)與 gating 門檻 0.0625 cycle(§14)
             是對位性的守門員,不只是精度問題。<EpistemicTag kind="INFERENCE" />
+          </li>
+          <li>
+            mismatch 可量測且穩定時用 calibrated mapping(exp24:rms 223.8 → 60.3 fs、最強 spur
+            −15.0 dB、不加 floor)。redundant_random DEM 是 calibration 不可得或會漂移時的
+            fallback:不需要 tap/DTC 表、對漂移天生免疫,把 code-correlated spur(如 437.5 MHz
+            的相鄰 tap 交替圖樣)換成白 floor —— 但它不降總誤差(exp24 rms 反升 10%),對 h ≡ 0
+            (mod 8) 的成分(DTC gain 鋸齒)與 α·f<sub>ref</sub> fundamental 幾乎無效。只有當 spur
+            比等功率的 floor 更傷規格時才值得開;先把 DTC gain 粗校到兩種表示誤差相近(g = 1 時
+            DEM rms ≈ naive),可避開上半 range 的 rms 懲罰。<EpistemicTag kind="INFERENCE" />
           </li>
         </ul>
       </SectionTakeaway>

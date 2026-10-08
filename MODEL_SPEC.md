@@ -443,7 +443,7 @@ Ch11 LMS demo 的 error signal;pure helper
 Tap spacing = 1/8 cycle = 32 LSB。Injection DTC codes `0..63` 覆蓋 1/4 cycle = 64 LSB。
 → 同一 target 可由 `(j, c)` 或 `(j-1 mod 8, c+32)` 表示(redundant representation)。
 
-三種 mapping(輸入 digital code `R_INJ` 或 real target `u_target`):
+四種 mapping(輸入 digital code `R_INJ` 或 real target `u_target`):
 
 1. **naive floor**:`j = floor(R_INJ/32)`, `c = R_INJ mod 32`(只用 DTC 下半 range)
 2. **nearest phase**:argmin over `j∈{0..7}, c∈{0..63}` of
@@ -455,8 +455,28 @@ Tap spacing = 1/8 cycle = 32 LSB。Injection DTC codes `0..63` 覆蓋 1/4 cycle 
    ```
    `DTC_actual` 含 gain/offset/INL、normalized 或 fixed-time LSB(§10、§11)。
    integer-cycle offset `l` 已由 `wrapCycles` 隱含處理。tie-break 同上。
+4. **redundant_random**(redundancy-based dynamic element matching, DEM):
+   每個 computed command `k`(computed domain、依 `k` 遞增)**恰好消耗一個**
+   `map_inj` stream(§12,offset 11)的 uniform draw `u[k]`,
+   **無論 `map_rand_p` 為何(含 0 與 1)都消耗**(determinism);以
+   `j0 = floor(R_INJ/32)`, `c0 = R_INJ mod 32`:
+   ```
+   u[k] <  map_rand_p  →  (j, c) = ((j0 − 1) mod 8, c0 + 32)   # alternative
+   u[k] >= map_rand_p  →  (j, c) = (j0, c0)                    # = naive
+   ```
+   config:`inj_mapping='redundant_random'`, `map_rand_p`(預設 0.5,須在 [0,1];
+   要求 `2*(G/N_TAP) <= 2^b_dtc`,否則 config 拒絕)。
+   兩種表示的 digital phase 相同(`(32*j + c) mod 256 == R_INJ`),所以
+   `u_INJ_digital` 與所有 digital error 與 naive **逐位相同**;只有 analog layer
+   (tap mismatch、DTC gain/INL)看得到選擇。`map_rand_p = 0` 逐位重現 naive,
+   `map_rand_p = 1` 恆用 alternative(`c ∈ 32..63`)。
+   所有 arch mode(A/B/C/D)與 `qnc` 都走此 decode;`dsm_only` 無 decode,
+   不消耗 `map_inj` draws。
+   動機:deterministic 的選擇使 mismatch-induced error 隨 code 週期化(spurs);
+   隨機選擇把它換成 noise-like floor —— 但**不會減少** error 本身(exp24 實測
+   rms 反而上升,見 §19 Test 20)。
 
-`u_INJ_digital[k] = (32*j + c)/256 mod 1`(naive 時 = `R_INJ/256`)。
+`u_INJ_digital[k] = (32*j + c)/256 mod 1`(naive / redundant_random 時 = `R_INJ/256`)。
 
 ---
 
@@ -555,8 +575,9 @@ z0 = r*cos(2*pi*u2);  z1 = r*sin(2*pi*u2)
 ```
 
 每個 noise source 使用**獨立 named stream**,seed = `base_seed + streamOffset`:
-`ref:1, vco_w:2, vco_rw:3, dither_fb:4, dither_inj:5, dnl_fb:6, dnl_inj:7, lat:8, pulse:9, dsm_inj:10`。
-(`dsm_inj` 供 §7 mode A/B/C injection 側 DSM 初始 state seeding 使用。)
+`ref:1, vco_w:2, vco_rw:3, dither_fb:4, dither_inj:5, dnl_fb:6, dnl_inj:7, lat:8, pulse:9, dsm_inj:10, map_inj:11`。
+(`dsm_inj` 供 §7 mode A/B/C injection 側 DSM 初始 state seeding 使用;
+`map_inj` 供 §8 mapping 4 `redundant_random` 每拍一個 uniform draw 使用。)
 預設 `base_seed = 12345`。
 跨語言 tolerance:純數位路徑 `1e-12`(整數 code 完全相等);含 noise 路徑 `1e-9`(libm 差異)。
 
@@ -761,7 +782,11 @@ Python 產生 `test_vectors/*.json`,TS 讀取並比對。Schema:
 `n3p130_dsm_only_gated`(exp21c-style:ef1, dsm_only, threshold gating,
 sin K_inj=0.4, Δf=1 MHz, σ_vco_w=0.02 rad),
 `n3p130_loop_both`(exp23c-style:sin K_inj=0.3, Δf=250 MHz,
-σ_vco_w=0.02 rad, `loop_mode='pi'` — loop + injection 共跑)。
+σ_vco_w=0.02 rad, `loop_mode='pi'` — loop + injection 共跑),
+`n3p222_redundant_random`(= exp24b config @512 cycles:N=3.22265625(α·G=57,
+on-grid)、mode D、nearest、`inj_mapping='redundant_random'`、`map_rand_p=0.5`、
+固定 tap mismatch `[0.0032, −0.0027, 0.0011, −0.0038, 0.0030, −0.0013, 0.0035, −0.0024]`
+cycle、`dtc_inj_gain=1.01`;§8 mapping 4)。
 
 Schema 穩定性規則 `[EXACT]`:
 
@@ -771,9 +796,14 @@ Schema 穩定性規則 `[EXACT]`:
   columns 末端**追加** int column `inj_fired`(§14)。
 - **schema-v4** vector(`n3p130_loop_both`)在 schema-v2 columns 末端再
   **追加** float columns `u_loop`, `pd_e`(§14.1)。
+- **schema-v5** vector(`n3p222_redundant_random`)沿用 **schema-v1 column list**
+  (不需新 column:DEM 的選擇已反映在 `j_INJ`/`c_INJ`/`u_INJ_analog`/`e_ZC_hw`);
+  config 帶 `inj_mapping='redundant_random'`,`map_rand_p` 為預設 0.5 故省略;
+  純 digital draw(無 libm),跨語言 tolerance 為 `float_abs` 1e-12。
 - config 序列化:schema-v2 之後新增的欄位(schema-v2:`actuator_mode`,
   `inj_gate_mode`, `inj_gate_threshold_cycles`;schema-v3:`qnc_gain`(§7.2);
-  schema-v4:`loop_mode`, `loop_kp`, `loop_ki`)**等於預設值時省略**
+  schema-v4:`loop_mode`, `loop_kp`, `loop_ki`;schema-v5:`map_rand_p`(§8))
+  **等於預設值時省略**
   (`from_dict`/`fromPartial` 會補回預設,round-trip 仍 exact)—
   這使既有檔案不因新欄位而改變。
 
@@ -805,6 +835,7 @@ Schema 穩定性規則 `[EXACT]`:
 | 17 | injection gating | `inj_fired` 遵守 §14 convention;fired mask = (\|e_ZC_hw\|≤threshold);非 fire 拍 `delta_theta≡0`;exp21:gating 使 dsm_only tail rms 1.81 → 0.10 rad |
 | 18 | qnc mode(§7.2) | `qnc_gain=1`+nearest @N=3.13:max\|e_FB_abs\|≤1/512+1/256(實測 0.001875000000154614,與 full actuator peak 相同);`qnc_gain=0.98`:code-dependent residual,實測 max\|e_FB_abs\|=0.02125 cycles(444/512 拍超出 1/512);Mode-D reverse identity 於 qnc 成立(所有 arch_mode、`e_pair_digital≡0`);`lms_qnc_step(1.0,0.1,0.5,0.2)=0.99` exact |
 | 19 | PLL loop co-sim(§14.1) | loop-only(Δf 在 loop 拉入範圍內)`mean(pd_e)→0`;`u_loop` steady mean ≈ `−2π·Δf·T_ref`(sign 已驗證,Δf>0 → u_loop<0);exp23 @Δf=250 MHz(`2π·Δf·T_ref=0.3927 rad > K_inj=0.3`,injection-only 失鎖 e_inj rms 1.82 rad):both-mode tail rms < injection-only tail rms(實測 e_inj rms 0.030 vs 1.82 rad,theta_plus rms 0.019 rad);exp23d route offset 0.01 cycle → mean e_inj ≈ 2π·0.01、mean theta_plus ≈ −K_inj·sin(2π·0.01)、u_loop end = −2π·Δf·T_ref + K_inj·sin(2π·0.01)(實測 −0.3739);`loop_mode='off'` 逐位不變(committed vectors byte-identical) |
+| 20 | redundant_random DEM mapping(§8 mapping 4) | ideal analog:`u_INJ_digital`、`e_ZC_hw`、所有 digital columns 與 naive **逐位相同**(任意 `map_rand_p`、所有 arch mode、qnc);`map_rand_p=0` 全部 columns 逐位 = naive;`map_rand_p=1` 恆為 `(j0−1 mod 8, c0+32)`(`c ∈ 32..63`);N sweep 下 codes 合法(j∈0..7、c∈0..63、`(32j+c) mod 256 = R_INJ`);第 k 拍選 alternative ⇔ `Mulberry32(seed+11)` 第 k 個 draw `< map_rand_p`(seed 12345、p=0.5、N=3.13:266/512 拍 alternative);每拍恰消耗一個 `map_inj` draw(p=0/1 亦然),其他 stream 不動;exp24(N=3.22265625、1.00° rms 固定 tap mismatch、`dtc_inj_gain=1.01`、2048 拍、e_ZC_hw 為純 mismatch error):naive rms 223.8 fs / peak 365.5 fs、127 個 f_ref/256 諧波 spur、最強 −101.2 dB re rad²/Hz @437.5 MHz、無 floor;DEM p=0.5:最強 spur −111.0 dB(−9.8 dB,但那是未被降低的 α·f_ref fundamental @890.625 MHz:naive −111.1 dB)、437.5 MHz spur −25.1 dB、floor median −129.9 dB(spur-to-floor 18.9 dB)、**rms 反升** 246.1 fs(+10%)、peak 462.4 fs;calibrated:rms 60.3 fs、peak 124.0 fs、最強 spur −116.3 dB(−15.0 dB)、仍週期性無 floor;committed vectors byte-identical、新 vector `n3p222_redundant_random` 跨語言 int 全等 / float ≤1e-12 |
 
 ---
 

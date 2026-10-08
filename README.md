@@ -29,16 +29,24 @@ ASSUMPTIONS.md         ← 所有 modeling 假設(皆為可調參數)
 CHAPTER_GUIDE.md       ← 網站章節內容契約
 VALIDATION_REPORT.md   ← 測試與數值驗證報告
 VERILOGA_USAGE.md      ← Verilog-A 使用指南
+RTL_USAGE.md           ← 可合成 SystemVerilog 排程器 RTL 使用指南(bit-exact 驗證流程)
+PDR_EXTRACTION.md      ← VCO PDR/PRC 萃取流程(Spectre template → §14 LUT CSV)
 model/python/          ← Python golden model(units/phase_math/config/schedulers/
                           quantizers/DTC/tap/latency/dynamics/measurements/
                           experiments/cli)
 model/veriloga/        ← 4 個 Verilog-A behavioral models(未經 Spectre 驗證)
+model/veriloga/validation/ ← Spectre validation kit(4 個 testbench + stimulus/check 腳本;UNRUN,
+                          無 simulator 可用;自測 `check_results.py --lint/--self-test` 可在任何機器跑)
+rtl/                   ← 可合成 SystemVerilog reference RTL(frac_phase_scheduler / fps_quantizer /
+                          fps_decode)+ 50 組 golden vectors + yosys→CXXRTL bit-exact 驗證 runner
+extraction/            ← PDR 萃取:Spectre testbench template(NOT RUN)+ run_sweep.py /
+                          postprocess_pdr.py(Python 部分真實、僅以 synthetic 資料驗證)
 web/                   ← React + TypeScript + Vite 互動教學網站
 web/src/model/         ← TypeScript mirror model(與 Python 逐位交叉驗證)
 tests/                 ← pytest(acceptance tests)
 test_vectors/          ← deterministic JSON vectors + csv/(Verilog-A 用 command CSV)
 results/               ← CLI 輸出(summary.json / timeseries.csv / psd.csv)
-examples/              ← Python API 範例腳本
+examples/              ← Python API 範例腳本 + pdr_example_asymmetric.csv(synthetic PDR LUT)
 ```
 
 ## 安裝
@@ -49,6 +57,10 @@ examples/              ← Python API 範例腳本
 # Python 側(僅 numpy / pytest)
 pip install numpy pytest
 
+# 選用:RTL bit-exact 驗證(tests/test_rtl_bitexact.py)需要 pip-only 的 yosys 與 C++ compiler;
+# 未安裝時該測試 skip(CI 已安裝)
+pip install yowasp-yosys
+
 # 網站
 cd web
 npm install
@@ -57,7 +69,7 @@ npm install
 ## 執行 Python behavioral model
 
 ```bash
-# 列出所有 presets(22 個 experiments + 別名)
+# 列出所有 presets(24 個 experiments + 別名)
 python3 -m model.python.cli --list-presets
 
 # 跑推薦架構 preset(N=3.13, quantize-once + modular reverse, look-ahead)
@@ -77,6 +89,20 @@ python3 examples/ex2_compare_modes.py
 python3 examples/ex3_injection_dynamics.py
 ```
 
+## 執行 RTL bit-exact 驗證 / PDR 萃取 / Spectre validation kit
+
+```bash
+# SystemVerilog 排程器 vs Python golden model(50 cases,見 RTL_USAGE.md)
+python3 rtl/gen_vectors.py --check
+python3 rtl/run_sim.py
+
+# PDR 萃取流程(僅 synthetic round trip;Spectre 端為 template,見 PDR_EXTRACTION.md)
+python3 extraction/run_sweep.py --dry-run
+
+# Verilog-A validation kit 的無 simulator 自測(Spectre 端 UNRUN,見 model/veriloga/validation/README.md)
+python3 model/veriloga/validation/check_results.py --self-test
+```
+
 ## 執行測試
 
 ```bash
@@ -91,7 +117,8 @@ cd web && npm test
 
 `.github/workflows/ci.yml` 在 push 到 `main` 與每個 pull request 上自動執行:
 
-- **test**:`pytest tests/`(Python golden model)、`web/` 下的
+- **test**:`pytest tests/`(Python golden model;pip 安裝 `yowasp-yosys`,
+  因此 `tests/test_rtl_bitexact.py` 在 CI 實際執行而非 skip)、`web/` 下的
   `npm ci` → `tsc --noEmit` → `npm test` → `npm run build`,並上傳
   `web/dist` 為 build artifact。
 - **deploy**(僅 push 到 `main` 時,需 `test` 先通過):下載
@@ -110,11 +137,15 @@ npm run build    # production build(輸出 web/dist/)
 npm run preview  # 預覽 production build
 ```
 
-網站 23 章(0–22):從 timing/sign convention、ideal fractional trajectory、
+網站 25 章(0–24):從 timing/sign convention、ideal fractional trajectory、
 feedback decode、reverse injection 幾何、tap/DTC redundancy、shared phase state、
 DSM state 議題、sub-LSB、latency look-ahead、injection dynamics、mismatch、
-spur/PN 分析、22 個一鍵 comparison experiments 與 design conclusions,到
-PD-input 誤差逐級解析與 DSM 殘餘誤差的失鎖邊界分析。
+spur/PN 分析、24 個一鍵 comparison experiments 與 design conclusions,到
+PD-input 誤差逐級解析與 DSM 殘餘誤差的失鎖邊界分析,最後是設計工具
+(Ch23:Frequency Planner 與 Jitter Budget)與可合成數位排程器 RTL 參考實作
+(Ch24:fixed-point 格式、FCW、look-ahead pre-advance、bit-exact 驗證)。
+Ch7 另含 redundancy DEM(`redundant_random` mapping,exp24),Ch13 含 PDR 萃取流程,
+Ch19 含 Spectre validation kit 與開源工具限制。
 所有模擬直接在 browser 端執行(TypeScript mirror model),不依賴任何 server。
 
 TopBar 的全站 `N` 控制提供 13 個 preset,分成三組(完整表格見
@@ -134,8 +165,10 @@ spur 間距 = `f_ref / P`):
 
 | 位置 | 內容 |
 |---|---|
-| `test_vectors/*.json` | 14 組 deterministic vectors(Python 產生,TS 逐位比對)|
-| `test_vectors/csv/*.csv` | 每-cycle command vectors(k, n_int, m_FB, c_FB, j_INJ, c_INJ, …)|
+| `test_vectors/*.json` | 16 組 deterministic vectors(Python 產生,TS 逐位比對)|
+| `test_vectors/csv/*.csv` | 16 組每-cycle command vectors(k, n_int, m_FB, c_FB, j_INJ, c_INJ, …)|
+| `rtl/vectors/*.csv` | 50 組 RTL golden vectors(2048 cycles/case;`rtl/gen_vectors.py` 由 golden model 產生)|
+| `examples/pdr_example_asymmetric.csv` | synthetic 64 點 asymmetric PDR LUT(非量測/非電路模擬)|
 | `results/<preset>/` | summary.json / timeseries.csv / psd.csv |
 | `web/dist/` | 網站 production build |
 
@@ -148,7 +181,13 @@ spur 間距 = `f_ref / P`):
   transient/PSS 萃取,可用 CSV LUT 匯入本 model。
 - Shorting energy 為 **normalized proxy**(sin²),非真實功率。
 - 本專案**未執行 Spectre**;Verilog-A models 為 simulator-friendly source,
-  未經模擬器驗證(詳見 `VERILOGA_USAGE.md`)。
+  未經模擬器驗證(詳見 `VERILOGA_USAGE.md`)。`model/veriloga/validation/` 的 Spectre
+  validation kit 同樣 **UNRUN**;開源 OpenVAF/OSDI(ngspice、Xyce)只支援 compact-model
+  子集(無 analog events、`transition()`、`idtmod()`),**無法**編譯這些 `.va`。
+- PDR 萃取的 Spectre testbench(`extraction/spectre_pdr_tb.scs`)為 **TEMPLATE, NOT RUN**;
+  Python 後處理僅以 synthetic 資料驗證(`PDR_EXTRACTION.md`)。
+- `rtl/` 為 reference RTL:僅以 yosys CXXRTL 語意驗證 bit-exact,無 CDC、DFT、timing closure,
+  僅 nearest/floor/ef1、Mode D、naive decode(`RTL_USAGE.md` §9)。
 - Behavioral 結果**不等同** silicon 結果。完整清單見 `MODEL_SPEC.md` §20 與網站 Ch20。
 
 ## 授權與引用

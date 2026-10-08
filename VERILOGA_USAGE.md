@@ -366,3 +366,63 @@ Two ways to use them:
 
 Each step has a Python golden-model counterpart — debug numerical mismatches
 against Python *before* suspecting the simulator.
+
+## Validation kit
+
+`model/veriloga/validation/` holds a Spectre validation kit for the four
+models. **Its simulator side is UNRUN.** Like the `.va` files themselves, the
+netlists and Ocean scripts have never been executed. Only the Python parts
+were run. Full details are in `model/veriloga/validation/README.md`.
+
+**Why no open-source run.** The models are event-driven behavioral code:
+`@(cross)`, `@(initial_step)`, `transition()` (including a variable delay),
+`idtmod()`, `$bound_step`, and analog-block state that persists between
+events. OpenVAF, the open-source OSDI flow for ngspice/Xyce, compiles only
+the compact-model subset of Verilog-A, with no analog events or filters, so
+it cannot compile these files. Validation requires a commercial analog
+simulator: Spectre, Siemens AFS, or Xcelium/AMS Designer. The kit targets
+Spectre + Ocean.
+
+**One command** on a Cadence machine: `model/veriloga/validation/run_all.sh`.
+It generates the stimuli, lints the netlists, runs `spectre` on each bench,
+exports results with `ocean -nograph -restore build/ocean/export_tb_<tb>.ocn`,
+and checks them. Exit 0 means every bench PASSed.
+
+| Bench | Instances ↔ reference |
+|---|---|
+| `tb_fractional_phase_scheduler.scs` | nearest α=0.13 ↔ `n3p130_nearest`; nearest α=0.125 ↔ `n3p125_nearest`; ef1 ↔ `n3p130_ef1_shared` |
+| `tb_reverse_injection_scheduler.scs` | Mode D from a PWL R_FB and from a live feedback scheduler (clock + T_ref/4) ↔ `n3p130_nearest`; seeded Mode-B ef1 ↔ `n3p130_ef1_independent`; L=1 bug / look-ahead ↔ `n3p130_latency_bug` / `n3p130_lookahead` |
+| `tb_dtc_nonideal_model.scs` | nominal taps + 1° ↔ `n3p125_tap_mismatch_1deg`; ideal ↔ `n3p130_nearest`; gain 1.01 and offset+INL ↔ golden re-run of `n3p130_nearest` |
+| `tb_pulsed_injection_phase_model.scs` | sin / linear / reset kick, `n3p130_dynamics_sin` parameters ↔ golden `run_dynamics` with noise off |
+
+* **PASS means** the following, on all 512 edges. Scheduler integer codes
+  equal the committed vectors exactly. DTC delays agree with
+  `u_INJ_analog·T_vco` within 10 fs. Injection `e_inj` / `Δθ` / θ agree with
+  the golden recursion within 5e-4 rad.
+* **Injection expectation.** The `.va` model runs in continuous time.
+  Relative to the discrete §14 map, a trigger at `t_k` sees the extra
+  detuning phase `2π·Δf·(t_k − (k+1)·T_ref)`. The checker adds this to
+  `epsilon_hw` (up to 1.07e-3 rad here); the derivation is in the kit README.
+  The committed dynamics vector includes VCO noise, which the deterministic
+  model cannot reproduce, so the comparison is made against a noise-free
+  re-run.
+* **Not covered:** noise and jitter, PDR/PRC realism of the kick, the
+  closed scheduler→DTC→ILO chain, `map_mode = 1`, `out_mode = 1`, and runs
+  longer than 512 cycles.
+* **Runnable without a simulator:** `python3 check_results.py --lint`
+  (netlist ↔ manifest ↔ `.va` ports/parameters ↔ vector configs) and
+  `python3 check_results.py --self-test`. The self-test fabricates matching
+  and deliberately corrupted exports from `va_emulator.py`, a transcription
+  of the `.va` event math, and proves the checker passes and fails
+  accordingly. Both PASS in this checkout. The emulator reproduces every
+  committed code exactly and the golden injection recursion to 4.3e-12 rad.
+* **Findings while building the kit** (the `.va` files are unchanged):
+  1. `pulsed_injection_phase_model` produces a `vco_out` glitch when the
+     wrapped `theta_c` crosses ±0.5 cycle. With Δf = 1 MHz in lock this
+     happens after about 2000 cycles.
+  2. `dtc_nonideal_model` propagates the falling edge through a
+     `transition()` delay while the rising edge may still be pending,
+     whenever t_d exceeds the pulse width. That is the normal case once
+     hookup rule 3 folds the nominal tap phases into `tap0..tap7`.
+  3. `n3p125_dtc_gain_1pct` has `c_INJ ≡ 0`, so the 1 % gain never acts in
+     that vector.

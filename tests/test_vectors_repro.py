@@ -14,6 +14,8 @@ EXPECTED_NAMES = {
     "n3p130_mash111", "n3p130_dsm_only_gated",
     # schema-v4 vector (additionally carries 'u_loop' and 'pd_e')
     "n3p130_loop_both",
+    # schema-v5 vector (redundancy DEM mapping, exp24b config; v1 columns)
+    "n3p222_redundant_random",
 }
 
 
@@ -29,7 +31,7 @@ def test_emit_vectors_reproducible(tmp_path):
     d2 = tmp_path / "run2"
     p1 = emit_vectors(str(d1))
     p2 = emit_vectors(str(d2))
-    assert len(p1) == len(p2) == 30  # 15 JSON + 15 CSV
+    assert len(p1) == len(p2) == 32  # 16 JSON + 16 CSV
 
     for name in EXPECTED_NAMES:
         j1 = d1 / f"{name}.json"
@@ -105,3 +107,29 @@ def test_vector_schema_v4(tmp_path):
     assert "u_loop" not in v2["columns"]
     assert "pd_e" not in v2["columns"]
     assert "loop_mode" not in v2["config"]
+
+
+def test_vector_schema_v5(tmp_path):
+    """The schema-v5 vector (redundancy DEM mapping, MODEL_SPEC section 8
+    item 4) is exactly the exp24b config at 512 cycles: it keeps the schema-v1
+    column list, carries inj_mapping='redundant_random', and omits map_rand_p
+    at its default 0.5; earlier vectors never carry map_rand_p."""
+    import json
+    from model.python.experiments import PRESETS
+    emit_vectors(str(tmp_path))
+    with open(tmp_path / "n3p222_redundant_random.json") as f:
+        v5 = json.load(f)
+    assert v5["config"]["inj_mapping"] == "redundant_random"
+    assert v5["config"]["n_div"] == 3.22265625
+    assert "map_rand_p" not in v5["config"]  # default omitted
+    assert "inj_fired" not in v5["columns"]
+    exp24b = PRESETS["exp24"]["configs"][1]
+    assert VECTOR_CONFIGS["n3p222_redundant_random"].to_dict() == \
+        exp24b.replace(n_cycles=512).to_dict()
+    # both representations are actually exercised in the committed vector
+    ci = v5["columns"].index("c_INJ")
+    cs = [row[ci] for row in v5["data"]]
+    assert min(cs) < 32 <= max(cs) <= 63
+    with open(tmp_path / "n3p130_nearest.json") as f:
+        v1 = json.load(f)
+    assert "map_rand_p" not in v1["config"]

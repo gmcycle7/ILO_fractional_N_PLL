@@ -43,6 +43,21 @@
  *                  c then smaller j (candidates enumerated c-major so the
  *                  first-minimum rule implements the tie-break exactly)
  *     calibrated : argmin using actual tap + DTC + route models.
+ *     redundant_random (spec section 8 item 4; redundancy-based dynamic
+ *                  element matching, DEM): per computed command k
+ *                  (ascending), draw ONE uniform u from the 'map_inj' PRNG
+ *                  stream (section 12, offset 11) — the draw is consumed on
+ *                  every cycle, also when map_rand_p is 0 or 1 — and with
+ *                  j0 = floor(R/32), c0 = R mod 32:
+ *                      u <  map_rand_p -> (j, c) = ((j0 - 1) mod 8, c0 + 32)
+ *                      u >= map_rand_p -> (j, c) = (j0, c0)        (= naive)
+ *                  Both representations decode to the same digital phase
+ *                  ((32*j + c) mod 256 == R), so u_INJ_digital and every
+ *                  digital error are identical to 'naive'; only the analog
+ *                  layer (tap mismatch / DTC gain, INL) sees the choice.
+ *                  p = 0 reproduces naive exactly, p = 1 always uses the
+ *                  upper DTC half (c in 32..63).  'dsm_only' has no decode,
+ *                  so no 'map_inj' draws are consumed there.
  *
  * [Resolved ambiguity: spec section 8 allows the mapping input to be either
  * the digital code R_INJ or a real target; this model always uses the digital
@@ -57,6 +72,7 @@ import type { DTCModel } from './dtcModel';
 import { pymod, wrap01, wrapCycles, wrapCyclesArr } from './phaseMath';
 import { ErrorFeedbackFirstOrder, Mash11, Mash111, makeQuantizer } from './quantizers';
 import type { Mulberry32 } from './rng';
+import { makeStream } from './rng';
 
 export interface InjectionResult {
   u_INJ_ideal: Float64Array;
@@ -105,7 +121,13 @@ function candidates(
   return { js, cs, us };
 }
 
-/** Produce injection command stream (computed-domain, pre-latency). */
+/**
+ * Produce injection command stream (computed-domain, pre-latency).
+ *
+ * `mapStream` is the 'map_inj' PRNG stream used by the 'redundant_random'
+ * mapping (spec section 8 item 4); when omitted it is built from cfg.seed so
+ * direct callers stay deterministic.
+ */
 export function runInjection(
   cfg: SimConfig,
   xNominal: ArrayLike<number>,
@@ -114,6 +136,7 @@ export function runInjection(
   tapTbl: ArrayLike<number>,
   ditherStream: Mulberry32 | null = null,
   dsmStream: Mulberry32 | null = null,
+  mapStream: Mulberry32 | null = null,
 ): InjectionResult {
   const g = configG(cfg);
   const n = xNominal.length;
@@ -178,6 +201,23 @@ export function runInjection(
     for (let k = 0; k < n; k++) {
       jInj[k] = Math.floor(rInj[k] / tapStep);
       cInj[k] = pymod(rInj[k], tapStep);
+    }
+  } else if (cfg.inj_mapping === 'redundant_random') {
+    // spec section 8 item 4: one 'map_inj' draw per cycle (always consumed);
+    // alternative representation iff u < map_rand_p
+    const stream = mapStream !== null ? mapStream : makeStream('map_inj', cfg.seed);
+    const pAlt = cfg.map_rand_p;
+    for (let k = 0; k < n; k++) {
+      const j0 = Math.floor(rInj[k] / tapStep);
+      const c0 = pymod(rInj[k], tapStep);
+      const u = stream.next();
+      if (u < pAlt) {
+        jInj[k] = pymod(j0 - 1, cfg.n_tap);
+        cInj[k] = c0 + tapStep;
+      } else {
+        jInj[k] = j0;
+        cInj[k] = c0;
+      }
     }
   } else {
     const calibrated = cfg.inj_mapping === 'calibrated';

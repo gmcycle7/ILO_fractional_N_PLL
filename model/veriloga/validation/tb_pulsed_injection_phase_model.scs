@@ -1,0 +1,51 @@
+// =============================================================================
+// tb_pulsed_injection_phase_model.scs  --  Spectre testbench
+// STATUS: UNRUN. Written without access to Spectre (or any simulator that can
+// compile event-driven Verilog-A); never parsed by Spectre. See README.md.
+//
+// DUT     : ../pulsed_injection_phase_model.va (module pulsed_injection_phase_model)
+// Vector  : n3p130_dynamics_sin (N = 3.13, K_inj = 0.3, delta_f = 1 MHz, sin map)
+// Trigger : build/stim/n3p130_dynamics_sin__inj_trigger.pwl -- one pulse per
+//           reference cycle, rising crossing at
+//               t_k = k*T_ref + 1*T_vco + u_INJ_digital[k]*T_vco
+//           (u from the committed j_INJ/c_INJ; T_vco = 1/f0). This replaces
+//           the scheduler + DTC chain by exact timing, so the bench isolates
+//           the ILO model.
+// Expected: the committed vector carries VCO white noise (sigma 0.01 rad),
+//           which this deterministic model cannot reproduce; expected values
+//           are the golden model (model/python injection_dynamics.run_dynamics)
+//           re-run with noise off and epsilon_hw augmented by the detuning
+//           phase accrued inside the cycle, 2*pi*delta_f*(t_k - (k+1)*T_ref)
+//           (continuous-time model vs discrete map, derivation in README).
+// Instances: ilo_sin (inj_map=1), ilo_lin (inj_map=0), ilo_rst (inj_map=2).
+// Checked : e_inj_dbg, dtheta_dbg, theta_dbg (1 V/rad) after every trigger.
+// =============================================================================
+simulator lang=spectre
+global 0
+
+ahdl_include "../pulsed_injection_phase_model.va"
+
+// Timing plan -- MUST equal kit_common.TIMING (check_results.py --lint).
+parameters tref=250e-12 nref=512 tstop=nref*tref fvco=3.13*4e9 dfvco=1e6
+
+v_inj (inj 0) vsource type=pwl file="build/stim/n3p130_dynamics_sin__inj_trigger.pwl"
+
+// --- ports: inj_in vco_out e_inj_dbg dtheta_dbg theta_dbg ---------------------
+ilo_sin (inj ilo_sin_vco ilo_sin_e ilo_sin_dth ilo_sin_th) \
+        pulsed_injection_phase_model f0=fvco delta_f=dfvco k_inj=0.3 inj_map=1 \
+        k_scale=1 z0=0 theta0=0 out_mode=0 vth_trig=0.5 t_tran=1e-12 \
+        t_kick=1e-13 en_bound_step=1
+
+ilo_lin (inj ilo_lin_vco ilo_lin_e ilo_lin_dth ilo_lin_th) \
+        pulsed_injection_phase_model f0=fvco delta_f=dfvco k_inj=0.3 inj_map=0 \
+        k_scale=1 z0=0 theta0=0 out_mode=0 vth_trig=0.5 t_tran=1e-12 \
+        t_kick=1e-13 en_bound_step=1
+
+ilo_rst (inj ilo_rst_vco ilo_rst_e ilo_rst_dth ilo_rst_th) \
+        pulsed_injection_phase_model f0=fvco delta_f=dfvco k_inj=0.3 inj_map=2 \
+        k_scale=1 z0=0 theta0=0 out_mode=0 vth_trig=0.5 t_tran=1e-12 \
+        t_kick=1e-13 en_bound_step=1
+
+// $bound_step(0.05/f0) ~ 4 ps -> >= 32k time points for 128 ns; expected.
+// Output format is chosen on the command line (run_all.sh: -format psfbin).
+tran tran stop=tstop errpreset=conservative

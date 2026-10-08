@@ -40,6 +40,8 @@ export const CHAPTERS: ChapterMeta[] = [
   { id: 20, slug: 'design-rules-conclusions', titleZh: '設計準則與結論', titleEn: 'Design Rules and Conclusions', load: () => import('./Chapter20') },
   { id: 21, slug: 'pd-input-error-anatomy', titleZh: 'PD 輸入端誤差逐級解析', titleEn: 'PD-Input Phase Error Anatomy', load: () => import('./Chapter21') },
   { id: 22, slug: 'dsm-residual-injection-lock', titleZh: 'DSM 殘餘誤差與失鎖邊界', titleEn: 'DSM Residuals and Injection Lock Margin', load: () => import('./Chapter22') },
+  { id: 23, slug: 'design-tools', titleZh: '設計工具', titleEn: 'Design Tools: Frequency Planner & Jitter Budget', load: () => import('./Chapter23') },
+  { id: 24, slug: 'scheduler-rtl', titleZh: '數位排程器 RTL', titleEn: 'Scheduler RTL Reference', load: () => import('./Chapter24') },
 ];
 
 export function chapterBySlug(slug: string): ChapterMeta | undefined {

@@ -9,7 +9,7 @@
 
 export type Quantizer = 'floor' | 'nearest' | 'truncate' | 'ef1' | 'mash11' | 'mash111';
 export type ArchMode = 'A' | 'B' | 'C' | 'D';
-export type InjMapping = 'naive' | 'nearest' | 'calibrated';
+export type InjMapping = 'naive' | 'nearest' | 'calibrated' | 'redundant_random';
 export type DtcModeName = 'normalized' | 'fixed_time';
 export type InjModel = 'none' | 'reset' | 'linear' | 'sin' | 'lut';
 export type ActuatorMode = 'full' | 'dsm_only' | 'qnc';
@@ -18,7 +18,7 @@ export type LoopMode = 'off' | 'pi';
 
 const QUANTIZERS: readonly string[] = ['floor', 'nearest', 'truncate', 'ef1', 'mash11', 'mash111'];
 const ARCH_MODES: readonly string[] = ['A', 'B', 'C', 'D'];
-const INJ_MAPPINGS: readonly string[] = ['naive', 'nearest', 'calibrated'];
+const INJ_MAPPINGS: readonly string[] = ['naive', 'nearest', 'calibrated', 'redundant_random'];
 const DTC_MODES: readonly string[] = ['normalized', 'fixed_time'];
 const INJ_MODELS: readonly string[] = ['none', 'reset', 'linear', 'sin', 'lut'];
 const ACTUATOR_MODES: readonly string[] = ['full', 'dsm_only', 'qnc'];
@@ -43,7 +43,11 @@ export interface SimConfig {
   arch_mode: ArchMode; // A|B|C|D (section 7; D = quantize once + modular reverse)
   actuator_mode: ActuatorMode; // full|dsm_only|qnc (sections 7.1, 7.2)
   qnc_gain: number; // QNC cancellation-DTC gain (section 7.2; 'qnc' mode only)
-  inj_mapping: InjMapping; // naive|nearest|calibrated (section 8)
+  inj_mapping: InjMapping; // naive|nearest|calibrated|redundant_random (section 8)
+  // 'redundant_random' only: probability of picking the alternative
+  // representation (j-1 mod n_tap, c+tap_step); one 'map_inj' draw per cycle
+  // (section 8 item 4)
+  map_rand_p: number;
   dtc_mode: DtcModeName; // normalized|fixed_time (section 11)
   dtc_lsb_fs: number; // fixed_time DTC LSB in fs [B2]
   latency_cycles: number; // fixed digital latency L (reference cycles) [B3]
@@ -101,6 +105,7 @@ export function defaultConfig(): SimConfig {
     actuator_mode: 'full',
     qnc_gain: 1.0,
     inj_mapping: 'naive',
+    map_rand_p: 0.5,
     dtc_mode: 'normalized',
     dtc_lsb_fs: 312.5,
     latency_cycles: 0,
@@ -169,6 +174,18 @@ export function validateConfig(cfg: SimConfig): SimConfig {
   }
   if (cfg.inl_lut !== null && cfg.inl_lut.length !== 1 << cfg.b_dtc) {
     throw new Error('inl_lut must have 2^b_dtc entries');
+  }
+  if (!(cfg.map_rand_p >= 0.0 && cfg.map_rand_p <= 1.0)) {
+    throw new Error('map_rand_p must be in [0, 1]');
+  }
+  if (
+    cfg.inj_mapping === 'redundant_random' &&
+    2 * Math.floor(configG(cfg) / cfg.n_tap) > 1 << cfg.b_dtc
+  ) {
+    throw new Error(
+      "inj_mapping 'redundant_random' requires the DTC range to cover two tap steps " +
+        '(2*(G/n_tap) <= 2^b_dtc)',
+    );
   }
   return cfg;
 }

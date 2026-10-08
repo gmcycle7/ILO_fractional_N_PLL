@@ -87,6 +87,21 @@ naive/nearest/calibrated 三種 mapping;calibrated argmin 公式。
 #10 tap code plot、#11 injection DTC code plot。
 數值例:u_target=0.40 → naive (j=3,c=6) vs 替代 (j=2,c=38);開 1° tap3 mismatch 後
 calibrated 改選誰、residual 各多少。
+**追加節(Redundancy DEM,MODEL_SPEC §8 mapping 4 `redundant_random`)**:放在原
+互動圖之後的 SectionFigure「Redundancy DEM: 用冗餘表示打散 mismatch spur」(章內其他
+節順序不變)。內容:兩種表示 `(j0,c0)` vs `((j0−1) mod 8, c0+32)` 的恆等式、每拍恰消耗一個
+`map_inj`(offset 11)draw 的 determinism 規則、ideal analog 下隨機化為 no-op [EXACT]、
+有 mismatch 時 `e_DEM = e_naive + pΔ + (b−p)Δ`(deterministic 週期項 + 白色 floor)與
+`E[e²] = (1−p)e_naive² + p·e_alt²`(DEM 搬移 error power,不移除)[EXACT]、
+`|H_h| = |1−p+p·e^{jπh/4}|` → p=0.5 時 `|cos(πh/8)|`(h≡4 mod 8 被 null)[EXACT]。
+互動重現 exp24 設定(N=3.22265625、α·G=57 on-grid、固定 1.00° rms tap mismatch × 縮放、
+`dtc_inj_gain=1.01`、2048 拍、seed 12345):三種 mapping 同時重算,e_ZC_hw 時域 +
+Hann PSD 疊圖 + 統計表(rms/peak/mean、最強 spur、median floor、c≥32 拍數)。
+錨點(python3 實測):naive rms 223.8 fs / peak 365.5 fs、127 根 spur、最強 −101.2 dB
+@437.5 MHz;DEM p=0.5(1084/2048 拍走 alternative)最強 spur −111.0 dB(那是未被降低的
+890.625 MHz 基頻)、floor median −129.9 dB、**rms 反升** 246.1 fs / peak 462.4 fs;
+calibrated rms 60.3 fs / peak 124.0 fs、最強 spur −116.3 dB。結論:DEM 把 spur 換成
+noise-like floor,**不減少** error;要縮小 rms 必須 calibrated [EXPERIMENT]。
 
 **Ch8 Shared Phase State 共享相位狀態**
 MODEL_SPEC §7 四 mode 全比較。Mode D identity (R_FB+R_INJ) mod 256 = R_zero 的證明;
@@ -128,6 +143,16 @@ MODEL_SPEC §14。三 model(reset/linear/sin+LUT);為何 scheduler 先驗證再�
 fixed points 標記)、#22 convergence plot(θ[k] 軌跡,K_inj/Δf/noise 可調)、
 lock range |2πΔf·T_ref|≤K_inj 檢查、K_inj→0 與加大之趨勢。PDR LUT CSV import UI。
 全章掛 APPROX 標記。
+**追加節(圖 #21b PDR 萃取流程,PDR_EXTRACTION.md)**:放在 PDR LUT import 之後的
+SectionFigure。內容:transistor-level 單 pulse twin-run(REF/INJ)→ `postprocess_pdr.py`
+→ MODEL_SPEC §14 LUT CSV 的流程圖;sign convention 對照表(`phi_inj`↔`e_inj`、
+`dt`↔`Δθ = −2π·dt/T_vco`;pulse 晚於 zero crossing → `e_inj>0` → `Δθ<0`);
+`examples/pdr_example_asymmetric.csv`(64 點 synthetic 非對稱 LUT,truth
+`Δθ = −0.3(sin e + 0.3 sin 2e)`、10 fs rms timing noise)與 sin map 的對照圖(fixed point
+穩定性 `−2 < slope < 0`);小訊號 K_inj(e=0)與第一諧波 K1 的差異。
+**必須**置頂 honesty Callout:Spectre testbench 為 TEMPLATE / NOT RUN、Python 部分只以
+synthetic 資料驗證(tests/test_pdr_postprocess.py,18 tests)、example CSV 是 synthetic
+而非量測 [ASSUMPTION];「single-kick PRC = 每拍 Δθ(e)」本身是 [APPROX]。
 
 **Ch14 Zero-Crossing Miss and Shorting Energy**
 MODEL_SPEC §15。v_d/V_p=sin(2πε_t/T_vco)、E∝sin²、half-LSB → 1.227% / 1.5e-4。
@@ -149,7 +174,7 @@ deterministic spur vs broadband vs static offset vs RJ vs PJ 五分類各給一�
 (不同 config 一鍵切換)。固定 seed 說明。
 
 **Ch17 Interactive Architecture Comparisons 互動式架構比較**
-22 個 experiment 一鍵 preset(from '../model' 的 EXPERIMENTS),每個顯示:
+24 個 experiment 一鍵 preset(from '../model' 的 EXPERIMENTS,含 exp21–exp24),每個顯示:
 setup(config diff)、equations 連結、expected、simulation result、
 what to observe、engineering conclusion。
 互動圖#29 comparison dashboard(多 config 同跑、指標表:RMS/peak/pair/ZC miss、
@@ -165,6 +190,16 @@ test vector schema、pytest 摘要、Python↔TS 交叉驗證方法與 tolerance
 四個 .va 模組用途/ports/parameters 表、VERILOGA_USAGE.md 重點、CSV 驅動法、
 simulator-dependent constructs 清單、bring-up 順序;
 誠實聲明:未跑 Spectre、行為級 ≠ silicon。節錄 .va 關鍵段落。
+**追加節(Validation kit 與開源工具限制,model/veriloga/validation/)**:SectionFigure
+「Validation kit 與開源工具限制」。內容:kit 檔案表(4 個 Spectre testbench、`run_all.sh`、
+`gen_stimulus.py`、`check_results.py`、`kit_common.py`、`va_emulator.py`;各自標
+UNRUN / 已執行)、Ocean 匯出 CSV 契約與時序計畫(T_REF=250 ps、512 拍 = 128 ns)、
+PASS 定義(codes 完全相等且離整數 ≤0.25 LSB;DTC delay ≤10 fs;injection ≤5e-4 rad)、
+`--lint` / `--self-test` 實跑輸出、bring-up 順序、kit 回報的 `.va` suspected issues
+(theta_c wrap glitch、DTC 下降緣 transition() 風險)。**必須**說明為何 OpenVAF/OSDI +
+ngspice/Xyce 不能驗證:OSDI 只支援 compact-model 子集(無 analog event、`transition()`、
+`idtmod()`),四個 .va 全部建立在這些 constructs 上 [INFERENCE,本 checkout 未實際嘗試編譯];
+需要 Spectre(含 APS/X)/ AFS / Xcelium AMS。整段 simulator 端標 UNRUN。
 
 **Ch20 Design Rules and Conclusions 設計準則與結論**
 逐條回答原始需求 §26 的 18 個問題(每題:答案 + 依據哪個 experiment/公式 + 標記)。
@@ -270,12 +305,68 @@ pullback、slip 為行為 proxy(256 拍窗低估慢 slip)、PMUX 級為思想實
 ParamPanel:quantizer/actuator/N(useChapterNDiv)/σ_vco_w/K_inj/r slider + canonical
 presets;map 固定 256 cycles、頻譜與峰值固定 K=0.3。
 
+**Ch23 設計工具 Design Tools:Frequency Planner 與 Jitter Budget**(registry:id 23,
+slug `design-tools`,titleEn `Design Tools: Frequency Planner & Jitter Budget`)
+主題:設計時 N 還沒決定 —— 給定 `f_vco`、候選 `f_ref`,先排頻率再設計電路;再把各誤差項
+合成 jitter budget。math contract:MODEL_SPEC §1/§1.1(N 範圍、`P = q/gcd(q,G)`)、§2、§4、
+§8/§10、§14、§17(spur 落點 `m·f_ref/P`、sample rate = `f_ref`)。
+(A) Frequency planner:`N = f_vco/f_ref`、合法性(N ∈ [3, 3.25])、`α·G` 到最近整數距離、
+連分數 `α ≈ p/q`(`q ≤ 4096`)→ 三級 grid(G_s ∈ {1,4,256})的 `P_s = q/gcd(q,G_s)`、
+spur 基頻 `f_ref/P`、nearest 峰值 `(⌊P/2⌋/P)·Δ`,依 loop bandwidth 分帶內/帶外並排名;
+exact 條件 `f_ref = 256·f_vco/m`。錨點(f_vco = 12.890625 GHz,python3 驗證):
+`f_ref=4.0` GHz → N=3.22265625、`α·G=57` exact;`4.125` GHz → N=3.125 exact(`α·G=32`);
+`4.25` GHz → `P=17`、250 MHz;`4.096` GHz → `P=128`、32 MHz。
+(B) Jitter budget:random 項(reference、VCO residual、pulse)RSS;deterministic 項
+(quantization、tap、DTC gain、INL、route)同時給 worst-case 線性和與 RSS;dual-Dirac
+`TJ(BER) = DJ_pp + 2Q·RJ_rms`,`Q(10^-12) = 7.034`(python3 `NormalDist().inv_cdf(1−1e-12)`);
+dominant contributor 與 margin。
+互動圖:圖一 planner 表(清單或 sweep、可排序、點選列)、圖二選中列以 `simulate(f_ref_hz,
+n_div)` 即時確認 P 與 spur 位置(e_FB_abs + PSD)、圖三 budget(RJ/DJ 合成、TJ at BER、
+margin、dominant contributor)、圖四 cross-check(budget 估計 vs `simulate()` 實測 e_ZC_total,
+誠實顯示比值)。SectionExample 三題 ExampleProblem:Planner、RJ/DJ roll-up、TJ at BER。
+misconception:「on-grid 就沒有 jitter」(錯:只有量化項為 0)、「deterministic 項用 RSS
+就夠」(錯:單邊同號誤差會線性相加,RSS 低估峰值)、「最強 spur 就在 `f_ref/P`」(錯:位置由 P
+決定、幅度由序列形狀決定)。limitation:dual-Dirac 為 [APPROX]、帶內/帶外為硬門檻、
+f_ref 候選假設同樣乾淨、單一 realization(seed 12345)。helper(連分數、Acklam Φ⁻¹)屬規劃層
+計算,不重做任何 wrap/quantizer/DSM 數學。本章數字以 python3(model/python)交叉驗證。
+
+**Ch24 數位排程器 RTL Scheduler RTL Reference**(registry:id 24,slug `scheduler-rtl`,
+titleEn `Scheduler RTL Reference`)
+主題:從 float64 golden model 交接到 fixed-point 硬體 —— `rtl/frac_phase_scheduler.sv`
+(+ `fps_quantizer.sv`、`fps_decode.sv`),契約仍是 MODEL_SPEC(§3/§4/§6/§7-D/§8/§13),
+RTL 與 golden model 的任何數值不一致皆為 RTL bug。內容:
+(1) fixed-point 格式:accumulator UQ(IW+8).F 存 `A_ideal = 256·k·N`;`FCW = round(N·256·2^F)`
+(round half up,BigInt exact rational,語意等同 `rtl/gen_vectors.py::fcw_of`);頻率解析度
+`f_ref/2^(8+F)`。錨點(python3 驗證):N=3.13、F=24 → FCW = 13 443 247 636 = 0x3_2147_AE14,
+`N_realized` 與 3.13 差 → Δf = −0.447 Hz,解析度 0.931 Hz;dyadic N(3.125、3.126953125)Δf = 0。
+(2) quantizer 整數實作(nearest = `(ACC + 2^(F−1)) >> F`、floor、ef1);decode(`n_int` 取自
+**量化後** `k` 與 `k+1` 的 code、`R_INJ = (R_zero − R_FB) mod 256`);
+(3) look-ahead:reset 以 closed form 載入 index `LAT` 的 state(pre-advance),LAT 級 register
+後輸出,`valid`/`seq_id` 語意;(4) bit-exact 驗證:`rtl/gen_vectors.py`(50 cases)+
+`rtl/run_sim.py`(yosys → CXXRTL → C++)。**記錄值**(來自 RTL_USAGE.md §6,瀏覽器內不重跑):
+50/50 PASS、204 634 cycles、1 637 072 output values、0 mismatches;(5) 合成統計
+(`rtl/synth_stat.txt`,generic gate、無 timing):LAT=0/1/3 → cells 577/837/1240、flops
+88/125/199(= 88 + 37·LAT)、latches 0。
+互動圖:圖 1 FCW 計算器(N、F → FCW、realized N、頻率誤差)、圖 2 fixed-point vs requested N
+(R_FB 第一次不同的 cycle,nearest/floor/ef1 × F)、圖 3 已驗證的 50 case 與合成統計(recorded)。
+SectionExample 三題 ExampleProblem:FCW 計算、頻率解析度與 realized 誤差、look-ahead
+pre-advance closed-form state。SectionCode 摘錄 `rtl/*.sv` 與 `rtl/gen_vectors.py`
+(逐字、標行號,勿捏造)。misconception:「F 夠大 RTL 就與 requested-N float model 逐拍相同」
+(錯:decision boundary 上必翻轉、drift 終將跨界)、「LAT 只是多加 flop」(錯:否則是 §13 的
+46.8° bug)、「nearest 的 rounding 無所謂」(錯:offset 改 `2^(F−2)` 即 14 個 off-grid case FAIL)、
+「−0.447 Hz 變 jitter」(錯:靜態 offset)。limitation 照錄 RTL_USAGE.md §9(無 CDC/DFT/timing
+closure、無 MASH/dither/dsm_only/qnc、僅 Mode D 與 naive decode、僅 CXXRTL 語意驗證)。
+
 ## 3. 互動圖總表(30 圖 → 章)
 
 1→Ch1, 2→Ch3, 3→Ch7, 4→Ch2, 5→Ch3, 6→Ch3, 7→Ch4, 8→Ch4, 9→Ch5, 10→Ch7,
 11→Ch7, 12→Ch5, 13→Ch5/8, 14→Ch8, 15→Ch14, 16→Ch11, 17→Ch11/16, 18→Ch16,
 19→Ch9, 20→Ch9, 21→Ch13, 22→Ch13, 23→Ch14, 24→Ch14, 25→Ch15, 26→Ch15,
 27→Ch12, 28→Ch5, 29→Ch17, 30→Ch17。
+
+追加圖(不佔原 30 圖編號):Redundancy DEM(exp24 設定)→ Ch7;圖 #21b PDR 萃取流程
+→ Ch13;Validation kit 與開源工具限制 → Ch19;Frequency Planner / Jitter Budget 四圖 → Ch23;
+FCW 計算器、fixed-point 分歧、已驗證 case 與合成統計三圖 → Ch24。
 
 ## 4. 技術注意
 

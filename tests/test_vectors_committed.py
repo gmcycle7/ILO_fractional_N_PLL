@@ -62,7 +62,7 @@ def _json_semantically_equal(fresh_path, committed_path):
 def test_committed_vectors_match_fresh_emission(tmp_path):
     fresh_dir = tmp_path / "fresh"
     paths = emit_vectors(str(fresh_dir))
-    assert len(paths) == 30  # 15 JSON + 15 CSV
+    assert len(paths) == 32  # 16 JSON + 16 CSV
 
     mismatches = []
     for p in paths:

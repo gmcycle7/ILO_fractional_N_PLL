@@ -1,0 +1,48 @@
+// =============================================================================
+// tb_fractional_phase_scheduler.scs  --  Spectre testbench
+// STATUS: UNRUN. Written without access to Spectre (or any simulator that can
+// compile event-driven Verilog-A); syntax follows the Spectre native netlist
+// language but has never been parsed by Spectre. See validation/README.md.
+//
+// DUT     : ../fractional_phase_scheduler.va  (module fractional_phase_scheduler)
+// Vectors : fps_a -> test_vectors/csv/n3p130_nearest.csv     (alpha 0.13,  nearest)
+//           fps_b -> test_vectors/csv/n3p125_nearest.csv     (alpha 0.125, nearest)
+//           fps_c -> test_vectors/csv/n3p130_ef1_shared.csv  (alpha 0.13,  ef1)
+// Checked : n_int, m_FB, c_FB, R_FB (integer codes, 1 V/LSB, exact after
+//           rounding) and s_ideal / x_frac (1 V/cycle, float) at every edge;
+//           n_int of the LAST row is skipped (Python pads it, see README).
+// Run     : cd model/veriloga/validation && ./run_all.sh fractional_phase_scheduler
+// =============================================================================
+simulator lang=spectre
+global 0
+
+ahdl_include "../fractional_phase_scheduler.va"
+
+// Timing plan -- MUST equal kit_common.TIMING (check_results.py --lint).
+//   tref  : 1/f_ref (4 GHz)            tedge : edge-k crossing at k*tref+tedge
+//   tramp : source rise/fall           nref  : reference cycles (= vector rows)
+parameters tref=250e-12 tedge=10e-12 tramp=1e-12 nref=512 tstop=nref*tref
+
+// 4 GHz reference: 0.5 V crossing of rising edge k at k*tref + tedge.
+// The schedulers use rising edges only (ASSUMPTIONS.md A1).
+vref (ref_clk 0) vsource type=pulse val0=0 val1=1 period=tref \
+        delay=tedge-tramp/2 rise=tramp fall=tramp width=tref/2-tramp
+
+// --- DUT instances (ports: ref_clk n_int m_fb c_fb s_ideal x_frac r_fb) ------
+fps_a (ref_clk fps_a_n_int fps_a_m_fb fps_a_c_fb fps_a_s_ideal fps_a_x_frac \
+        fps_a_r_fb) fractional_phase_scheduler n_int_base=3 alpha=0.13 s0=0 \
+        b_dtc=6 q_mode=1 vth=0.5 v_per_code=1 t_tran=1e-12
+
+fps_b (ref_clk fps_b_n_int fps_b_m_fb fps_b_c_fb fps_b_s_ideal fps_b_x_frac \
+        fps_b_r_fb) fractional_phase_scheduler n_int_base=3 alpha=0.125 s0=0 \
+        b_dtc=6 q_mode=1 vth=0.5 v_per_code=1 t_tran=1e-12
+
+fps_c (ref_clk fps_c_n_int fps_c_m_fb fps_c_c_fb fps_c_s_ideal fps_c_x_frac \
+        fps_c_r_fb) fractional_phase_scheduler n_int_base=3 alpha=0.13 s0=0 \
+        b_dtc=6 q_mode=2 vth=0.5 v_per_code=1 t_tran=1e-12
+
+// s_ideal grows to ~1600 V by the end of the run (debug node, 1 V/cycle) --
+// expected, see the .va header; it is a forced voltage, not a solved node.
+
+// Output format is chosen on the command line (run_all.sh: -format psfbin).
+tran tran stop=tstop errpreset=conservative

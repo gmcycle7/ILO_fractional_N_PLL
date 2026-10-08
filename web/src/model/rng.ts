@@ -9,7 +9,7 @@
  *
  * Named streams (seed = base_seed + offset):
  *     ref:1  vco_w:2  vco_rw:3  dither_fb:4  dither_inj:5
- *     dnl_fb:6  dnl_inj:7  lat:8  pulse:9  dsm_inj:10
+ *     dnl_fb:6  dnl_inj:7  lat:8  pulse:9  dsm_inj:10  map_inj:11
  */
 
 const TWO32 = 4294967296.0; // 2^32
@@ -25,6 +25,7 @@ export const STREAM_OFFSETS = {
   lat: 8,
   pulse: 9,
   dsm_inj: 10,
+  map_inj: 11,
 } as const;
 
 export type StreamName = keyof typeof STREAM_OFFSETS;

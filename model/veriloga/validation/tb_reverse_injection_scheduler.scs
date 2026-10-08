@@ -1,0 +1,74 @@
+// =============================================================================
+// tb_reverse_injection_scheduler.scs  --  Spectre testbench
+// STATUS: UNRUN. Written without access to Spectre (or any simulator that can
+// compile event-driven Verilog-A); never parsed by Spectre. See README.md.
+//
+// DUT     : ../reverse_injection_scheduler.va (module reverse_injection_scheduler)
+//           + ../fractional_phase_scheduler.va for the hookup instance
+// Vectors : rev_d     Mode D, R_FB from PWL           -> n3p130_nearest
+//           rev_chain Mode D, R_FB from fps (hookup)  -> n3p130_nearest
+//           rev_b     Mode A/B ef1, seeded e_q_init   -> n3p130_ef1_independent
+//           rev_lb    Mode A nearest, L=1, look_ahead=0 (bug) -> n3p130_latency_bug
+//           rev_la    Mode A nearest, L=1, look_ahead=1       -> n3p130_lookahead
+//   rev_lb / rev_la reproduce Mode-D vectors with the Mode-A code path: for
+//   the stateless nearest quantizer Q(256*wrap01(-x)) mod 256 equals
+//   (-Q(256*x)) mod 256 except at exact half-LSB ties, of which these 512-row
+//   vectors have none (verified by va_emulator.py / check_results --self-test).
+// Checked : j_INJ, c_INJ, R_INJ (codes) and u_INJ_digital (1 V/cycle) per edge;
+//           stimulus sanity: rfb_pwl and fps_r_fb vs the vector R_FB.
+// Stimulus: build/stim/n3p130_nearest__R_FB.pwl (python3 gen_stimulus.py --all)
+// =============================================================================
+simulator lang=spectre
+global 0
+
+ahdl_include "../reverse_injection_scheduler.va"
+ahdl_include "../fractional_phase_scheduler.va"
+
+// Timing plan -- MUST equal kit_common.TIMING (check_results.py --lint).
+//   tskew: the reverse block is clocked T_REF/4 after the feedback scheduler
+//          so R_FB has settled when it is sampled (VERILOGA_USAGE.md rule 2;
+//          same-edge sampling would be an LRM-undefined race).
+parameters tref=250e-12 tedge=10e-12 tramp=1e-12 tskew=62.5e-12 nref=512 \
+        tstop=nref*tref
+
+vref (ref_clk 0) vsource type=pulse val0=0 val1=1 period=tref \
+        delay=tedge-tramp/2 rise=tramp fall=tramp width=tref/2-tramp
+vref_rev (ref_clk_rev 0) vsource type=pulse val0=0 val1=1 period=tref \
+        delay=tedge+tskew-tramp/2 rise=tramp fall=tramp width=tref/2-tramp
+
+// Committed R_FB stream as a 1 V/LSB PWL; code k ramps at k*tref + 20 ps,
+// i.e. it is settled ~50 ps before the reverse-clock edge at k*tref + 72.5 ps.
+v_rfb (rfb_pwl 0) vsource type=pwl file="build/stim/n3p130_nearest__R_FB.pwl"
+
+// --- Mode D, unit test (ports: ref_clk r_fb_in j c r u) ----------------------
+rev_d (ref_clk_rev rfb_pwl rev_d_j rev_d_c rev_d_r rev_d_u) \
+        reverse_injection_scheduler r_zero=0 shared_mode=1 map_mode=0 \
+        lat_cycles=0 b_dtc=6 v_per_code=1 t_tran=1e-12
+
+// --- Mode D, hookup: feedback scheduler -> reverse scheduler -----------------
+fps (ref_clk fps_n_int fps_m_fb fps_c_fb fps_s_ideal fps_x_frac fps_r_fb) \
+        fractional_phase_scheduler n_int_base=3 alpha=0.13 s0=0 b_dtc=6 \
+        q_mode=1 v_per_code=1 t_tran=1e-12
+rev_chain (ref_clk_rev fps_r_fb rev_chain_j rev_chain_c rev_chain_r rev_chain_u) \
+        reverse_injection_scheduler r_zero=0 shared_mode=1 map_mode=0 \
+        lat_cycles=0 b_dtc=6 v_per_code=1 t_tran=1e-12
+
+// --- Mode A/B: independent ef1 re-quantization (r_fb_in grounded) ------------
+// e_q_init = first 'dsm_inj' mulberry32 draw for base seed 12345 (spec sec.7/12)
+rev_b (ref_clk_rev 0 rev_b_j rev_b_c rev_b_r rev_b_u) \
+        reverse_injection_scheduler r_zero=0 shared_mode=0 map_mode=0 \
+        lat_cycles=0 look_ahead=1 n_int_base=3 alpha=0.13 s0=0 z0=0 b_dtc=6 \
+        q_mode=2 e_q_init=0.7047782763838768 v_per_code=1 t_tran=1e-12
+
+// --- latency L = 1: bug mode and look-ahead ---------------------------------
+rev_lb (ref_clk_rev 0 rev_lb_j rev_lb_c rev_lb_r rev_lb_u) \
+        reverse_injection_scheduler r_zero=0 shared_mode=0 map_mode=0 \
+        lat_cycles=1 look_ahead=0 n_int_base=3 alpha=0.13 s0=0 z0=0 b_dtc=6 \
+        q_mode=1 v_per_code=1 t_tran=1e-12
+rev_la (ref_clk_rev 0 rev_la_j rev_la_c rev_la_r rev_la_u) \
+        reverse_injection_scheduler r_zero=0 shared_mode=0 map_mode=0 \
+        lat_cycles=1 look_ahead=1 n_int_base=3 alpha=0.13 s0=0 z0=0 b_dtc=6 \
+        q_mode=1 v_per_code=1 t_tran=1e-12
+
+// Output format is chosen on the command line (run_all.sh: -format psfbin).
+tran tran stop=tstop errpreset=conservative

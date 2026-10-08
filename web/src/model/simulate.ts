@@ -204,7 +204,16 @@ export function simulate(cfg: SimConfig): SimResult {
 
   // --- computed-domain command streams ---
   const fb = runFeedback(cfg, aId, sId, streams.dither_fb);
-  const inj = runInjection(cfg, xId, fb.R_FB, dtcInj, tapTbl, streams.dither_inj, streams.dsm_inj);
+  const inj = runInjection(
+    cfg,
+    xId,
+    fb.R_FB,
+    dtcInj,
+    tapTbl,
+    streams.dither_inj,
+    streams.dsm_inj,
+    streams.map_inj,
+  );
 
   // --- latency pipeline (section 13) ---
   const lat = applyLatency(cfg, n, streams.lat);
